@@ -12,6 +12,8 @@
 
 [Quick Start](#-quick-start) • [Features](#-features) • [Installation](#-installation) • [Deploy an App](#-deploying-your-first-application) • [Contributing](#-contributing)
 
+📚 **[Full Documentation →](https://temps.sh/docs)**
+
 </div>
 
 ---
@@ -155,20 +157,14 @@ Temps is your **self-hosted deployment platform** that makes it effortless to de
 
 #### **How Deployment Works**
 
-```
-┌─────────────┐      ┌──────────────┐      ┌─────────────┐      ┌──────────────┐
-│  Git Push   │─────▶│ Auto-Detect  │─────▶│ Build       │─────▶│ Deploy       │
-│  (GitHub/   │      │ Framework    │      │ Container   │      │ with TLS     │
-│   GitLab)   │      │              │      │             │      │              │
-└─────────────┘      └──────────────┘      └─────────────┘      └──────────────┘
-                             │                                            │
-                             ▼                                            ▼
-                     ┌──────────────┐                            ┌──────────────┐
-                     │   Next.js    │                            │  Analytics   │
-                     │   Vite       │                            │  Monitoring  │
-                     │   Python     │                            │  Logs        │
-                     │   Custom     │                            │  Errors      │
-                     └──────────────┘                            └──────────────┘
+```mermaid
+flowchart LR
+    A[Git Push<br/>GitHub/GitLab] --> B[Auto-Detect<br/>Framework]
+    B --> C[Build<br/>Container]
+    C --> D[Deploy<br/>with TLS]
+
+    B -.-> E[Next.js / Vite<br/>Python / Custom]
+    D -.-> F[Analytics / Monitoring<br/>Logs / Errors]
 ```
 
 **Deployment is a 5-step process:**
@@ -656,27 +652,27 @@ Temps is built as a **Cargo workspace** with 40+ specialized crates following a 
 
 ### Three-Layer Architecture
 
-```
-┌─────────────────────────────────────────────────────────┐
-│  HTTP Layer (Axum Handlers)                             │
-│  - Request/response handling                            │
-│  - OpenAPI documentation                                │
-│  - Authentication & authorization                       │
-└─────────────────────────────────────────────────────────┘
-                         ↓
-┌─────────────────────────────────────────────────────────┐
-│  Service Layer (Business Logic)                         │
-│  - Domain logic                                         │
-│  - Transaction management                               │
-│  - External service integration                         │
-└─────────────────────────────────────────────────────────┘
-                         ↓
-┌─────────────────────────────────────────────────────────┐
-│  Data Access Layer (Sea-ORM)                            │
-│  - Database queries                                     │
-│  - Entity management                                    │
-│  - Relationship handling                                │
-└─────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph HTTP["HTTP Layer (Axum Handlers)"]
+        H1[Request/response handling]
+        H2[OpenAPI documentation]
+        H3[Authentication & authorization]
+    end
+
+    subgraph Service["Service Layer (Business Logic)"]
+        S1[Domain logic]
+        S2[Transaction management]
+        S3[External service integration]
+    end
+
+    subgraph Data["Data Access Layer (Sea-ORM)"]
+        D1[Database queries]
+        D2[Entity management]
+        D3[Relationship handling]
+    end
+
+    HTTP --> Service --> Data
 ```
 
 ### Key Crates
@@ -1242,7 +1238,7 @@ If you find Temps useful, please consider giving it a star on GitHub! It helps o
 
 ## 📞 Contact
 
-- **Website**: https://temps.dev (coming soon)
+- **Website**: https://temps.sh
 - **GitHub**: https://github.com/gotempsh/temps
 - **Twitter**: [@tempsdev](https://twitter.com/tempsdev) (coming soon)
 - **Email**: hello@temps.dev
@@ -1253,6 +1249,6 @@ If you find Temps useful, please consider giving it a star on GitHub! It helps o
 
 **Built with ❤️ by the Temps community**
 
-[Documentation](https://docs.temps.dev) • [GitHub](https://github.com/gotempsh/temps) • [Community](https://discord.gg/temps)
+[Documentation](https://temps.sh/docs) • [GitHub](https://github.com/gotempsh/temps) • [Community](https://discord.gg/temps)
 
 </div>
