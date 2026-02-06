@@ -204,6 +204,7 @@ export type ApiKeyResponse = {
  */
 export type AppSettings = {
     allow_readonly_external_access?: boolean;
+    demo_mode?: DemoModeSettings;
     disk_space_alert?: DiskSpaceAlertSettings;
     dns_provider?: DnsProviderSettings;
     docker_registry?: DockerRegistrySettings;
@@ -1004,6 +1005,78 @@ export type CreatePlanResponse = {
     validation: ValidationReport;
 };
 
+/**
+ * Request to create a project from a template
+ */
+export type CreateProjectFromTemplateRequest = {
+    /**
+     * Enable automatic deployment on push (defaults to true)
+     */
+    automatic_deploy?: boolean;
+    /**
+     * Environment variables to set (key-value pairs)
+     */
+    environment_variables?: Array<EnvVarInput>;
+    /**
+     * Git provider connection ID (required to create the repository)
+     */
+    git_provider_connection_id: number;
+    /**
+     * Whether to make the repository private (defaults to true)
+     */
+    private?: boolean;
+    /**
+     * Name for the new project
+     */
+    project_name: string;
+    /**
+     * Name for the new repository to create
+     */
+    repository_name: string;
+    /**
+     * Owner/organization for the new repository (defaults to authenticated user)
+     */
+    repository_owner?: string | null;
+    /**
+     * External storage service IDs to attach to the project
+     */
+    storage_service_ids?: Array<number>;
+    /**
+     * Template slug to use as the base
+     */
+    template_slug: string;
+};
+
+/**
+ * Response after creating a project from template
+ */
+export type CreateProjectFromTemplateResponse = {
+    /**
+     * Message with additional info
+     */
+    message: string;
+    /**
+     * ID of the created project
+     */
+    project_id: number;
+    /**
+     * Name of the created project
+     */
+    project_name: string;
+    /**
+     * Slug of the created project
+     */
+    project_slug: string;
+    /**
+     * URL of the created repository
+     */
+    repository_url: string;
+    /**
+     * Template that was used
+     */
+    template_slug: string;
+};
+
 export type CreateProjectRequest = {
     automatic_deploy?: boolean | null;
     build_command?: string | null;
@@ -1040,6 +1113,17 @@ export type CreateProjectRequest = {
     project_type?: string | null;
     repo_name?: string | null;
     repo_owner?: string | null;
+    /**
+     * Source type for deployments
+     *
+     * Determines how the project is deployed:
+     * - **git** (default): Traditional Git-based deployments - source code is pulled, built, and deployed
+     * - **docker_image**: Deploy pre-built Docker images from external registries (DockerHub, GHCR, etc.)
+     * - **static_files**: Deploy pre-built static files uploaded as tar.gz or zip bundles
+     *
+     * For `docker_image` and `static_files` source types, `repo_name` and `repo_owner` are optional.
+     */
+    source_type?: SourceType;
     storage_service_ids: Array<number>;
     use_default_wildcard?: boolean | null;
 };
@@ -1213,6 +1297,47 @@ export type DeleteBlobResponse = {
      * Number of blobs deleted
      */
     deleted: number;
+};
+
+/**
+ * Demo mode settings for allowing unauthenticated access to demo subdomain
+ */
+export type DemoModeSettings = {
+    /**
+     * Optional custom domain for demo mode (defaults to demo.<preview_domain>)
+     * If set, this overrides the default demo.preview_domain pattern
+     */
+    domain?: string | null;
+    /**
+     * Whether demo mode is enabled (disabled by default for security)
+     */
+    enabled?: boolean;
+};
+
+export type DeployFromImageRequest = {
+    /**
+     * Optional external image ID (if already registered)
+     */
+    external_image_id?: number | null;
+    /**
+     * Docker image reference (e.g., "ghcr.io/org/app:v1.0")
+     */
+    image_ref: string;
+    /**
+     * Optional deployment metadata
+     */
+    metadata?: unknown;
+};
+
+export type DeployFromStaticRequest = {
+    /**
+     * Optional deployment metadata
+     */
+    metadata?: unknown;
+    /**
+     * Static bundle ID (required)
+     */
+    static_bundle_id: number;
 };
 
 /**
@@ -1424,6 +1549,15 @@ export type DeploymentMetadata = {
      */
     dockerfilePath?: string | null;
     /**
+     * External image ID (reference to external_images table)
+     */
+    externalImageId?: number | null;
+    /**
+     * External Docker image reference (for docker_image source type)
+     * e.g., "ghcr.io/org/app:v1.0" or "docker.io/myapp:sha-abc123"
+     */
+    externalImageRef?: string | null;
+    /**
      * Number of files in the build output
      */
     fileCount?: number | null;
@@ -1444,29 +1578,24 @@ export type DeploymentMetadata = {
      * ID of the deployment this was rolled back from (if applicable)
      */
     rolledBackFromId?: number | null;
+    /**
+     * Static bundle ID (reference to static_bundles table, for static_files source type)
+     */
+    staticBundleId?: number | null;
+    /**
+     * Static bundle path in blob storage (for static_files source type)
+     */
+    staticBundlePath?: string | null;
 };
 
 export type DeploymentResponse = {
-    branch?: string | null;
-    cancelled_reason?: string | null;
-    commit_author?: string | null;
-    commit_date?: number | null;
-    commit_hash?: string | null;
-    commit_message?: string | null;
-    created_at: number;
-    deployment_config?: null | DeploymentConfigSnapshot;
-    environment: DeploymentEnvironmentResponse;
+    created_at: string;
     environment_id: number;
-    finished_at?: number | null;
     id: number;
-    is_current: boolean;
-    metadata?: null | DeploymentMetadata;
     project_id: number;
-    screenshot_location?: string | null;
-    started_at?: number | null;
-    status: string;
-    tag?: string | null;
-    url: string;
+    slug: string;
+    source_type: string;
+    state: string;
 };
 
 export type DeploymentStateResponse = {
@@ -2232,6 +2361,20 @@ export type EntityResponse = {
 };
 
 /**
+ * Input for environment variable
+ */
+export type EnvVarInput = {
+    /**
+     * Variable name
+     */
+    name: string;
+    /**
+     * Variable value
+     */
+    value: string;
+};
+
+/**
  * Environment variable with masked sensitive values
  */
 export type EnvVarResponse = {
@@ -2241,6 +2384,32 @@ export type EnvVarResponse = {
     is_masked: boolean;
     key: string;
     value: string;
+};
+
+/**
+ * Environment variable template response
+ */
+export type EnvVarTemplateResponse = {
+    /**
+     * Default value if not provided by user
+     */
+    default?: string | null;
+    /**
+     * Description of what this variable is used for
+     */
+    description?: string | null;
+    /**
+     * Example value for documentation
+     */
+    example?: string | null;
+    /**
+     * Name of the environment variable
+     */
+    name: string;
+    /**
+     * Whether this variable is required
+     */
+    required: boolean;
 };
 
 /**
@@ -2649,15 +2818,16 @@ export type ExplorerSupportResponse = {
     supported: boolean;
 };
 
-/**
- * Response for external image operations
- */
 export type ExternalImageResponse = {
+    created_at: string;
     digest?: string | null;
-    id: string;
+    id: number;
     image_ref: string;
+    metadata?: unknown;
+    project_id: number;
     pushed_at: string;
-    size?: number | null;
+    size_bytes?: number | null;
+    tag?: string | null;
 };
 
 /**
@@ -2902,6 +3072,24 @@ export type GitPushEvent = {
      * Repository name
      */
     repo: string;
+};
+
+/**
+ * Git repository reference response
+ */
+export type GitRefResponse = {
+    /**
+     * Path within the repository (for monorepos)
+     */
+    path?: string | null;
+    /**
+     * Git reference (branch, tag, or commit)
+     */
+    ref: string;
+    /**
+     * Git repository URL
+     */
+    url: string;
 };
 
 export type GroupedPageMetric = {
@@ -3507,6 +3695,48 @@ export type ListScansQuery = {
     page_size?: number | null;
 };
 
+/**
+ * Response for listing tags
+ */
+export type ListTagsResponse = {
+    /**
+     * List of available tags
+     */
+    tags: Array<string>;
+    /**
+     * Total number of tags
+     */
+    total: number;
+};
+
+/**
+ * Query parameters for listing templates
+ */
+export type ListTemplatesQuery = {
+    /**
+     * Only return featured templates
+     */
+    featured?: boolean | null;
+    /**
+     * Filter templates by tag
+     */
+    tag?: string | null;
+};
+
+/**
+ * Response for listing templates
+ */
+export type ListTemplatesResponse = {
+    /**
+     * List of templates
+     */
+    templates: Array<TemplateResponse>;
+    /**
+     * Total number of templates
+     */
+    total: number;
+};
+
 export type ListVulnerabilitiesQuery = {
     page?: number | null;
     page_size?: number | null;
@@ -4042,10 +4272,24 @@ export type PaginatedErrorGroupsResponse = {
     pagination: PaginationMeta;
 };
 
+export type PaginatedExternalImagesResponse = {
+    data: Array<ExternalImageResponse>;
+    page: number;
+    page_size: number;
+    total: number;
+};
+
 export type PaginatedProjectList = {
     page: number;
     per_page: number;
     projects: Array<ProjectResponse>;
+    total: number;
+};
+
+export type PaginatedStaticBundlesResponse = {
+    data: Array<StaticBundleResponse>;
+    page: number;
+    page_size: number;
     total: number;
 };
 
@@ -4386,6 +4630,10 @@ export type ProjectResponse = {
     repo_name?: string | null;
     repo_owner?: string | null;
     slug: string;
+    /**
+     * Source type for deployments (git, docker_image, or static_files)
+     */
+    source_type: SourceType;
     updated_at: number;
 };
 
@@ -4800,6 +5048,25 @@ export type RegenerateDsnRequest = {
     base_url?: string | null;
 };
 
+export type RegisterImageRequest = {
+    /**
+     * Image digest (sha256:...)
+     */
+    digest?: string | null;
+    /**
+     * Docker image reference (e.g., "ghcr.io/org/app:v1.0")
+     */
+    image_ref: string;
+    /**
+     * Additional metadata
+     */
+    metadata?: unknown;
+    /**
+     * Image tag
+     */
+    tag?: string | null;
+};
+
 export type RegisterRequest = {
     email: string;
     name: string;
@@ -5199,7 +5466,7 @@ export type ServiceTypeInfo = {
     service_type: ServiceTypeRoute;
 };
 
-export type ServiceTypeRoute = 'mongodb' | 'postgres' | 'redis' | 's3' | 'kv' | 'blob';
+export type ServiceTypeRoute = 'mongodb' | 'postgres' | 'redis' | 's3' | 'kv' | 'blob' | 'rustfs';
 
 export type SesCredentialsRequest = {
     access_key_id: string;
@@ -5669,6 +5936,16 @@ export type SourceBackupIndexResponse = {
 };
 
 /**
+ * Source type for project deployments
+ *
+ * Determines where the deployment artifacts come from:
+ * - `Git`: Source code from a Git repository (traditional flow)
+ * - `DockerImage`: Pre-built Docker image from external registry
+ * - `StaticFiles`: Pre-built static files uploaded as a bundle
+ */
+export type SourceType = 'git' | 'docker_image' | 'static_files';
+
+/**
  * Speed metrics payload for recording web vitals
  */
 export type SpeedMetricsPayload = {
@@ -5724,6 +6001,20 @@ export type SpeedMetricsPayload = {
      * Viewport width in pixels
      */
     viewportWidth?: number | null;
+};
+
+export type StaticBundleResponse = {
+    blob_path: string;
+    checksum?: string | null;
+    content_type: string;
+    created_at: string;
+    format?: string | null;
+    id: number;
+    metadata?: unknown;
+    original_filename?: string | null;
+    project_id: number;
+    size_bytes: number;
+    uploaded_at: string;
 };
 
 /**
@@ -5862,6 +6153,56 @@ export type TagInfo = {
 
 export type TagListResponse = {
     tags: Array<TagInfo>;
+};
+
+/**
+ * Response type for a single template
+ */
+export type TemplateResponse = {
+    /**
+     * Short description
+     */
+    description?: string | null;
+    /**
+     * Environment variables template
+     */
+    env_vars: Array<EnvVarTemplateResponse>;
+    /**
+     * Feature highlights
+     */
+    features: Array<string>;
+    /**
+     * Git repository reference
+     */
+    git: GitRefResponse;
+    /**
+     * URL to template image/icon
+     */
+    image_url?: string | null;
+    /**
+     * Whether the template is featured/promoted
+     */
+    is_featured: boolean;
+    /**
+     * Display name
+     */
+    name: string;
+    /**
+     * Framework/preset to use
+     */
+    preset: string;
+    /**
+     * Required external services
+     */
+    services: Array<string>;
+    /**
+     * Unique identifier for the template (used in URLs)
+     */
+    slug: string;
+    /**
+     * Tags/categories for filtering
+     */
+    tags: Array<string>;
 };
 
 /**
@@ -6077,7 +6418,7 @@ export type UpdateAutomaticDeployRequest = {
  */
 export type UpdateBlobRequest = {
     /**
-     * Docker image to use (e.g., "minio/minio:RELEASE.2025-09-07T16-13-09Z")
+     * Docker image to use (e.g., "rustfs/rustfs:1.0.0-alpha.78")
      */
     docker_image?: string | null;
 };
@@ -9220,6 +9561,10 @@ export type BlobDisableErrors = {
      */
     401: unknown;
     /**
+     * Blob service not enabled
+     */
+    404: unknown;
+    /**
      * Internal server error
      */
     500: unknown;
@@ -10358,6 +10703,10 @@ export type RenewDomainResponses = {
      * Certificate renewal initiated
      */
     200: ProvisionResponse;
+    /**
+     * DNS challenge created - manual action required
+     */
+    202: DomainChallengeResponse;
 };
 
 export type RenewDomainResponse = RenewDomainResponses[keyof RenewDomainResponses];
@@ -13371,6 +13720,14 @@ export type GetIncidentData = {
 
 export type GetIncidentErrors = {
     /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
      * Incident not found
      */
     404: unknown;
@@ -13407,6 +13764,14 @@ export type UpdateIncidentStatusErrors = {
      */
     400: unknown;
     /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
      * Incident not found
      */
     404: unknown;
@@ -13438,6 +13803,14 @@ export type GetIncidentUpdatesData = {
 };
 
 export type GetIncidentUpdatesErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
     /**
      * Incident not found
      */
@@ -13681,6 +14054,10 @@ export type KvDisableErrors = {
      * Unauthorized
      */
     401: unknown;
+    /**
+     * KV service not enabled
+     */
+    404: unknown;
     /**
      * Internal server error
      */
@@ -14103,6 +14480,14 @@ export type DeleteMonitorData = {
 
 export type DeleteMonitorErrors = {
     /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
      * Monitor not found
      */
     404: unknown;
@@ -14134,6 +14519,14 @@ export type GetMonitorData = {
 };
 
 export type GetMonitorErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
     /**
      * Monitor not found
      */
@@ -14184,6 +14577,14 @@ export type GetBucketedStatusErrors = {
      */
     400: unknown;
     /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
      * Monitor not found
      */
     404: unknown;
@@ -14228,6 +14629,14 @@ export type GetCurrentMonitorStatusErrors = {
      * Invalid time parameters
      */
     400: unknown;
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
     /**
      * Monitor not found
      */
@@ -14277,6 +14686,14 @@ export type GetUptimeHistoryErrors = {
      * Invalid time parameters
      */
     400: unknown;
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
     /**
      * Monitor not found
      */
@@ -15052,6 +15469,45 @@ export type GetProjectBySlugResponses = {
 };
 
 export type GetProjectBySlugResponse = GetProjectBySlugResponses[keyof GetProjectBySlugResponses];
+
+export type CreateProjectFromTemplateData = {
+    body: CreateProjectFromTemplateRequest;
+    path?: never;
+    query?: never;
+    url: '/projects/from-template';
+};
+
+export type CreateProjectFromTemplateErrors = {
+    /**
+     * Invalid input
+     */
+    400: unknown;
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
+     * Template not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type CreateProjectFromTemplateResponses = {
+    /**
+     * Project created successfully
+     */
+    201: CreateProjectFromTemplateResponse;
+};
+
+export type CreateProjectFromTemplateResponse2 = CreateProjectFromTemplateResponses[keyof CreateProjectFromTemplateResponses];
 
 export type GetProjectStatisticsData = {
     body?: never;
@@ -17312,6 +17768,90 @@ export type StopContainerResponses = {
 
 export type StopContainerResponse = StopContainerResponses[keyof StopContainerResponses];
 
+export type DeployFromImageData = {
+    body: DeployFromImageRequest;
+    path: {
+        project_id: number;
+        environment_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/environments/{environment_id}/deploy/image';
+};
+
+export type DeployFromImageErrors = {
+    /**
+     * Invalid request
+     */
+    400: unknown;
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
+     * Project or environment not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type DeployFromImageResponses = {
+    /**
+     * Deployment started
+     */
+    202: DeploymentResponse;
+};
+
+export type DeployFromImageResponse = DeployFromImageResponses[keyof DeployFromImageResponses];
+
+export type DeployFromStaticData = {
+    body: DeployFromStaticRequest;
+    path: {
+        project_id: number;
+        environment_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/environments/{environment_id}/deploy/static';
+};
+
+export type DeployFromStaticErrors = {
+    /**
+     * Invalid request
+     */
+    400: unknown;
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
+     * Project, environment, or bundle not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type DeployFromStaticResponses = {
+    /**
+     * Deployment started
+     */
+    202: DeploymentResponse;
+};
+
+export type DeployFromStaticResponse = DeployFromStaticResponses[keyof DeployFromStaticResponses];
+
 export type GetErrorDashboardStatsData = {
     body?: never;
     path: {
@@ -17939,6 +18479,168 @@ export type GetUniqueEventsResponses = {
 
 export type GetUniqueEventsResponse = GetUniqueEventsResponses[keyof GetUniqueEventsResponses];
 
+export type ListExternalImagesData = {
+    body?: never;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+    };
+    query?: {
+        /**
+         * Page number (default: 1)
+         */
+        page?: number;
+        /**
+         * Items per page (default: 20)
+         */
+        page_size?: number;
+    };
+    url: '/projects/{project_id}/external-images';
+};
+
+export type ListExternalImagesErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type ListExternalImagesResponses = {
+    /**
+     * List of external images
+     */
+    200: PaginatedExternalImagesResponse;
+};
+
+export type ListExternalImagesResponse = ListExternalImagesResponses[keyof ListExternalImagesResponses];
+
+export type RegisterExternalImageData = {
+    body: RegisterImageRequest;
+    path: {
+        project_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/external-images';
+};
+
+export type RegisterExternalImageErrors = {
+    /**
+     * Invalid request
+     */
+    400: unknown;
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
+     * Project not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type RegisterExternalImageResponses = {
+    /**
+     * Image registered successfully
+     */
+    201: ExternalImageResponse;
+};
+
+export type RegisterExternalImageResponse = RegisterExternalImageResponses[keyof RegisterExternalImageResponses];
+
+export type DeleteExternalImageData = {
+    body?: never;
+    path: {
+        project_id: number;
+        image_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/external-images/{image_id}';
+};
+
+export type DeleteExternalImageErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
+     * Image not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type DeleteExternalImageResponses = {
+    /**
+     * Image deleted
+     */
+    204: void;
+};
+
+export type DeleteExternalImageResponse = DeleteExternalImageResponses[keyof DeleteExternalImageResponses];
+
+export type GetExternalImageData = {
+    body?: never;
+    path: {
+        project_id: number;
+        image_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/external-images/{image_id}';
+};
+
+export type GetExternalImageErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
+     * Image not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GetExternalImageResponses = {
+    /**
+     * Image details
+     */
+    200: ExternalImageResponse;
+};
+
+export type GetExternalImageResponse = GetExternalImageResponses[keyof GetExternalImageResponses];
+
 export type ListFunnelsData = {
     body?: never;
     path: {
@@ -18341,7 +19043,7 @@ export type GetHourlyVisitsResponses = {
 
 export type GetHourlyVisitsResponse = GetHourlyVisitsResponses[keyof GetHourlyVisitsResponses];
 
-export type ListExternalImagesData = {
+export type ListExternalImages2Data = {
     body?: never;
     path: {
         project_id: number;
@@ -18350,7 +19052,7 @@ export type ListExternalImagesData = {
     url: '/projects/{project_id}/images';
 };
 
-export type ListExternalImagesErrors = {
+export type ListExternalImages2Errors = {
     /**
      * Unauthorized
      */
@@ -18365,14 +19067,14 @@ export type ListExternalImagesErrors = {
     500: unknown;
 };
 
-export type ListExternalImagesResponses = {
+export type ListExternalImages2Responses = {
     /**
      * List of external images
      */
     200: Array<ExternalImageResponse>;
 };
 
-export type ListExternalImagesResponse = ListExternalImagesResponses[keyof ListExternalImagesResponses];
+export type ListExternalImages2Response = ListExternalImages2Responses[keyof ListExternalImages2Responses];
 
 export type PushExternalImageData = {
     body: PushImageRequest;
@@ -18411,7 +19113,7 @@ export type PushExternalImageResponses = {
 
 export type PushExternalImageResponse = PushExternalImageResponses[keyof PushExternalImageResponses];
 
-export type GetExternalImageData = {
+export type GetExternalImage2Data = {
     body?: never;
     path: {
         project_id: number;
@@ -18421,7 +19123,7 @@ export type GetExternalImageData = {
     url: '/projects/{project_id}/images/{image_id}';
 };
 
-export type GetExternalImageErrors = {
+export type GetExternalImage2Errors = {
     /**
      * Unauthorized
      */
@@ -18440,14 +19142,14 @@ export type GetExternalImageErrors = {
     500: unknown;
 };
 
-export type GetExternalImageResponses = {
+export type GetExternalImage2Responses = {
     /**
      * Image details
      */
     200: ExternalImageResponse;
 };
 
-export type GetExternalImageResponse = GetExternalImageResponses[keyof GetExternalImageResponses];
+export type GetExternalImage2Response = GetExternalImage2Responses[keyof GetExternalImage2Responses];
 
 export type ListIncidentsData = {
     body?: never;
@@ -18480,6 +19182,14 @@ export type ListIncidentsData = {
 
 export type ListIncidentsErrors = {
     /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
      * Internal server error
      */
     500: unknown;
@@ -18509,6 +19219,14 @@ export type CreateIncidentErrors = {
      * Invalid request
      */
     400: unknown;
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
     /**
      * Internal server error
      */
@@ -18559,6 +19277,14 @@ export type GetBucketedIncidentsErrors = {
      */
     400: unknown;
     /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
      * Internal server error
      */
     500: unknown;
@@ -18592,6 +19318,14 @@ export type ListMonitorsData = {
 
 export type ListMonitorsErrors = {
     /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
      * Internal server error
      */
     500: unknown;
@@ -18623,6 +19357,14 @@ export type CreateMonitorErrors = {
      * Invalid request
      */
     400: unknown;
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
     /**
      * Internal server error
      */
@@ -18678,6 +19420,127 @@ export type UpdateProjectSettingsResponses = {
 
 export type UpdateProjectSettingsResponse = UpdateProjectSettingsResponses[keyof UpdateProjectSettingsResponses];
 
+export type ListStaticBundlesData = {
+    body?: never;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+    };
+    query?: {
+        /**
+         * Page number (default: 1)
+         */
+        page?: number;
+        /**
+         * Items per page (default: 20)
+         */
+        page_size?: number;
+    };
+    url: '/projects/{project_id}/static-bundles';
+};
+
+export type ListStaticBundlesErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type ListStaticBundlesResponses = {
+    /**
+     * List of static bundles
+     */
+    200: PaginatedStaticBundlesResponse;
+};
+
+export type ListStaticBundlesResponse = ListStaticBundlesResponses[keyof ListStaticBundlesResponses];
+
+export type DeleteStaticBundleData = {
+    body?: never;
+    path: {
+        project_id: number;
+        bundle_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/static-bundles/{bundle_id}';
+};
+
+export type DeleteStaticBundleErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
+     * Bundle not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type DeleteStaticBundleResponses = {
+    /**
+     * Bundle deleted
+     */
+    204: void;
+};
+
+export type DeleteStaticBundleResponse = DeleteStaticBundleResponses[keyof DeleteStaticBundleResponses];
+
+export type GetStaticBundleData = {
+    body?: never;
+    path: {
+        project_id: number;
+        bundle_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/static-bundles/{bundle_id}';
+};
+
+export type GetStaticBundleErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
+     * Bundle not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GetStaticBundleResponses = {
+    /**
+     * Bundle details
+     */
+    200: StaticBundleResponse;
+};
+
+export type GetStaticBundleResponse = GetStaticBundleResponses[keyof GetStaticBundleResponses];
+
 export type GetStatusOverviewData = {
     body?: never;
     path: {
@@ -18696,6 +19559,14 @@ export type GetStatusOverviewData = {
 };
 
 export type GetStatusOverviewErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
     /**
      * Internal server error
      */
@@ -18767,6 +19638,51 @@ export type GetUniqueCountsResponses = {
 };
 
 export type GetUniqueCountsResponse = GetUniqueCountsResponses[keyof GetUniqueCountsResponses];
+
+export type UploadStaticBundleData = {
+    body?: never;
+    path: {
+        project_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/upload/static';
+};
+
+export type UploadStaticBundleErrors = {
+    /**
+     * Invalid request or unsupported format
+     */
+    400: unknown;
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
+     * Project not found
+     */
+    404: unknown;
+    /**
+     * Bundle too large
+     */
+    413: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type UploadStaticBundleResponses = {
+    /**
+     * Bundle uploaded successfully
+     */
+    201: StaticBundleResponse;
+};
+
+export type UploadStaticBundleResponse = UploadStaticBundleResponses[keyof UploadStaticBundleResponses];
 
 export type ListProjectScansData = {
     body?: never;
@@ -20262,6 +21178,105 @@ export type UpdateSettingsResponses = {
 };
 
 export type UpdateSettingsResponse = UpdateSettingsResponses[keyof UpdateSettingsResponses];
+
+export type ListTemplatesData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Filter templates by tag
+         */
+        tag?: string;
+        /**
+         * Only return featured templates
+         */
+        featured?: boolean;
+    };
+    url: '/templates';
+};
+
+export type ListTemplatesErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type ListTemplatesResponses = {
+    /**
+     * List of templates
+     */
+    200: ListTemplatesResponse;
+};
+
+export type ListTemplatesResponse2 = ListTemplatesResponses[keyof ListTemplatesResponses];
+
+export type ListTemplateTagsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/templates/tags';
+};
+
+export type ListTemplateTagsErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type ListTemplateTagsResponses = {
+    /**
+     * List of tags
+     */
+    200: ListTagsResponse;
+};
+
+export type ListTemplateTagsResponse = ListTemplateTagsResponses[keyof ListTemplateTagsResponses];
+
+export type GetTemplateData = {
+    body?: never;
+    path: {
+        /**
+         * Template slug
+         */
+        slug: string;
+    };
+    query?: never;
+    url: '/templates/{slug}';
+};
+
+export type GetTemplateErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Template not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GetTemplateResponses = {
+    /**
+     * Template details
+     */
+    200: TemplateResponse;
+};
+
+export type GetTemplateResponse = GetTemplateResponses[keyof GetTemplateResponses];
 
 export type GetCurrentUserData = {
     body?: never;

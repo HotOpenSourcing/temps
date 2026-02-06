@@ -23,8 +23,10 @@ import { Label } from '@/components/ui/label'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ProjectConfigurator } from '@/components/project/ProjectConfigurator'
 import { RepositoryList } from '@/components/repositories/RepositoryList'
-import type { RepositoryResponse } from '@/api/client/types.gen'
-import { GitBranch, ChevronLeft, Link as LinkIcon, Loader2, Gitlab } from 'lucide-react'
+import { TemplateList, TemplateConfigurator } from '@/components/templates'
+import { ManualProjectConfigurator } from '@/components/project/ManualProjectConfigurator'
+import type { RepositoryResponse, TemplateResponse } from '@/api/client/types.gen'
+import { GitBranch, ChevronLeft, Link as LinkIcon, Loader2, Gitlab, LayoutTemplate, Container } from 'lucide-react'
 import Github from '@/icons/Github'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
@@ -101,6 +103,8 @@ export function GitImportClone({
   >()
   const [selectedRepository, setSelectedRepository] =
     useState<RepositoryResponse | null>(null)
+  const [selectedTemplate, setSelectedTemplate] = useState<TemplateResponse | null>(null)
+  const [showManualDeploy, setShowManualDeploy] = useState(false)
   const [gitUrl, setGitUrl] = useState('')
   const [useGitUrl, setUseGitUrl] = useState(false)
   const [parsedPublicRepo, setParsedPublicRepo] = useState<ParsedGitUrl | null>(null)
@@ -220,6 +224,52 @@ export function GitImportClone({
       // Inline mode: show configurator
       setSelectedRepository(repo)
     }
+  }
+
+  // Show TemplateConfigurator when a template is selected
+  if (selectedTemplate) {
+    return (
+      <div className="space-y-6">
+        <div className="flex items-center gap-4">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setSelectedTemplate(null)}
+          >
+            <ChevronLeft className="h-4 w-4 mr-2" />
+            Back to Templates
+          </Button>
+        </div>
+
+        <TemplateConfigurator
+          template={selectedTemplate}
+          onCancel={() => setSelectedTemplate(null)}
+          onSuccess={onProjectCreated}
+        />
+      </div>
+    )
+  }
+
+  // Show ManualProjectConfigurator when manual deploy mode is selected
+  if (showManualDeploy) {
+    return (
+      <div className="space-y-6">
+        <div className="flex items-center gap-4">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setShowManualDeploy(false)}
+          >
+            <ChevronLeft className="h-4 w-4 mr-2" />
+            Back to Create Project
+          </Button>
+        </div>
+
+        <ManualProjectConfigurator
+          onCancel={() => setShowManualDeploy(false)}
+        />
+      </div>
+    )
   }
 
   // Show ProjectConfigurator when:
@@ -373,18 +423,34 @@ export function GitImportClone({
       <CardHeader className="flex items-center gap-2 pb-3">
         <GitBranch className="h-5 w-5 text-foreground" />
         <CardTitle className="text-xl font-bold">
-          Import Git Repository
+          Create New Project
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
-        <Tabs defaultValue="browse" className="w-full">
-          <TabsList className="grid w-full grid-cols-2">
+        <Tabs defaultValue="templates" className="w-full">
+          <TabsList className="grid w-full grid-cols-4">
+            <TabsTrigger value="templates">
+              <LayoutTemplate className="h-4 w-4 mr-2" />
+              Templates
+            </TabsTrigger>
             <TabsTrigger value="browse">Browse Repositories</TabsTrigger>
             <TabsTrigger value="git-url">
               <LinkIcon className="h-4 w-4 mr-2" />
-              Use Git URL
+              Git URL
+            </TabsTrigger>
+            <TabsTrigger value="manual">
+              <Container className="h-4 w-4 mr-2" />
+              Manual
             </TabsTrigger>
           </TabsList>
+
+          <TabsContent value="templates" className="space-y-4 mt-4">
+            <TemplateList
+              onTemplateSelect={setSelectedTemplate}
+              selectedTemplate={selectedTemplate}
+              showFeaturedFirst={true}
+            />
+          </TabsContent>
 
           <TabsContent value="browse" className="space-y-3 mt-4">
             <div className="flex flex-col gap-2">
@@ -517,6 +583,50 @@ export function GitImportClone({
               }
               return null
             })()}
+          </TabsContent>
+
+          <TabsContent value="manual" className="space-y-4 mt-4">
+            <div className="space-y-4">
+              <div className="text-center py-6">
+                <Container className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
+                <h3 className="text-lg font-semibold mb-2">Manual Deployment</h3>
+                <p className="text-sm text-muted-foreground max-w-md mx-auto mb-4">
+                  Deploy a pre-built Docker image or static files bundle without connecting to a Git repository.
+                </p>
+                <div className="flex flex-col sm:flex-row gap-3 justify-center">
+                  <Button
+                    onClick={() => setShowManualDeploy(true)}
+                    className="gap-2"
+                  >
+                    <Container className="h-4 w-4" />
+                    Configure Manual Deployment
+                  </Button>
+                </div>
+              </div>
+              <div className="border-t pt-4">
+                <h4 className="text-sm font-medium mb-3">Supported deployment methods:</h4>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="flex items-start gap-3 p-3 rounded-lg border bg-card">
+                    <Container className="h-5 w-5 text-primary mt-0.5" />
+                    <div>
+                      <p className="font-medium text-sm">Docker Image</p>
+                      <p className="text-xs text-muted-foreground">
+                        Deploy from DockerHub, GHCR, or any container registry
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-3 p-3 rounded-lg border bg-card">
+                    <LayoutTemplate className="h-5 w-5 text-primary mt-0.5" />
+                    <div>
+                      <p className="font-medium text-sm">Static Files</p>
+                      <p className="text-xs text-muted-foreground">
+                        Upload pre-built static files as tar.gz or zip
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
           </TabsContent>
         </Tabs>
       </CardContent>

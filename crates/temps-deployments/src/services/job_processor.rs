@@ -184,7 +184,7 @@ impl JobProcessorService {
         })
     }
 
-    async fn update_deployment_status(
+    pub async fn update_deployment_status(
         db: &DbConnection,
         deployment_id: i32,
         status: PipelineStatus,
@@ -192,7 +192,7 @@ impl JobProcessorService {
         Self::update_deployment_status_with_message(db, deployment_id, status, None).await
     }
 
-    async fn update_deployment_status_with_message(
+    pub async fn update_deployment_status_with_message(
         db: &DbConnection,
         deployment_id: i32,
         status: PipelineStatus,
@@ -1092,7 +1092,7 @@ mod tests {
         );
         let external_service_manager = Arc::new(temps_providers::ExternalServiceManager::new(
             db.clone(),
-            encryption_service,
+            encryption_service.clone(),
             docker,
         ));
 
@@ -1128,12 +1128,12 @@ mod tests {
             .create_deployment_jobs(deployment.id)
             .await?;
 
-        // Verify jobs were created (nextjs project should create 5 jobs including configure_crons)
+        // Verify jobs were created (nextjs project should create 6 jobs including configure_crons and scan_vulnerabilities)
         let job_ids: Vec<String> = jobs.iter().map(|j| j.job_id.clone()).collect();
         assert_eq!(
             jobs.len(),
-            5,
-            "Expected 5 jobs but got {}: {:?}",
+            6,
+            "Expected 6 jobs but got {}: {:?}",
             jobs.len(),
             job_ids
         );
@@ -1144,6 +1144,7 @@ mod tests {
         assert!(job_ids.contains(&"deploy_container".to_string()));
         assert!(job_ids.contains(&"mark_deployment_complete".to_string()));
         assert!(job_ids.contains(&"configure_crons".to_string()));
+        assert!(job_ids.contains(&"scan_vulnerabilities".to_string()));
 
         // Verify all jobs are in pending state
         for job in &jobs {
@@ -1173,7 +1174,7 @@ mod tests {
         );
         let external_service_manager = Arc::new(temps_providers::ExternalServiceManager::new(
             db.clone(),
-            encryption_service,
+            encryption_service.clone(),
             docker,
         ));
 
@@ -1275,7 +1276,7 @@ mod tests {
         );
         let external_service_manager = Arc::new(temps_providers::ExternalServiceManager::new(
             db.clone(),
-            encryption_service,
+            encryption_service.clone(),
             docker,
         ));
 

@@ -7,7 +7,8 @@ mod commands;
 
 use clap::{Parser, Subcommand};
 use commands::{
-    BackupCommand, ProxyCommand, ResetPasswordCommand, ServeCommand, ServicesCommand, SetupCommand,
+    ApiKeyCommand, BackupCommand, BuildCommand, DeployCommand, DomainCommand, ProxyCommand,
+    ResetPasswordCommand, ServeCommand, ServicesCommand, SetupCommand,
 };
 use tracing_subscriber::{layer::SubscriberExt, Layer};
 
@@ -47,10 +48,19 @@ enum Commands {
     Setup(SetupCommand),
     /// Reset admin user password
     ResetAdminPassword(ResetPasswordCommand),
+    /// Create an API key with a specified role
+    #[command(alias = "create-api-key")]
+    ApiKey(ApiKeyCommand),
     /// Backup management commands
     Backup(BackupCommand),
     /// Manage platform services (KV, Blob)
     Services(ServicesCommand),
+    /// Domain and certificate management
+    Domain(DomainCommand),
+    /// Build a Docker image locally
+    Build(BuildCommand),
+    /// Deploy pre-built images or static files to environments
+    Deploy(DeployCommand),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -143,7 +153,11 @@ fn main() -> anyhow::Result<()> {
         Commands::Proxy(proxy_cmd) => proxy_cmd.execute(),
         Commands::Setup(setup_cmd) => setup_cmd.execute(),
         Commands::ResetAdminPassword(reset_cmd) => reset_cmd.execute(),
+        Commands::ApiKey(api_key_cmd) => api_key_cmd.execute(),
         Commands::Backup(backup_cmd) => backup_cmd.execute(),
         Commands::Services(services_cmd) => services_cmd.execute(),
+        Commands::Domain(domain_cmd) => domain_cmd.execute(),
+        Commands::Build(build_cmd) => build_cmd.execute(),
+        Commands::Deploy(deploy_cmd) => deploy_cmd.execute(),
     }
 }

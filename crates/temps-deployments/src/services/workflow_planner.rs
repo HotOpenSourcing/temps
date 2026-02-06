@@ -447,17 +447,87 @@ impl WorkflowPlanner {
         3000
     }
 
-    /// Plan jobs based on project configuration
-    /// Uses the 3 generic jobs: DownloadRepoJob -> BuildImageJob -> DeployImageJob
+    /// Determine the effective deployment source type for this deployment
+    ///
+    /// For flexible (Manual) projects, this determines the actual deployment method based on:
+    /// 1. Explicit `deployment_source_type` in metadata (set by remote deployment handlers)
+    /// 2. Presence of `external_image_ref` in metadata -> DockerImage
+    /// 3. Presence of `static_bundle_path` in metadata -> StaticFiles
+    /// 4. Has git info (repo_owner, repo_name) -> Git
+    /// 5. Fallback to Manual (will fail at job planning time)
+    ///
+    /// For non-flexible projects, always returns the project's source type.
+    fn determine_deployment_source_type(
+        &self,
+        project: &projects::Model,
+        deployment: &deployments::Model,
+    ) -> temps_entities::source_type::SourceType {
+        use temps_entities::source_type::SourceType;
+
+        // Non-flexible projects: always use project source type
+        if !project.source_type.is_flexible() {
+            return project.source_type;
+        }
+
+        // Manual/Flexible projects: check deployment metadata
+        if let Some(metadata) = &deployment.metadata {
+            // 1. Explicit deployment_source_type (set by remote deployment handlers)
+            if let Some(dtype) = &metadata.deployment_source_type {
+                debug!(
+                    "Using explicit deployment_source_type from metadata: {:?}",
+                    dtype
+                );
+                return *dtype;
+            }
+
+            // 2. Infer from external image reference
+            if metadata.external_image_ref.is_some() {
+                debug!("Inferred DockerImage deployment from external_image_ref in metadata");
+                return SourceType::DockerImage;
+            }
+
+            // 3. Infer from static bundle path
+            if metadata.static_bundle_path.is_some() {
+                debug!("Inferred StaticFiles deployment from static_bundle_path in metadata");
+                return SourceType::StaticFiles;
+            }
+        }
+
+        // 4. Check if project has git info (fallback to Git deployment)
+        if !project.repo_owner.is_empty() && !project.repo_name.is_empty() {
+            debug!("Using Git deployment for Manual project with git info");
+            return SourceType::Git;
+        }
+
+        // 5. No deployment method could be determined
+        // Keep as Manual - will cause a meaningful error in plan_jobs_for_project
+        debug!("Could not determine deployment method for Manual project");
+        SourceType::Manual
+    }
+
+    /// Plan jobs based on project configuration and source type
+    ///
+    /// Job workflows by source type:
+    /// - Git: DownloadRepoJob -> BuildImageJob -> DeployImageJob (or DeployStaticJob)
+    /// - DockerImage: PullExternalImageJob -> DeployImageJob
+    /// - StaticFiles: DeployStaticBundleJob
+    /// - Manual: Determined at runtime based on deployment metadata
     async fn plan_jobs_for_project(
         &self,
         project: &projects::Model,
         environment: &environments::Model,
         deployment: &deployments::Model,
     ) -> anyhow::Result<Vec<JobDefinition>> {
-        let mut jobs = Vec::new();
+        use temps_entities::source_type::SourceType;
 
-        debug!("Planning jobs for project: {}", project.name);
+        // Determine the effective source type for this deployment
+        // For Manual projects, this inspects the deployment metadata
+        let effective_source_type = self.determine_deployment_source_type(project, deployment);
+
+        debug!(
+            "Planning jobs for project: {} (project_source_type: {:?}, effective_source_type: {:?})",
+            project.name, project.source_type, effective_source_type
+        );
 
         // Gather environment variables for the deployment
         let env_vars = self
@@ -467,6 +537,51 @@ impl WorkflowPlanner {
             "📦 Gathered {} environment variables for deployment",
             env_vars.len()
         );
+
+        // Route to appropriate job planning based on effective source type
+        match effective_source_type {
+            SourceType::DockerImage => {
+                self.plan_docker_image_deployment(project, environment, deployment, env_vars)
+                    .await
+            }
+            SourceType::StaticFiles => {
+                self.plan_static_bundle_deployment(project, environment, deployment, env_vars)
+                    .await
+            }
+            SourceType::Git => {
+                self.plan_git_deployment(project, environment, deployment, env_vars)
+                    .await
+            }
+            SourceType::Manual => {
+                // Manual projects without explicit deployment method
+                // This happens when someone tries to deploy a Manual project without specifying
+                // how to deploy (no image, no bundle, no git info)
+                Err(anyhow::anyhow!(
+                    "Cannot determine deployment method for Manual project '{}'. \
+                    Please deploy using one of the following methods:\n\
+                    - Docker image: POST /projects/{}/environments/{}/deploy/image\n\
+                    - Static files: POST /projects/{}/environments/{}/deploy/static\n\
+                    - Configure git repository in project settings for git-based deployments",
+                    project.name,
+                    project.id,
+                    deployment.environment_id,
+                    project.id,
+                    deployment.environment_id
+                ))
+            }
+        }
+    }
+
+    /// Plan jobs for Git-based deployment (traditional workflow)
+    /// DownloadRepoJob -> BuildImageJob -> DeployImageJob (or DeployStaticJob)
+    async fn plan_git_deployment(
+        &self,
+        project: &projects::Model,
+        environment: &environments::Model,
+        deployment: &deployments::Model,
+        env_vars: std::collections::HashMap<String, String>,
+    ) -> anyhow::Result<Vec<JobDefinition>> {
+        let mut jobs = Vec::new();
 
         // Check if git info is available
         let has_git_info = !project.repo_owner.is_empty() && !project.repo_name.is_empty();
@@ -767,7 +882,262 @@ impl WorkflowPlanner {
             debug!("Skipping vulnerability scan job - no git info available");
         }
 
-        info!("Planned {} jobs for project {}", jobs.len(), project.name);
+        info!(
+            "Planned {} jobs for Git-based project {}",
+            jobs.len(),
+            project.name
+        );
+        Ok(jobs)
+    }
+
+    /// Plan jobs for external Docker image deployment
+    /// For registry images: PullExternalImageJob -> DeployImageJob -> MarkDeploymentCompleteJob
+    /// For uploaded images: VerifyLocalImageJob -> DeployImageJob -> MarkDeploymentCompleteJob
+    async fn plan_docker_image_deployment(
+        &self,
+        project: &projects::Model,
+        environment: &environments::Model,
+        deployment: &deployments::Model,
+        env_vars: std::collections::HashMap<String, String>,
+    ) -> anyhow::Result<Vec<JobDefinition>> {
+        let mut jobs = Vec::new();
+
+        // Get external image reference from deployment metadata
+        let external_image_ref = deployment
+            .metadata
+            .as_ref()
+            .and_then(|m| m.external_image_ref.clone())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Docker image deployment requires external_image_ref in deployment metadata"
+                )
+            })?;
+
+        // Check if this is a locally uploaded image (via docker save/load)
+        let is_uploaded_locally = deployment
+            .metadata
+            .as_ref()
+            .map(|m| m.image_uploaded_locally)
+            .unwrap_or(false);
+
+        let uploaded_image_id = deployment
+            .metadata
+            .as_ref()
+            .and_then(|m| m.uploaded_image_id.clone());
+
+        info!(
+            "📦 Planning Docker image deployment for project {} with image: {} (uploaded_locally: {})",
+            project.name, external_image_ref, is_uploaded_locally
+        );
+
+        // Job 1: Either verify local image or pull from registry
+        if is_uploaded_locally {
+            // Image was uploaded via docker save/load - just verify it exists locally
+            debug!(
+                "Image was uploaded locally, using VerifyLocalImageJob instead of PullExternalImageJob"
+            );
+            jobs.push(JobDefinition {
+                job_id: "verify_local_image".to_string(),
+                job_type: "VerifyLocalImageJob".to_string(),
+                name: "Verify Local Image".to_string(),
+                description: Some(format!(
+                    "Verify uploaded image exists locally: {}",
+                    external_image_ref
+                )),
+                dependencies: vec![],
+                job_config: Some(serde_json::json!({
+                    "image_ref": external_image_ref,
+                    "expected_image_id": uploaded_image_id,
+                })),
+                required_for_completion: true,
+            });
+        } else {
+            // Image needs to be pulled from registry
+            jobs.push(JobDefinition {
+                job_id: "pull_external_image".to_string(),
+                job_type: "PullExternalImageJob".to_string(),
+                name: "Pull External Image".to_string(),
+                description: Some(format!(
+                    "Pull and verify external image: {}",
+                    external_image_ref
+                )),
+                dependencies: vec![],
+                job_config: Some(serde_json::json!({
+                    "image_ref": external_image_ref,
+                    "external_image_id": deployment.metadata.as_ref().and_then(|m| m.external_image_id),
+                })),
+                required_for_completion: true,
+            });
+        }
+
+        // Job 2: Deploy container
+        // Dependency is based on whether image was uploaded locally or needs to be pulled
+        let image_job_dependency = if is_uploaded_locally {
+            "verify_local_image".to_string()
+        } else {
+            "pull_external_image".to_string()
+        };
+
+        let exposed_port = self
+            .resolve_exposed_port(environment, project, Some(&external_image_ref))
+            .await;
+
+        let mut deploy_env_vars = env_vars.clone();
+        deploy_env_vars.insert("PORT".to_string(), exposed_port.to_string());
+
+        let replicas = environment
+            .deployment_config
+            .as_ref()
+            .map(|c| c.replicas)
+            .or_else(|| project.deployment_config.as_ref().map(|c| c.replicas))
+            .unwrap_or(1);
+
+        jobs.push(JobDefinition {
+            job_id: "deploy_container".to_string(),
+            job_type: "DeployImageJob".to_string(),
+            name: "Deploy Container".to_string(),
+            description: Some("Deploy the external Docker image".to_string()),
+            dependencies: vec![image_job_dependency],
+            job_config: Some(serde_json::json!({
+                "port": exposed_port,
+                "replicas": replicas,
+                "environment_variables": deploy_env_vars,
+                "image_name": external_image_ref,
+                "use_external_image": true,  // Flag to use image directly without build
+            })),
+            required_for_completion: true,
+        });
+
+        // Job 3: Mark deployment complete
+        jobs.push(JobDefinition {
+            job_id: "mark_deployment_complete".to_string(),
+            job_type: "MarkDeploymentCompleteJob".to_string(),
+            name: "Mark Deployment Complete".to_string(),
+            description: Some(
+                "Mark deployment as complete and update environment routing".to_string(),
+            ),
+            dependencies: vec!["deploy_container".to_string()],
+            job_config: Some(serde_json::json!({
+                "deployment_id": deployment.id
+            })),
+            required_for_completion: true,
+        });
+
+        // Job 4: Take screenshot (optional)
+        let screenshots_enabled = self.config_service.is_screenshots_enabled().await;
+        if screenshots_enabled {
+            jobs.push(JobDefinition {
+                job_id: "take_screenshot".to_string(),
+                job_type: "TakeScreenshotJob".to_string(),
+                name: "Take Screenshot".to_string(),
+                description: Some("Capture screenshot of deployed application".to_string()),
+                dependencies: vec!["mark_deployment_complete".to_string()],
+                job_config: Some(serde_json::json!({
+                    "deployment_id": deployment.id
+                })),
+                required_for_completion: false,
+            });
+        }
+
+        info!(
+            "Planned {} jobs for Docker image deployment of project {}",
+            jobs.len(),
+            project.name
+        );
+        Ok(jobs)
+    }
+
+    /// Plan jobs for static bundle deployment
+    /// DeployStaticBundleJob -> MarkDeploymentCompleteJob
+    async fn plan_static_bundle_deployment(
+        &self,
+        project: &projects::Model,
+        environment: &environments::Model,
+        deployment: &deployments::Model,
+        _env_vars: std::collections::HashMap<String, String>,
+    ) -> anyhow::Result<Vec<JobDefinition>> {
+        let mut jobs = Vec::new();
+
+        // Get static bundle path from deployment metadata
+        let static_bundle_path = deployment
+            .metadata
+            .as_ref()
+            .and_then(|m| m.static_bundle_path.clone())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Static files deployment requires static_bundle_path in deployment metadata"
+                )
+            })?;
+
+        info!(
+            "📦 Planning static bundle deployment for project {} with bundle: {}",
+            project.name, static_bundle_path
+        );
+
+        // Get content type from deployment metadata (for proper extraction)
+        let content_type = deployment
+            .metadata
+            .as_ref()
+            .and_then(|m| m.static_bundle_content_type.clone())
+            .unwrap_or_default();
+
+        // Job 1: Deploy static bundle (extract and deploy to filesystem)
+        jobs.push(JobDefinition {
+            job_id: "deploy_static_bundle".to_string(),
+            job_type: "DeployStaticBundleJob".to_string(),
+            name: "Deploy Static Bundle".to_string(),
+            description: Some(format!(
+                "Extract and deploy static files from bundle: {}",
+                static_bundle_path
+            )),
+            dependencies: vec![],
+            job_config: Some(serde_json::json!({
+                "bundle_path": static_bundle_path,
+                "content_type": content_type,
+                "static_bundle_id": deployment.metadata.as_ref().and_then(|m| m.static_bundle_id),
+                "project_slug": project.slug,
+                "environment_slug": environment.slug,
+                "deployment_slug": deployment.slug,
+            })),
+            required_for_completion: true,
+        });
+
+        // Job 2: Mark deployment complete
+        jobs.push(JobDefinition {
+            job_id: "mark_deployment_complete".to_string(),
+            job_type: "MarkDeploymentCompleteJob".to_string(),
+            name: "Mark Deployment Complete".to_string(),
+            description: Some(
+                "Mark deployment as complete and update environment routing".to_string(),
+            ),
+            dependencies: vec!["deploy_static_bundle".to_string()],
+            job_config: Some(serde_json::json!({
+                "deployment_id": deployment.id
+            })),
+            required_for_completion: true,
+        });
+
+        // Job 3: Take screenshot (optional)
+        let screenshots_enabled = self.config_service.is_screenshots_enabled().await;
+        if screenshots_enabled {
+            jobs.push(JobDefinition {
+                job_id: "take_screenshot".to_string(),
+                job_type: "TakeScreenshotJob".to_string(),
+                name: "Take Screenshot".to_string(),
+                description: Some("Capture screenshot of deployed application".to_string()),
+                dependencies: vec!["mark_deployment_complete".to_string()],
+                job_config: Some(serde_json::json!({
+                    "deployment_id": deployment.id
+                })),
+                required_for_completion: false,
+            });
+        }
+
+        info!(
+            "Planned {} jobs for static bundle deployment of project {}",
+            jobs.len(),
+            project.name
+        );
         Ok(jobs)
     }
 }

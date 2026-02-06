@@ -65,6 +65,46 @@ pub struct DeploymentMetadata {
     /// Custom labels/tags for the deployment
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
+
+    // =========================================================================
+    // Remote deployment fields (for Git-less deployments)
+    // =========================================================================
+    /// External Docker image reference (for docker_image source type)
+    /// e.g., "ghcr.io/org/app:v1.0" or "docker.io/myapp:sha-abc123"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_image_ref: Option<String>,
+
+    /// External image ID (reference to external_images table)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_image_id: Option<i32>,
+
+    /// Static bundle ID (reference to static_bundles table, for static_files source type)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub static_bundle_id: Option<i32>,
+
+    /// Static bundle path in blob storage (for static_files source type)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub static_bundle_path: Option<String>,
+
+    /// Static bundle content type (for proper extraction: application/gzip or application/zip)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub static_bundle_content_type: Option<String>,
+
+    /// Source type for THIS specific deployment (for Manual/flexible projects)
+    /// This allows Manual projects to have deployments via different methods
+    /// (docker_image, static_files, or git) while keeping per-deployment tracking
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployment_source_type: Option<crate::source_type::SourceType>,
+
+    /// Whether the image was uploaded directly (via docker save/load) rather than pulled from registry
+    /// When true, the PullExternalImageJob is skipped since the image is already loaded locally
+    #[serde(default)]
+    pub image_uploaded_locally: bool,
+
+    /// Docker image ID of the locally uploaded image (sha256:...)
+    /// Used to verify the image exists before deployment
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uploaded_image_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq, Serialize, Deserialize)]

@@ -17,7 +17,8 @@ use tracing::{debug, error, info, warn};
 
 use crate::jobs::{
     BuildImageJobBuilder, ConfigureCronsJobBuilder, CronConfigService, DeployImageJobBuilder,
-    DeployStaticJob, DeploymentTarget, DownloadRepoBuilder,
+    DeployStaticBundleJob, DeployStaticJob, DeploymentTarget, DownloadRepoBuilder,
+    PullExternalImageJob, VerifyLocalImageJob,
 };
 use crate::services::DeploymentJobTracker;
 use temps_screenshots::ScreenshotService;
@@ -34,6 +35,7 @@ pub struct WorkflowExecutionService {
     cron_service: Arc<dyn CronConfigService>,
     config_service: Arc<temps_config::ConfigService>,
     screenshot_service: Arc<ScreenshotService>,
+    docker: Arc<bollard::Docker>,
 }
 
 impl WorkflowExecutionService {
@@ -49,6 +51,7 @@ impl WorkflowExecutionService {
         cron_service: Arc<dyn CronConfigService>,
         config_service: Arc<temps_config::ConfigService>,
         screenshot_service: Arc<ScreenshotService>,
+        docker: Arc<bollard::Docker>,
     ) -> Self {
         Self {
             db,
@@ -61,6 +64,7 @@ impl WorkflowExecutionService {
             cron_service,
             config_service,
             screenshot_service,
+            docker,
         }
     }
 
@@ -152,7 +156,16 @@ impl WorkflowExecutionService {
                 vec![]
             };
 
-            workflow_builder = workflow_builder.with_job_and_dependencies(job, dependencies);
+            // Parse _required_for_completion from job config (defaults to true for backwards compatibility)
+            let required_for_completion = db_job
+                .job_config
+                .as_ref()
+                .and_then(|config| config.get("_required_for_completion"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+
+            workflow_builder =
+                workflow_builder.with_job_config(job, dependencies, required_for_completion);
         }
 
         let workflow = workflow_builder.build()?;
@@ -554,7 +567,22 @@ impl WorkflowExecutionService {
                         WorkflowExecutionError::DeploymentNotFound(db_job.deployment_id)
                     })?;
 
-                let job = DeployImageJobBuilder::new()
+                // Check if this is an external image deployment (from remote deployment)
+                let use_external_image = config
+                    .get("use_external_image")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+
+                let external_image_tag = if use_external_image {
+                    config
+                        .get("image_name")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                } else {
+                    None
+                };
+
+                let mut builder = DeployImageJobBuilder::new()
                     .job_id(db_job.job_id.clone())
                     .build_job_id(build_job_id)
                     .target(DeploymentTarget::Docker {
@@ -567,8 +595,15 @@ impl WorkflowExecutionService {
                     .replicas(replicas)
                     .environment_variables(env_variables)
                     .log_id(db_job.log_id.clone())
-                    .log_service(self.log_service.clone())
-                    .build(self.container_deployer.clone())?;
+                    .log_service(self.log_service.clone());
+
+                // If using external image, set the image tag directly (bypasses build job lookup)
+                if let Some(image_tag) = external_image_tag {
+                    debug!("🐳 Using external image tag for deployment: {}", image_tag);
+                    builder = builder.external_image_tag(image_tag);
+                }
+
+                let job = builder.build(self.container_deployer.clone())?;
 
                 Ok(Arc::new(job))
             }
@@ -807,6 +842,114 @@ impl WorkflowExecutionService {
                 )
                 .with_log_id(db_job.log_id.clone())
                 .with_log_service(self.log_service.clone());
+
+                Ok(Arc::new(job))
+            }
+
+            "PullExternalImageJob" => {
+                let config = db_job.job_config.as_ref().ok_or_else(|| {
+                    WorkflowExecutionError::MissingJobConfig(db_job.job_id.clone())
+                })?;
+
+                let image_ref = config
+                    .get("image_ref")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        WorkflowExecutionError::InvalidJobConfig(
+                            "image_ref is required".to_string(),
+                        )
+                    })?
+                    .to_string();
+
+                let external_image_id = config
+                    .get("external_image_id")
+                    .and_then(|v| v.as_i64())
+                    .map(|id| id as i32);
+
+                let job = PullExternalImageJob::new(
+                    db_job.job_id.clone(),
+                    image_ref,
+                    external_image_id,
+                    self.docker.clone(),
+                )
+                .with_log_service(self.log_service.clone(), db_job.log_id.clone());
+
+                Ok(Arc::new(job))
+            }
+
+            "VerifyLocalImageJob" => {
+                let config = db_job.job_config.as_ref().ok_or_else(|| {
+                    WorkflowExecutionError::MissingJobConfig(db_job.job_id.clone())
+                })?;
+
+                let image_ref = config
+                    .get("image_ref")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        WorkflowExecutionError::InvalidJobConfig(
+                            "image_ref is required".to_string(),
+                        )
+                    })?
+                    .to_string();
+
+                let expected_image_id = config
+                    .get("expected_image_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                let job = VerifyLocalImageJob::new(
+                    db_job.job_id.clone(),
+                    image_ref,
+                    expected_image_id,
+                    self.docker.clone(),
+                )
+                .with_log_service(self.log_service.clone(), db_job.log_id.clone());
+
+                Ok(Arc::new(job))
+            }
+
+            "DeployStaticBundleJob" => {
+                let config = db_job.job_config.as_ref().ok_or_else(|| {
+                    WorkflowExecutionError::MissingJobConfig(db_job.job_id.clone())
+                })?;
+
+                let bundle_path = config
+                    .get("bundle_path")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        WorkflowExecutionError::InvalidJobConfig(
+                            "bundle_path is required".to_string(),
+                        )
+                    })?
+                    .to_string();
+
+                let content_type = config
+                    .get("content_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("application/gzip")
+                    .to_string();
+
+                let static_bundle_id = config
+                    .get("static_bundle_id")
+                    .and_then(|v| v.as_i64())
+                    .map(|id| id as i32);
+
+                // Get data directory from config service for local storage
+                let data_dir = self.config_service.data_dir();
+
+                let job = DeployStaticBundleJob::new(
+                    db_job.job_id.clone(),
+                    project.id,
+                    bundle_path,
+                    content_type,
+                    static_bundle_id,
+                    project.slug.clone(),
+                    environment.slug.clone(),
+                    deployment.slug.clone(),
+                    data_dir,
+                    self.static_deployer.clone(),
+                )
+                .with_log_service(self.log_service.clone(), db_job.log_id.clone());
 
                 Ok(Arc::new(job))
             }
@@ -1082,9 +1225,12 @@ impl WorkflowExecutionService {
         Ok(())
     }
 
-    /// Teardown (stop and remove) the previous deployment in an environment
-    /// Returns the container_id of the stopped deployment, if any
+    /// Teardown (stop and remove) ALL previous deployments in an environment
+    /// Returns the container_id of the first stopped container, if any
     /// Excludes the current deployment_id to avoid stopping the newly deployed container
+    ///
+    /// This cleans up ALL old containers for this project/environment, not just the most recent one.
+    /// This prevents orphaned containers from accumulating when deployments fail or cleanup is missed.
     async fn teardown_previous_deployment(
         &self,
         project_id: i32,
@@ -1093,74 +1239,84 @@ impl WorkflowExecutionService {
     ) -> Result<Option<String>, WorkflowExecutionError> {
         use temps_entities::deployment_containers;
 
-        // Find the most recent completed deployment in this environment (excluding the current one)
-        let previous_deployment = deployments::Entity::find()
+        // Find ALL previous deployments in this environment (excluding the current one)
+        // that have active (non-deleted) containers
+        let previous_deployments = deployments::Entity::find()
             .filter(deployments::Column::ProjectId.eq(project_id))
             .filter(deployments::Column::EnvironmentId.eq(environment_id))
-            .filter(deployments::Column::State.eq("completed"))
             .filter(deployments::Column::Id.ne(current_deployment_id)) // Exclude current deployment
-            .order_by_desc(deployments::Column::Id)
-            .one(self.db.as_ref())
+            .all(self.db.as_ref())
             .await?;
 
-        if let Some(deployment) = previous_deployment {
-            // Get all containers for this deployment
+        let mut first_stopped_container_id: Option<String> = None;
+        let mut total_containers_cleaned = 0;
+
+        for deployment in previous_deployments {
+            // Get all non-deleted containers for this deployment
             let containers = deployment_containers::Entity::find()
                 .filter(deployment_containers::Column::DeploymentId.eq(deployment.id))
                 .filter(deployment_containers::Column::DeletedAt.is_null())
                 .all(self.db.as_ref())
                 .await?;
 
-            if !containers.is_empty() {
-                info!(
-                    "Tearing down previous deployment {} ({} containers)",
-                    deployment.id,
-                    containers.len()
-                );
+            if containers.is_empty() {
+                continue;
+            }
 
-                let mut stopped_container_ids = Vec::new();
+            info!(
+                "Tearing down deployment {} ({} containers)",
+                deployment.id,
+                containers.len()
+            );
 
-                for container in containers {
-                    let container_id = container.container_id.clone();
+            for container in containers {
+                let container_id = container.container_id.clone();
 
-                    // Stop and remove the container
-                    match self.container_deployer.stop_container(&container_id).await {
-                        Ok(_) => {
-                            info!("Stopped container {}", container_id);
-                        }
-                        Err(e) => {
-                            warn!("Failed to stop container {}: {}", container_id, e);
-                        }
+                // Stop and remove the container
+                match self.container_deployer.stop_container(&container_id).await {
+                    Ok(_) => {
+                        info!("Stopped container {}", container_id);
                     }
-
-                    match self
-                        .container_deployer
-                        .remove_container(&container_id)
-                        .await
-                    {
-                        Ok(_) => {
-                            info!("Removed container {}", container_id);
-                        }
-                        Err(e) => {
-                            warn!("Failed to remove container {}: {}", container_id, e);
-                        }
+                    Err(e) => {
+                        warn!("Failed to stop container {}: {}", container_id, e);
                     }
-
-                    // Mark container as deleted
-                    use sea_orm::{ActiveModelTrait, Set};
-                    let mut active_container: deployment_containers::ActiveModel = container.into();
-                    active_container.deleted_at = Set(Some(chrono::Utc::now()));
-                    active_container.status = Set(Some("deleted".to_string()));
-                    active_container.update(self.db.as_ref()).await?;
-
-                    stopped_container_ids.push(container_id);
                 }
 
-                return Ok(stopped_container_ids.into_iter().next());
+                match self
+                    .container_deployer
+                    .remove_container(&container_id)
+                    .await
+                {
+                    Ok(_) => {
+                        info!("Removed container {}", container_id);
+                    }
+                    Err(e) => {
+                        warn!("Failed to remove container {}: {}", container_id, e);
+                    }
+                }
+
+                // Mark container as deleted
+                use sea_orm::{ActiveModelTrait, Set};
+                let mut active_container: deployment_containers::ActiveModel = container.into();
+                active_container.deleted_at = Set(Some(chrono::Utc::now()));
+                active_container.status = Set(Some("deleted".to_string()));
+                active_container.update(self.db.as_ref()).await?;
+
+                if first_stopped_container_id.is_none() {
+                    first_stopped_container_id = Some(container_id);
+                }
+                total_containers_cleaned += 1;
             }
         }
 
-        Ok(None)
+        if total_containers_cleaned > 0 {
+            info!(
+                "Cleaned up {} containers from previous deployments",
+                total_containers_cleaned
+            );
+        }
+
+        Ok(first_stopped_container_id)
     }
 }
 
@@ -1653,6 +1809,10 @@ mod tests {
             Arc::new(crate::jobs::NoOpCronConfigService) as Arc<dyn crate::jobs::CronConfigService>;
         let config_service = create_mock_config_service(db.clone());
         let screenshot_service = Arc::new(ScreenshotService::new(config_service.clone()).await?);
+        let docker = Arc::new(
+            bollard::Docker::connect_with_local_defaults()
+                .unwrap_or_else(|_| panic!("Failed to connect to Docker")),
+        );
         let _service = WorkflowExecutionService::new(
             db.clone(),
             queue,
@@ -1664,6 +1824,7 @@ mod tests {
             cron_service,
             config_service,
             screenshot_service,
+            docker,
         );
 
         // Service should be created successfully - compilation itself is the test
@@ -1689,6 +1850,10 @@ mod tests {
             Arc::new(crate::jobs::NoOpCronConfigService) as Arc<dyn crate::jobs::CronConfigService>;
         let config_service = create_mock_config_service(db.clone());
         let screenshot_service = Arc::new(ScreenshotService::new(config_service.clone()).await?);
+        let docker = Arc::new(
+            bollard::Docker::connect_with_local_defaults()
+                .unwrap_or_else(|_| panic!("Failed to connect to Docker")),
+        );
         let service = WorkflowExecutionService::new(
             db.clone(),
             queue,
@@ -1700,6 +1865,7 @@ mod tests {
             cron_service,
             config_service,
             screenshot_service,
+            docker,
         );
 
         // Should fail with NoJobsFound error
@@ -1790,6 +1956,10 @@ mod tests {
             Arc::new(crate::jobs::NoOpCronConfigService) as Arc<dyn crate::jobs::CronConfigService>;
         let config_service = create_mock_config_service(db.clone());
         let screenshot_service = Arc::new(ScreenshotService::new(config_service.clone()).await?);
+        let docker = Arc::new(
+            bollard::Docker::connect_with_local_defaults()
+                .unwrap_or_else(|_| panic!("Failed to connect to Docker")),
+        );
         let service = WorkflowExecutionService::new(
             db.clone(),
             queue,
@@ -1801,6 +1971,7 @@ mod tests {
             cron_service,
             config_service,
             screenshot_service,
+            docker,
         );
 
         // Execute workflow - this will use mock services so should succeed
