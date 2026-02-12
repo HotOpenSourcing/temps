@@ -449,14 +449,14 @@ impl WorkflowPlanner {
 
     /// Determine the effective deployment source type for this deployment
     ///
-    /// For flexible (Manual) projects, this determines the actual deployment method based on:
+    /// Checks deployment metadata first (for all project types), then falls back
+    /// to the project's configured source type:
     /// 1. Explicit `deployment_source_type` in metadata (set by remote deployment handlers)
     /// 2. Presence of `external_image_ref` in metadata -> DockerImage
     /// 3. Presence of `static_bundle_path` in metadata -> StaticFiles
-    /// 4. Has git info (repo_owner, repo_name) -> Git
-    /// 5. Fallback to Manual (will fail at job planning time)
-    ///
-    /// For non-flexible projects, always returns the project's source type.
+    /// 4. Project's own source type (for non-flexible projects)
+    /// 5. Has git info (repo_owner, repo_name) -> Git (for flexible/Manual projects)
+    /// 6. Fallback to Manual (will fail at job planning time)
     fn determine_deployment_source_type(
         &self,
         project: &projects::Model,
@@ -464,12 +464,9 @@ impl WorkflowPlanner {
     ) -> temps_entities::source_type::SourceType {
         use temps_entities::source_type::SourceType;
 
-        // Non-flexible projects: always use project source type
-        if !project.source_type.is_flexible() {
-            return project.source_type;
-        }
-
-        // Manual/Flexible projects: check deployment metadata
+        // Check deployment metadata first (applies to ALL project types)
+        // This allows any project to deploy via Docker image or static bundle
+        // through the remote deployment API, regardless of its configured source type
         if let Some(metadata) = &deployment.metadata {
             // 1. Explicit deployment_source_type (set by remote deployment handlers)
             if let Some(dtype) = &metadata.deployment_source_type {
@@ -493,13 +490,18 @@ impl WorkflowPlanner {
             }
         }
 
-        // 4. Check if project has git info (fallback to Git deployment)
+        // 4. Non-flexible projects: use project source type
+        if !project.source_type.is_flexible() {
+            return project.source_type;
+        }
+
+        // 5. Flexible/Manual projects: check if project has git info
         if !project.repo_owner.is_empty() && !project.repo_name.is_empty() {
             debug!("Using Git deployment for Manual project with git info");
             return SourceType::Git;
         }
 
-        // 5. No deployment method could be determined
+        // 6. No deployment method could be determined
         // Keep as Manual - will cause a meaningful error in plan_jobs_for_project
         debug!("Could not determine deployment method for Manual project");
         SourceType::Manual
@@ -1557,6 +1559,112 @@ mod tests {
                 job.job_id
             );
         }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_git_project_with_docker_image_deployment(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let test_db = TestDatabase::with_migrations().await?;
+        let db = test_db.connection_arc();
+        let log_service = Arc::new(LogService::new(std::env::temp_dir()));
+        let config_service = create_test_config_service(db.clone());
+        let dsn_service = create_test_dsn_service(db.clone());
+        let external_service_manager = create_test_external_service_manager(db.clone());
+        let planner = WorkflowPlanner::new(
+            db.clone(),
+            log_service,
+            external_service_manager,
+            config_service,
+            dsn_service,
+            create_test_encryption_service(),
+        );
+
+        // Create a Git project (default source_type)
+        let project = projects::ActiveModel {
+            name: Set("Git Project".to_string()),
+            slug: Set("git-project".to_string()),
+            repo_owner: Set("test-owner".to_string()),
+            repo_name: Set("test-repo".to_string()),
+            main_branch: Set("main".to_string()),
+            git_provider_connection_id: Set(Some(1)),
+            preset: Set(Preset::NextJs),
+            directory: Set("/".to_string()),
+            created_at: Set(Utc::now()),
+            updated_at: Set(Utc::now()),
+            ..Default::default()
+        };
+        let project = project.insert(db.as_ref()).await?;
+
+        // Verify it's a Git project
+        assert_eq!(
+            project.source_type,
+            temps_entities::source_type::SourceType::Git
+        );
+
+        // Create environment
+        let environment = environments::ActiveModel {
+            project_id: Set(project.id),
+            name: Set("Production".to_string()),
+            slug: Set("production".to_string()),
+            host: Set("test.example.com".to_string()),
+            upstreams: Set(UpstreamList::default()),
+            subdomain: Set("test.example.com".to_string()),
+            created_at: Set(Utc::now()),
+            updated_at: Set(Utc::now()),
+            ..Default::default()
+        };
+        let environment = environment.insert(db.as_ref()).await?;
+
+        // Create deployment with Docker image metadata (simulating deploy_from_image handler)
+        let deployment_metadata = temps_entities::deployments::DeploymentMetadata {
+            external_image_ref: Some("ghcr.io/org/app:v1.0".to_string()),
+            deployment_source_type: Some(temps_entities::source_type::SourceType::DockerImage),
+            ..Default::default()
+        };
+
+        let deployment = deployments::ActiveModel {
+            project_id: Set(project.id),
+            environment_id: Set(environment.id),
+            slug: Set("test-docker-deploy".to_string()),
+            state: Set("pending".to_string()),
+            metadata: Set(Some(deployment_metadata)),
+            image_name: Set(Some("ghcr.io/org/app:v1.0".to_string())),
+            created_at: Set(Utc::now()),
+            updated_at: Set(Utc::now()),
+            ..Default::default()
+        };
+        let deployment = deployment.insert(db.as_ref()).await?;
+
+        let jobs = planner.create_deployment_jobs(deployment.id).await?;
+
+        let job_ids: Vec<String> = jobs.iter().map(|j| j.job_id.clone()).collect();
+
+        // Should use Docker image pipeline, NOT Git pipeline
+        assert!(
+            job_ids.contains(&"pull_external_image".to_string()),
+            "Expected pull_external_image job for Docker image deployment, got: {:?}",
+            job_ids
+        );
+        assert!(
+            job_ids.contains(&"deploy_container".to_string()),
+            "Expected deploy_container job"
+        );
+        assert!(
+            job_ids.contains(&"mark_deployment_complete".to_string()),
+            "Expected mark_deployment_complete job"
+        );
+
+        // Should NOT contain Git pipeline jobs
+        assert!(
+            !job_ids.contains(&"download_repo".to_string()),
+            "Should NOT contain download_repo for Docker image deployment"
+        );
+        assert!(
+            !job_ids.contains(&"build_image".to_string()),
+            "Should NOT contain build_image for Docker image deployment"
+        );
 
         Ok(())
     }
