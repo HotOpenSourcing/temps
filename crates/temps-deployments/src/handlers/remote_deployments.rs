@@ -342,14 +342,14 @@ pub async fn deploy_from_image(
             .with_detail("Environment does not belong to this project"));
     }
 
-    // 3. Generate deployment slug
+    // 3. Generate deployment slug using environment slug
     let deployment_number = deployments::Entity::find()
         .filter(deployments::Column::ProjectId.eq(project_id))
         .count(state.db.as_ref())
         .await
         .unwrap_or(0)
         + 1;
-    let deployment_slug = format!("{}-{}", project.slug, deployment_number);
+    let deployment_slug = format!("{}-{}", environment.slug, deployment_number);
 
     // 4. Create deployment metadata (track deployment source type for flexible projects)
     let deployment_metadata = DeploymentMetadata {
@@ -600,14 +600,14 @@ pub async fn deploy_from_static(
             .with_detail("Static bundle does not belong to this project"));
     }
 
-    // 4. Generate deployment slug
+    // 4. Generate deployment slug using environment slug
     let deployment_number = deployments::Entity::find()
         .filter(deployments::Column::ProjectId.eq(project_id))
         .count(state.db.as_ref())
         .await
         .unwrap_or(0)
         + 1;
-    let deployment_slug = format!("{}-{}", project.slug, deployment_number);
+    let deployment_slug = format!("{}-{}", environment.slug, deployment_number);
 
     // 5. Create deployment metadata (track deployment source type for flexible projects)
     let deployment_metadata = DeploymentMetadata {
