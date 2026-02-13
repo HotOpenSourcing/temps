@@ -2859,7 +2859,7 @@ WHERE project_id = $1
                 COUNT(*) FILTER (WHERE e.is_entry = true) as entry_count,
                 COUNT(*) FILTER (WHERE e.is_exit = true) as exit_count,
                 COUNT(*) FILTER (WHERE e.is_bounce = true) as bounce_count,
-                AVG(e.time_on_page) FILTER (WHERE e.time_on_page IS NOT NULL AND e.time_on_page > 0) as avg_time_on_page
+                (AVG(e.time_on_page) FILTER (WHERE e.time_on_page IS NOT NULL AND e.time_on_page > 0))::float8 as avg_time_on_page
             FROM events e
             WHERE {}
             GROUP BY e.page_path
