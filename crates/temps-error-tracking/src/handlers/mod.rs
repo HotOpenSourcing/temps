@@ -1,2 +1,4 @@
 pub mod handler;
+pub mod sentry_compat_handlers;
+pub mod source_map_handlers;
 pub mod types;

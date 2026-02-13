@@ -118,6 +118,8 @@ pub struct ImageInfo {
     pub tags: Vec<String>,
     /// Creation timestamp
     pub created: Option<String>,
+    /// Working directory (WORKDIR from Dockerfile)
+    pub working_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

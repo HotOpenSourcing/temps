@@ -234,6 +234,7 @@ pub fn setup_proxy_server(
         config_service,
         ip_access_control_service,
         challenge_service,
+        proxy_config.disable_https_redirect,
     );
 
     // Setup Pingora server with explicit configuration
@@ -363,6 +364,7 @@ pub fn create_proxy_service(
         config_service,
         ip_access_control_service,
         challenge_service,
+        proxy_config.disable_https_redirect,
     );
 
     Ok(lb)

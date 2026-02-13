@@ -112,6 +112,8 @@ const baseNavItems: NavItem[] = [
       { title: 'Visitors', url: 'analytics/visitors' },
       { title: 'Pages', url: 'analytics/pages' },
       { title: 'Replays', url: 'analytics/replays' },
+      { title: 'Journey', url: 'analytics/journey' },
+      { title: 'Globe', url: 'analytics/globe' },
       { title: 'Funnels', url: 'analytics/funnels' },
       { title: 'Speed Insights', url: 'speed' },
       { title: 'Setup', url: 'analytics/setup' },

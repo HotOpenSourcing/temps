@@ -5,6 +5,7 @@ import {
   getVisitorSessions2Options,
   getVisitorSessionsOptions,
 } from '@/api/client/@tanstack/react-query.gen'
+import { VisitorJourney } from './VisitorJourney'
 import { ProjectResponse } from '@/api/client/types.gen'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -187,8 +188,8 @@ export function VisitorDetail({ project, visitorId }: VisitorDetailProps) {
   const [enrichJsonValue, setEnrichJsonValue] = React.useState('')
   const [enrichJsonError, setEnrichJsonError] = React.useState<string | null>(null)
 
-  // Get the active tab from URL or default to 'sessions'
-  const activeTab = searchParams.get('tab') || 'sessions'
+  // Get the active tab from URL or default to 'journey'
+  const activeTab = searchParams.get('tab') || 'journey'
 
   // Update URL when tab changes
   const handleTabChange = (value: string) => {
@@ -557,9 +558,13 @@ export function VisitorDetail({ project, visitorId }: VisitorDetailProps) {
         onValueChange={handleTabChange}
         className="space-y-4"
       >
-        <TabsList className="grid w-full max-w-md grid-cols-2">
-          <TabsTrigger value="sessions" className="flex items-center gap-2">
+        <TabsList className="grid w-full max-w-2xl grid-cols-3">
+          <TabsTrigger value="journey" className="flex items-center gap-2">
             <Activity className="h-4 w-4" />
+            Journey
+          </TabsTrigger>
+          <TabsTrigger value="sessions" className="flex items-center gap-2">
+            <Clock className="h-4 w-4" />
             Sessions
             {sessions && (
               <Badge variant="secondary" className="ml-1">
@@ -577,6 +582,10 @@ export function VisitorDetail({ project, visitorId }: VisitorDetailProps) {
             )}
           </TabsTrigger>
         </TabsList>
+
+        <TabsContent value="journey" className="space-y-4">
+          <VisitorJourney project={project} visitorId={visitorId} />
+        </TabsContent>
 
         <TabsContent value="sessions" className="space-y-4">
           <Card>

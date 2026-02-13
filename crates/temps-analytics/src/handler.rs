@@ -31,18 +31,21 @@ pub struct AppState {
         get_visitor_stats,
         enrich_visitor,
         get_visitor_sessions,
+        get_visitor_journey,
         get_session_details,
         get_session_events,
         get_session_logs,
         has_analytics_events,
         get_page_paths,
         get_page_path_detail,
+        get_page_path_visitors,
         get_active_visitors,
         get_live_visitors_list,
         get_page_hourly_sessions,
         get_visitor_by_id,
         get_visitor_by_guid,
         get_general_stats,
+        get_page_flow,
     ),
     components(schemas(
         AnalyticsMetrics,
@@ -113,9 +116,22 @@ pub struct AppState {
         // Page path detail types
         PagePathDetailQuery,
         PagePathDetailResponse,
+        PagePathVisitorsQuery,
+        PagePathVisitorsResponse,
+        PageVisitorSession,
         PageActivityBucket,
         PageCountryStats,
         PageReferrerStats,
+        VisitorJourneyResponse,
+        JourneySession,
+        JourneyEvent,
+        VisitorJourneyQuery,
+        // Page flow / journey types
+        PageFlowQuery,
+        PageFlowResponse,
+        PageFlowEntry,
+        PageTransition,
+        DropOffPoint,
     )),
     info(
         title = "Analytics API",
@@ -148,6 +164,10 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
             "/analytics/visitors/{visitor_id}/sessions",
             get(get_visitor_sessions),
         )
+        .route(
+            "/analytics/visitors/{visitor_id}/journey",
+            get(get_visitor_journey),
+        )
         .route("/analytics/sessions/{session_id}", get(get_session_details))
         .route(
             "/analytics/sessions/{session_id}/events",
@@ -160,6 +180,7 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         .route("/analytics/has-events", get(has_analytics_events))
         .route("/analytics/page-paths", get(get_page_paths))
         .route("/analytics/page-path-detail", get(get_page_path_detail))
+        .route("/analytics/page-path-visitors", get(get_page_path_visitors))
         .route("/analytics/active-visitors", get(get_active_visitors))
         .route("/analytics/live-visitors", get(get_live_visitors_list))
         .route(
@@ -171,6 +192,7 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
             "/analytics/visitors/guid/{visitor_id}",
             get(get_visitor_by_guid),
         )
+        .route("/analytics/page-flow", get(get_page_flow))
 }
 
 #[utoipa::path(
@@ -419,6 +441,45 @@ pub async fn get_visitor_sessions(
         .await
     {
         Ok(Some(visitor_sessions)) => Ok(Json(visitor_sessions)),
+        Ok(None) => Err(bad_request().detail("Visitor not found").build()),
+        Err(e) => Err(handle_analytics_error(e)),
+    }
+}
+
+/// Get the complete visitor journey: all events across all sessions, grouped by session
+#[utoipa::path(
+    tag = "Analytics",
+    get,
+    path = "/analytics/visitors/{visitor_id}/journey",
+    params(
+        ("visitor_id" = i32, Path, description = "Visitor numeric ID"),
+        ("project_id" = i32, Query, description = "Project ID"),
+        ("limit_sessions" = Option<i32>, Query, description = "Maximum number of sessions to return (default: 50)"),
+    ),
+    responses(
+        (status = 200, description = "Successfully retrieved visitor journey", body = VisitorJourneyResponse),
+        (status = 404, description = "Visitor not found"),
+        (status = 400, description = "Invalid parameters"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(
+        ("bearer_auth" = [])
+    )
+)]
+pub async fn get_visitor_journey(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    axum::extract::Path(visitor_id): axum::extract::Path<i32>,
+    Query(query): Query<VisitorJourneyQuery>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, AnalyticsRead);
+
+    match app_state
+        .analytics_service
+        .get_visitor_journey(visitor_id, query.project_id, query.limit_sessions)
+        .await
+    {
+        Ok(Some(journey)) => Ok(Json(journey)),
         Ok(None) => Err(bad_request().detail("Visitor not found").build()),
         Err(e) => Err(handle_analytics_error(e)),
     }
@@ -737,6 +798,59 @@ pub async fn get_page_paths(
             };
             Ok(Json(response))
         }
+        Err(e) => Err(handle_analytics_error(e)),
+    }
+}
+
+/// Get individual visitor sessions for a specific page path
+#[utoipa::path(
+    tag = "Analytics",
+    get,
+    path = "/analytics/page-path-visitors",
+    params(
+        ("page_path" = String, Query, description = "The page path to get visitors for (URL-encoded)"),
+        ("project_id" = i32, Query, description = "Project ID"),
+        ("environment_id" = Option<i32>, Query, description = "Environment ID (optional)"),
+        ("start_date" = String, Query, description = "Start date in ISO 8601 format"),
+        ("end_date" = String, Query, description = "End date in ISO 8601 format"),
+        ("page" = Option<u64>, Query, description = "Page number (1-based, default: 1)"),
+        ("per_page" = Option<u64>, Query, description = "Items per page (default: 50, max: 100)")
+    ),
+    responses(
+        (status = 200, description = "Successfully retrieved page path visitors", body = PagePathVisitorsResponse),
+        (status = 400, description = "Invalid parameters"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(
+        ("bearer_auth" = [])
+    )
+)]
+pub async fn get_page_path_visitors(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    Query(query): Query<requests::PagePathVisitorsQuery>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, AnalyticsRead);
+
+    let start_date: UtcDateTime = query.start_date.into();
+    let end_date: UtcDateTime = query.end_date.into();
+    let page = query.page.unwrap_or(1);
+    let per_page = query.per_page.unwrap_or(50).min(100);
+
+    match app_state
+        .analytics_service
+        .get_page_path_visitors(
+            query.project_id,
+            &query.page_path,
+            start_date,
+            end_date,
+            query.environment_id,
+            page,
+            per_page,
+        )
+        .await
+    {
+        Ok(result) => Ok(Json(result)),
         Err(e) => Err(handle_analytics_error(e)),
     }
 }
@@ -1116,6 +1230,57 @@ pub async fn get_general_stats(
         .await
     {
         Ok(stats) => Ok(Json(stats)),
+        Err(e) => Err(handle_analytics_error(e)),
+    }
+}
+
+/// Get page flow analytics: entry pages, exit pages, drop-off points, and page transitions
+#[utoipa::path(
+    tag = "Analytics",
+    get,
+    path = "/analytics/page-flow",
+    params(
+        ("project_id" = i32, Query, description = "Project ID"),
+        ("environment_id" = Option<i32>, Query, description = "Environment ID (optional)"),
+        ("start_date" = String, Query, description = "Start date in ISO 8601 format"),
+        ("end_date" = String, Query, description = "End date in ISO 8601 format"),
+        ("limit" = Option<i32>, Query, description = "Max entry/exit pages to return (default: 20, max: 100)"),
+        ("transitions_limit" = Option<i32>, Query, description = "Max page transitions to return (default: 50, max: 200)"),
+        ("min_views_for_dropoff" = Option<i32>, Query, description = "Minimum views for drop-off analysis (default: 5)")
+    ),
+    responses(
+        (status = 200, description = "Successfully retrieved page flow analytics", body = PageFlowResponse),
+        (status = 400, description = "Invalid parameters"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(
+        ("bearer_auth" = [])
+    )
+)]
+pub async fn get_page_flow(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    Query(query): Query<requests::PageFlowQuery>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, AnalyticsRead);
+
+    let start_date: UtcDateTime = query.start_date.into();
+    let end_date: UtcDateTime = query.end_date.into();
+
+    match app_state
+        .analytics_service
+        .get_page_flow(
+            query.project_id,
+            start_date,
+            end_date,
+            query.environment_id,
+            query.limit,
+            query.transitions_limit,
+            query.min_views_for_dropoff,
+        )
+        .await
+    {
+        Ok(result) => Ok(Json(result)),
         Err(e) => Err(handle_analytics_error(e)),
     }
 }

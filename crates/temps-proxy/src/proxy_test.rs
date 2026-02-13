@@ -287,6 +287,7 @@ pub mod proxy_tests {
             config_service,
             ip_access_control_service,
             challenge_service,
+            false,
         );
 
         // Test that the LoadBalancer can resolve the upstream
@@ -781,6 +782,7 @@ pub mod proxy_tests {
             config_service,
             ip_access_control_service,
             challenge_service,
+            false,
         );
 
         // Test 1: Verify static_dir_location is set

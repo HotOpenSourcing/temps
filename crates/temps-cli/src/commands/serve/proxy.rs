@@ -19,6 +19,7 @@ pub fn start_proxy_server(
     database_url: String,
     route_table: Arc<temps_proxy::CachedPeerTable>,
     config: Arc<ServerConfig>,
+    disable_https_redirect: bool,
 ) -> anyhow::Result<()> {
     let console_address = config.console_address.clone();
     // Create tokio runtime to fetch preview_domain from config service
@@ -53,12 +54,17 @@ pub fn start_proxy_server(
         console_address,
         tls_address,
         preview_domain,
+        disable_https_redirect,
     };
 
     info!(
         "Starting proxy server with preview_domain: {:?}",
         proxy_config.preview_domain
     );
+
+    if disable_https_redirect {
+        warn!("HTTPS redirect is disabled - HTTP requests will NOT be redirected to HTTPS");
+    }
 
     // Note: Route table is now created and listener is started in serve/mod.rs
     // The same instance is shared between console API and proxy server

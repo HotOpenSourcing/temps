@@ -3,8 +3,9 @@ use serde_json;
 use temps_core::UtcDateTime;
 
 use crate::types::responses::{
-    EnrichVisitorResponse, EventCount, SessionDetails, SessionEventsResponse, SessionLogsResponse,
-    VisitorDetails, VisitorSessionsResponse, VisitorsResponse,
+    EnrichVisitorResponse, EventCount, PageFlowResponse, SessionDetails, SessionEventsResponse,
+    SessionLogsResponse, VisitorDetails, VisitorJourneyResponse, VisitorSessionsResponse,
+    VisitorsResponse,
 };
 use crate::types::{AnalyticsError, Page};
 
@@ -70,6 +71,14 @@ pub trait Analytics: Send + Sync {
         visitor_id: i32,
         limit: Option<i32>,
     ) -> Result<Option<VisitorSessionsResponse>, AnalyticsError>;
+
+    /// Get the complete visitor journey: all events across all sessions, grouped by session
+    async fn get_visitor_journey(
+        &self,
+        visitor_id: i32,
+        project_id: i32,
+        limit_sessions: Option<i32>,
+    ) -> Result<Option<VisitorJourneyResponse>, AnalyticsError>;
 
     /// Get session details
     async fn get_session_details(
@@ -190,6 +199,30 @@ pub trait Analytics: Send + Sync {
         start_date: UtcDateTime,
         end_date: UtcDateTime,
     ) -> Result<crate::types::responses::GeneralStatsResponse, AnalyticsError>;
+
+    /// Get individual visitor sessions for a specific page path
+    async fn get_page_path_visitors(
+        &self,
+        project_id: i32,
+        page_path: &str,
+        start_date: UtcDateTime,
+        end_date: UtcDateTime,
+        environment_id: Option<i32>,
+        page: u64,
+        per_page: u64,
+    ) -> Result<crate::types::responses::PagePathVisitorsResponse, AnalyticsError>;
+
+    /// Get page flow analytics: entry pages, exit pages, drop-off points, and transitions
+    async fn get_page_flow(
+        &self,
+        project_id: i32,
+        start_date: UtcDateTime,
+        end_date: UtcDateTime,
+        environment_id: Option<i32>,
+        limit: Option<i32>,
+        transitions_limit: Option<i32>,
+        min_views_for_dropoff: Option<i32>,
+    ) -> Result<PageFlowResponse, AnalyticsError>;
 
     /// Get detailed analytics for a specific page path
     /// Returns visitors, page views, activity over time, geographic distribution, and referrers

@@ -134,6 +134,14 @@ impl TempsPlugin for DeploymentsPlugin {
                 docker,
             ));
 
+            // Wire SourceMapService for auto-capture during deployments (optional)
+            if let Some(source_map_service) =
+                context.get_service::<temps_error_tracking::services::SourceMapService>()
+            {
+                workflow_execution_service.set_source_map_service(source_map_service);
+                tracing::debug!("Source map service wired into workflow execution service");
+            }
+
             // Get ExternalServiceManager for accessing external service env vars
             let external_service_manager =
                 context.require_service::<temps_providers::ExternalServiceManager>();

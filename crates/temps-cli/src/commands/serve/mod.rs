@@ -51,6 +51,10 @@ pub struct ServeCommand {
     /// Templates are merged with the bundled defaults; validation errors will prevent startup
     #[arg(long = "templates", env = "TEMPS_ADDITIONAL_TEMPLATES")]
     pub additional_templates: Vec<PathBuf>,
+
+    /// Disable HTTP-to-HTTPS redirect (useful for local development without TLS)
+    #[arg(long, env = "TEMPS_DISABLE_HTTPS_REDIRECT")]
+    pub disable_https_redirect: bool,
 }
 
 impl ServeCommand {
@@ -235,6 +239,7 @@ impl ServeCommand {
             self.database_url.clone(),
             route_table,
             serve_config.clone(),
+            self.disable_https_redirect,
         )
     }
 }

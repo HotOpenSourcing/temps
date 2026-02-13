@@ -145,6 +145,8 @@ pub struct VisitorInfo {
     pub country_code: Option<String>,
     pub timezone: Option<String>,
     pub is_eu: Option<bool>,
+    /// Most recent page path visited by this visitor
+    pub current_page: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -478,6 +480,8 @@ pub struct LiveVisitorInfo {
     pub country_code: Option<String>,
     pub timezone: Option<String>,
     pub is_eu: Option<bool>,
+    /// Most recent page path visited by this visitor
+    pub current_page: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -527,6 +531,59 @@ pub struct PageReferrerStats {
     pub percentage: f64,
 }
 
+/// Individual visitor session that viewed a specific page
+#[derive(Debug, Serialize, Deserialize, ToSchema, Clone)]
+pub struct PageVisitorSession {
+    /// Visitor numeric ID
+    pub visitor_id: i32,
+    /// Visitor UUID
+    pub visitor_uuid: String,
+    /// Session ID
+    pub session_id: Option<String>,
+    /// When the page was viewed
+    #[schema(value_type = String, format = "date-time")]
+    pub viewed_at: UtcDateTime,
+    /// Time spent on this page in seconds
+    pub time_on_page: Option<i32>,
+    /// Whether this was the entry page for the session
+    pub is_entry: bool,
+    /// Whether this was the exit page for the session
+    pub is_exit: bool,
+    /// Whether this was a bounce
+    pub is_bounce: bool,
+    /// Page number in session flow
+    pub session_page_number: Option<i32>,
+    /// Referrer URL
+    pub referrer: Option<String>,
+    /// Browser name
+    pub browser: Option<String>,
+    /// Operating system
+    pub operating_system: Option<String>,
+    /// Device type (Desktop, Mobile, Tablet)
+    pub device_type: Option<String>,
+    /// Visitor's city
+    pub city: Option<String>,
+    /// Visitor's country
+    pub country: Option<String>,
+    /// Visitor's country code
+    pub country_code: Option<String>,
+}
+
+/// Response for page path visitors endpoint
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct PagePathVisitorsResponse {
+    /// The page path
+    pub page_path: String,
+    /// Total number of visitor sessions matching the query
+    pub total_count: i64,
+    /// Current page number
+    pub page: u64,
+    /// Items per page
+    pub per_page: u64,
+    /// Individual visitor sessions
+    pub sessions: Vec<PageVisitorSession>,
+}
+
 /// Detailed analytics response for a specific page path
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct PagePathDetailResponse {
@@ -552,4 +609,164 @@ pub struct PagePathDetailResponse {
     pub referrers: Vec<PageReferrerStats>,
     /// Bucket interval used for time series ('hour', 'day', etc.)
     pub bucket_interval: String,
+}
+
+// ============================================================================
+// Visitor Journey types
+// ============================================================================
+
+/// A single event in the visitor journey timeline
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct JourneyEvent {
+    /// Event ID
+    pub id: i64,
+    /// Event type: "page_view", "page_leave", "custom", "web_vitals"
+    pub event_type: String,
+    /// Resolved event name (event_name for custom events, event_type for system events)
+    pub event_name: String,
+    /// When the event occurred
+    #[schema(value_type = String, format = "date-time")]
+    pub occurred_at: UtcDateTime,
+    /// Page path where the event happened
+    pub page_path: Option<String>,
+    /// Page title (if available)
+    pub page_title: Option<String>,
+    /// Referrer URL for this event
+    pub referrer: Option<String>,
+    /// Time spent on page in seconds (computed, not from column)
+    pub time_on_page: Option<i32>,
+    /// Whether this is the entry page of the session
+    pub is_entry: bool,
+    /// Whether this is the exit page of the session
+    pub is_exit: bool,
+    /// Whether this was a bounce
+    pub is_bounce: bool,
+    /// Page number within the session (1-indexed)
+    pub session_page_number: Option<i32>,
+    /// Scroll depth percentage (0-100)
+    pub scroll_depth: Option<i32>,
+    /// Custom event properties (for custom events)
+    pub event_data: Option<serde_json::Value>,
+}
+
+/// A session within the visitor journey, grouping events
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct JourneySession {
+    /// Session internal ID
+    pub session_id: i32,
+    /// When the session started
+    #[schema(value_type = String, format = "date-time")]
+    pub started_at: UtcDateTime,
+    /// When the session ended
+    #[schema(value_type = Option<String>, format = "date-time")]
+    pub ended_at: Option<UtcDateTime>,
+    /// Session duration in seconds
+    pub duration_seconds: i64,
+    /// Number of page views in this session
+    pub page_views: i64,
+    /// Total events in this session
+    pub events_count: i64,
+    /// Entry page path
+    pub entry_path: Option<String>,
+    /// Exit page path
+    pub exit_path: Option<String>,
+    /// Traffic source: referrer URL
+    pub referrer: Option<String>,
+    /// Traffic source: referrer hostname
+    pub referrer_hostname: Option<String>,
+    /// Traffic source: channel (e.g. "organic", "direct", "social")
+    pub channel: Option<String>,
+    /// UTM source parameter
+    pub utm_source: Option<String>,
+    /// UTM medium parameter
+    pub utm_medium: Option<String>,
+    /// UTM campaign parameter
+    pub utm_campaign: Option<String>,
+    /// Whether the session was a bounce
+    pub is_bounced: bool,
+    /// Whether the visitor was engaged (had non-pageview events)
+    pub is_engaged: bool,
+    /// Events within this session, ordered chronologically
+    pub events: Vec<JourneyEvent>,
+}
+
+/// Complete visitor journey response
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct VisitorJourneyResponse {
+    /// Visitor internal ID
+    pub visitor_id: i32,
+    /// Total number of sessions
+    pub total_sessions: i64,
+    /// Total number of events across all sessions
+    pub total_events: i64,
+    /// Sessions with their events, ordered newest first
+    pub sessions: Vec<JourneySession>,
+}
+
+// ---- Page Flow / Journey Analytics types ----
+
+/// A single page with its entry/exit/bounce statistics
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PageFlowEntry {
+    /// The page path (e.g. "/pricing", "/docs/getting-started")
+    pub page_path: String,
+    /// Number of times this page was the entry page of a session
+    pub entry_count: i64,
+    /// Number of times this page was the exit page of a session
+    pub exit_count: i64,
+    /// Number of times visitors bounced on this page
+    pub bounce_count: i64,
+    /// Total page views for this page
+    pub total_views: i64,
+    /// Average time spent on this page in seconds
+    pub avg_time_on_page: Option<f64>,
+    /// Entry rate: entry_count / total_views
+    pub entry_rate: f64,
+    /// Exit rate: exit_count / total_views
+    pub exit_rate: f64,
+    /// Bounce rate: bounce_count / entry_count (only meaningful for entry pages)
+    pub bounce_rate: f64,
+}
+
+/// A page-to-page transition with count
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct PageTransition {
+    /// The source page path
+    pub from_page: String,
+    /// The destination page path
+    pub to_page: String,
+    /// Number of times this transition occurred
+    pub transition_count: i64,
+    /// Percentage of transitions from the source page that go to this destination
+    pub percentage: f64,
+}
+
+/// Drop-off point: pages where visitors leave the site
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct DropOffPoint {
+    /// The page path where visitors drop off
+    pub page_path: String,
+    /// Number of exits from this page
+    pub exit_count: i64,
+    /// Total views of this page
+    pub total_views: i64,
+    /// Exit rate for this page (exit_count / total_views)
+    pub exit_rate: f64,
+}
+
+/// Complete page flow analytics response
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct PageFlowResponse {
+    /// Top entry pages (where visitors land), sorted by entry_count DESC
+    pub top_entry_pages: Vec<PageFlowEntry>,
+    /// Top exit pages (where visitors leave), sorted by exit_count DESC
+    pub top_exit_pages: Vec<PageFlowEntry>,
+    /// Top drop-off points (highest exit rates with meaningful traffic)
+    pub drop_off_points: Vec<DropOffPoint>,
+    /// Page-to-page transitions (most common navigation paths)
+    pub transitions: Vec<PageTransition>,
+    /// Total unique pages seen in the period
+    pub total_pages: i64,
+    /// Total sessions in the period
+    pub total_sessions: i64,
 }

@@ -164,7 +164,12 @@ pub struct SessionReplayWithVisitorDto {
     pub visitor_last_seen: String,
     pub visitor_is_crawler: bool,
     pub visitor_crawler_name: Option<String>,
-    pub visitor_custom_data: Option<String>,
+    pub visitor_custom_data: Option<serde_json::Value>,
+    // Geolocation fields
+    pub visitor_city: Option<String>,
+    pub visitor_country: Option<String>,
+    pub visitor_country_code: Option<String>,
+    pub visitor_region: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -276,6 +281,11 @@ impl From<SessionReplayWithEvents> for SessionReplayWithEventsDto {
             visitor_is_crawler: replay.session.visitor.is_crawler,
             visitor_crawler_name: replay.session.visitor.crawler_name,
             visitor_custom_data: replay.session.visitor.custom_data,
+            // Geolocation not available through this path
+            visitor_city: None,
+            visitor_country: None,
+            visitor_country_code: None,
+            visitor_region: None,
         };
 
         Self {
@@ -326,6 +336,11 @@ impl From<SessionReplayWithVisitor> for SessionReplayWithVisitorDto {
             visitor_is_crawler: replay.visitor_is_crawler,
             visitor_crawler_name: replay.visitor_crawler_name,
             visitor_custom_data: replay.visitor_custom_data,
+            // Geolocation fields
+            visitor_city: replay.visitor_city,
+            visitor_country: replay.visitor_country,
+            visitor_country_code: replay.visitor_country_code,
+            visitor_region: replay.visitor_region,
         }
     }
 }

@@ -117,6 +117,7 @@ pub struct LoadBalancer {
     config_service: Arc<temps_config::ConfigService>,
     ip_access_control_service: Arc<IpAccessControlService>,
     challenge_service: Arc<ChallengeService>,
+    disable_https_redirect: bool,
 }
 
 impl LoadBalancer {
@@ -133,6 +134,7 @@ impl LoadBalancer {
         config_service: Arc<temps_config::ConfigService>,
         ip_access_control_service: Arc<IpAccessControlService>,
         challenge_service: Arc<ChallengeService>,
+        disable_https_redirect: bool,
     ) -> Self {
         Self {
             upstream_resolver,
@@ -146,6 +148,7 @@ impl LoadBalancer {
             config_service,
             ip_access_control_service,
             challenge_service,
+            disable_https_redirect,
         }
     }
 
@@ -1918,7 +1921,8 @@ impl ProxyHttp for LoadBalancer {
 
         // HTTP to HTTPS redirect for non-TLS connections
         // This MUST come after ACME challenge handling to allow Let's Encrypt HTTP-01 validation
-        if !self.is_tls_connection(session) {
+        // Skip redirect when disable_https_redirect is set (e.g., local development)
+        if !self.disable_https_redirect && !self.is_tls_connection(session) {
             // Build the HTTPS redirect URL preserving path and query string
             let redirect_url = if let Some(query) = &ctx.query_string {
                 format!(

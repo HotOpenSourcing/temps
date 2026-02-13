@@ -58,7 +58,10 @@ impl WorkflowPlanner {
     /// This includes:
     /// 1. Environment variables from the env_vars table for the specific environment (via env_var_environments junction table)
     /// 2. Runtime environment variables from external services linked to the project
-    /// 3. Sentry DSN environment variables (SENTRY_DSN and NEXT_PUBLIC_SENTRY_DSN) - auto-generated per project/environment
+    /// 3. Sentry DSN environment variables - auto-generated per project/environment:
+    ///    - `SENTRY_DSN` is always added
+    ///    - `NEXT_PUBLIC_SENTRY_DSN` is added when preset is Next.js
+    ///    - `VITE_PUBLIC_SENTRY_DSN` is added when preset is Vite
     /// 4. Deployment token environment variables (TEMPS_API_URL and TEMPS_API_TOKEN) - for API access from deployed apps
     ///
     /// IMPORTANT: If any external service fails to provide env vars, the entire deployment will fail
@@ -208,9 +211,21 @@ impl WorkflowPlanner {
                             "Got DSN for project {} environment {}: {}",
                             project.id, environment.id, project_dsn.dsn
                         );
-                        // Add both SENTRY_DSN and NEXT_PUBLIC_SENTRY_DSN for compatibility with different frameworks
+                        // Always add SENTRY_DSN for server-side usage
                         env_vars_map.insert("SENTRY_DSN".to_string(), project_dsn.dsn.clone());
-                        env_vars_map.insert("NEXT_PUBLIC_SENTRY_DSN".to_string(), project_dsn.dsn);
+
+                        // Add framework-specific public DSN env var based on preset
+                        match project.preset {
+                            temps_entities::preset::Preset::NextJs => {
+                                env_vars_map
+                                    .insert("NEXT_PUBLIC_SENTRY_DSN".to_string(), project_dsn.dsn);
+                            }
+                            temps_entities::preset::Preset::Vite => {
+                                env_vars_map
+                                    .insert("VITE_PUBLIC_SENTRY_DSN".to_string(), project_dsn.dsn);
+                            }
+                            _ => {}
+                        }
                     }
                     Err(e) => {
                         // Warn about Sentry DSN failure but don't fail the deployment
@@ -581,9 +596,17 @@ impl WorkflowPlanner {
         project: &projects::Model,
         environment: &environments::Model,
         deployment: &deployments::Model,
-        env_vars: std::collections::HashMap<String, String>,
+        mut env_vars: std::collections::HashMap<String, String>,
     ) -> anyhow::Result<Vec<JobDefinition>> {
         let mut jobs = Vec::new();
+
+        // Inject SENTRY_RELEASE so the SDK tags events with the correct release version.
+        // This must match the release used for source map uploads.
+        if let Some(ref commit_sha) = deployment.commit_sha {
+            env_vars
+                .entry("SENTRY_RELEASE".to_string())
+                .or_insert_with(|| commit_sha.clone());
+        }
 
         // Check if git info is available
         let has_git_info = !project.repo_owner.is_empty() && !project.repo_name.is_empty();
@@ -882,6 +905,60 @@ impl WorkflowPlanner {
             );
         } else {
             debug!("Skipping vulnerability scan job - no git info available");
+        }
+
+        // Job 8: Capture source maps (only for JS-based presets with git info)
+        // Extracts .map files from the built image for error symbolication
+        if has_git_info {
+            // Search paths are relative to the image's WORKDIR (detected at runtime).
+            // The CaptureSourceMapsJob inspects the image to find the WORKDIR and
+            // prepends it to these relative paths.
+            let search_paths = match project.preset {
+                temps_entities::preset::Preset::NextJs => {
+                    vec![".next/static".to_string(), ".next/server".to_string()]
+                }
+                temps_entities::preset::Preset::Vite => vec!["dist/assets".to_string()],
+                _ => vec!["dist".to_string(), "build/static".to_string()],
+            };
+
+            // Path rewrites: map container paths to browser-visible paths.
+            // Next.js serves .next/static as /_next/static in the browser,
+            // so we rewrite .next -> _next to match stack trace filenames.
+            let path_rewrites: Vec<(String, String)> = match project.preset {
+                temps_entities::preset::Preset::NextJs => {
+                    vec![(".next".to_string(), "_next".to_string())]
+                }
+                _ => vec![],
+            };
+
+            // Use commit SHA as release version (matches SENTRY_RELEASE env var)
+            let release = deployment
+                .commit_sha
+                .clone()
+                .unwrap_or_else(|| format!("deploy-{}", deployment.id));
+
+            jobs.push(JobDefinition {
+                job_id: "capture_source_maps".to_string(),
+                job_type: "CaptureSourceMapsJob".to_string(),
+                name: "Capture Source Maps".to_string(),
+                description: Some(
+                    "Extract source maps from build output for error symbolication".to_string(),
+                ),
+                dependencies: vec!["mark_deployment_complete".to_string()],
+                job_config: Some(serde_json::json!({
+                    "deployment_id": deployment.id,
+                    "project_id": project.id,
+                    "release": release,
+                    "build_job_id": "build_image",
+                    "search_paths": search_paths,
+                    "path_rewrites": path_rewrites,
+                })),
+                required_for_completion: false,
+            });
+            debug!(
+                "Added capture_source_maps job to workflow (release: {})",
+                release
+            );
         }
 
         info!(

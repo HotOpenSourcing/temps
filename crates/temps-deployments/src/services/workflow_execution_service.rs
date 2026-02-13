@@ -11,8 +11,10 @@ use temps_core::{
 use temps_database::DbConnection;
 use temps_deployer::{static_deployer::StaticDeployer, ContainerDeployer, ImageBuilder};
 use temps_entities::{deployment_jobs, deployments, environments, projects};
+use temps_error_tracking::services::SourceMapService;
 use temps_git::GitProviderManagerTrait;
 use temps_logs::LogService;
+use tokio::sync::OnceCell;
 use tracing::{debug, error, info, warn};
 
 use crate::jobs::{
@@ -36,6 +38,7 @@ pub struct WorkflowExecutionService {
     config_service: Arc<temps_config::ConfigService>,
     screenshot_service: Arc<ScreenshotService>,
     docker: Arc<bollard::Docker>,
+    source_map_service: OnceCell<Arc<SourceMapService>>,
 }
 
 impl WorkflowExecutionService {
@@ -65,7 +68,13 @@ impl WorkflowExecutionService {
             config_service,
             screenshot_service,
             docker,
+            source_map_service: OnceCell::new(),
         }
+    }
+
+    /// Set the source map service for automatic source map capture during deployments
+    pub fn set_source_map_service(&self, service: Arc<SourceMapService>) {
+        let _ = self.source_map_service.set(service);
     }
 
     /// Get the container deployer (for cancelling deployments)
@@ -785,6 +794,80 @@ impl WorkflowExecutionService {
                     download_job_id,
                     build_job_id,
                     self.db.clone(),
+                )
+                .with_log_id(db_job.log_id.clone())
+                .with_log_service(self.log_service.clone());
+
+                Ok(Arc::new(job))
+            }
+
+            "CaptureSourceMapsJob" => {
+                let config = db_job.job_config.as_ref().ok_or_else(|| {
+                    WorkflowExecutionError::MissingJobConfig(db_job.job_id.clone())
+                })?;
+
+                let deployment_id = config
+                    .get("deployment_id")
+                    .and_then(|v| v.as_i64())
+                    .ok_or_else(|| {
+                        WorkflowExecutionError::InvalidJobConfig(
+                            "deployment_id is required".to_string(),
+                        )
+                    })? as i32;
+
+                let project_id = config
+                    .get("project_id")
+                    .and_then(|v| v.as_i64())
+                    .ok_or_else(|| {
+                        WorkflowExecutionError::InvalidJobConfig(
+                            "project_id is required".to_string(),
+                        )
+                    })? as i32;
+
+                let release = config
+                    .get("release")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        WorkflowExecutionError::InvalidJobConfig("release is required".to_string())
+                    })?
+                    .to_string();
+
+                let build_job_id = config
+                    .get("build_job_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("build_image")
+                    .to_string();
+
+                let search_paths: Vec<String> = config
+                    .get("search_paths")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+
+                let path_rewrites: Vec<(String, String)> = config
+                    .get("path_rewrites")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+
+                let source_map_service = self
+                    .source_map_service
+                    .get()
+                    .ok_or_else(|| {
+                        WorkflowExecutionError::InvalidJobConfig(
+                            "SourceMapService not configured".to_string(),
+                        )
+                    })?
+                    .clone();
+
+                let job = crate::jobs::CaptureSourceMapsJob::new(
+                    db_job.job_id.clone(),
+                    deployment_id,
+                    project_id,
+                    release,
+                    build_job_id,
+                    search_paths,
+                    path_rewrites,
+                    self.image_builder.clone(),
+                    source_map_service,
                 )
                 .with_log_id(db_job.log_id.clone())
                 .with_log_service(self.log_service.clone());

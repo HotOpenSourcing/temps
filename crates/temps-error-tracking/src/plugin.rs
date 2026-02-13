@@ -10,7 +10,7 @@ use utoipa::OpenApi as OpenApiTrait;
 
 use crate::providers::sentry::SentryProvider;
 use crate::sentry::{DSNService, SentryIngestionService};
-use crate::services::ErrorTrackingService;
+use crate::services::{ErrorTrackingService, SourceMapService};
 
 /// Error Tracking Plugin for capturing and managing application errors
 pub struct ErrorTrackingPlugin;
@@ -39,8 +39,13 @@ impl TempsPlugin for ErrorTrackingPlugin {
         Box::pin(async move {
             let db = context.require_service::<sea_orm::DatabaseConnection>();
 
-            // Register core error tracking service
+            // Register source map service
+            let source_map_service = Arc::new(SourceMapService::new(db.clone()));
+            context.register_service(source_map_service.clone());
+
+            // Register core error tracking service (with source map support)
             let error_tracking_service = Arc::new(ErrorTrackingService::new(db.clone()));
+            error_tracking_service.set_source_map_service(source_map_service);
             context.register_service(error_tracking_service.clone());
 
             // Register Sentry-specific services
@@ -69,6 +74,7 @@ impl TempsPlugin for ErrorTrackingPlugin {
         let config_service = context.require_service::<temps_config::ConfigService>();
         let sentry_provider = context.require_service::<SentryProvider>();
         let dsn_service = context.require_service::<DSNService>();
+        let source_map_service = context.require_service::<SourceMapService>();
 
         // Configure error tracking routes (main API)
         let error_tracking_state = Arc::new(crate::handlers::types::AppState {
@@ -78,11 +84,16 @@ impl TempsPlugin for ErrorTrackingPlugin {
         let error_tracking_routes =
             crate::handlers::handler::configure_routes().with_state(error_tracking_state);
 
-        // Configure Sentry ingestion routes
+        // Configure Sentry ingestion routes (with optional IP geolocation + visitor linking)
+        let ip_address_service = context.get_service::<temps_geo::IpAddressService>();
+        let sentry_db = context.get_service::<sea_orm::DatabaseConnection>();
+
         let sentry_state = Arc::new(crate::sentry::handlers::AppState {
             sentry_provider: sentry_provider.clone(),
             error_tracking_service: error_tracking_service.clone(),
             audit_service: audit_service.clone(),
+            ip_address_service,
+            db: sentry_db,
         });
         let sentry_routes = crate::sentry::handlers::configure_routes().with_state(sentry_state);
 
@@ -94,8 +105,32 @@ impl TempsPlugin for ErrorTrackingPlugin {
         });
         let dsn_routes = crate::sentry::dsn_handlers::configure_dsn_routes().with_state(dsn_state);
 
+        // Configure source map routes
+        let source_map_state = Arc::new(crate::handlers::source_map_handlers::SourceMapAppState {
+            source_map_service: source_map_service.clone(),
+            audit_service: audit_service.clone(),
+        });
+        let source_map_routes = crate::handlers::source_map_handlers::configure_source_map_routes()
+            .with_state(source_map_state);
+
+        // Configure sentry-cli compatible routes
+        let db = context.require_service::<sea_orm::DatabaseConnection>();
+        let sentry_compat_state = Arc::new(
+            crate::handlers::sentry_compat_handlers::SentryCompatAppState {
+                source_map_service: source_map_service.clone(),
+                db,
+            },
+        );
+        let sentry_compat_routes =
+            crate::handlers::sentry_compat_handlers::configure_sentry_compat_routes()
+                .with_state(sentry_compat_state);
+
         // Merge all routes together
-        let routes = error_tracking_routes.merge(sentry_routes).merge(dsn_routes);
+        let routes = error_tracking_routes
+            .merge(sentry_routes)
+            .merge(dsn_routes)
+            .merge(source_map_routes)
+            .merge(sentry_compat_routes);
 
         Some(PluginRoutes { router: routes })
     }
@@ -117,6 +152,27 @@ impl TempsPlugin for ErrorTrackingPlugin {
         let dsn_schema = <crate::sentry::dsn_handlers::DSNApiDoc as OpenApiTrait>::openapi();
         schema.paths.paths.extend(dsn_schema.paths.paths);
         if let Some(components) = &dsn_schema.components {
+            if let Some(base_components) = &mut schema.components {
+                base_components.schemas.extend(components.schemas.clone());
+            }
+        }
+
+        // Merge source map routes schema
+        let source_map_schema =
+            <crate::handlers::source_map_handlers::SourceMapApiDoc as OpenApiTrait>::openapi();
+        schema.paths.paths.extend(source_map_schema.paths.paths);
+        if let Some(components) = &source_map_schema.components {
+            if let Some(base_components) = &mut schema.components {
+                base_components.schemas.extend(components.schemas.clone());
+            }
+        }
+
+        // Merge sentry-cli compatibility routes schema
+        let sentry_compat_schema =
+            <crate::handlers::sentry_compat_handlers::SentryCompatApiDoc as OpenApiTrait>::openapi(
+            );
+        schema.paths.paths.extend(sentry_compat_schema.paths.paths);
+        if let Some(components) = &sentry_compat_schema.components {
             if let Some(base_components) = &mut schema.components {
                 base_components.schemas.extend(components.schemas.clone());
             }

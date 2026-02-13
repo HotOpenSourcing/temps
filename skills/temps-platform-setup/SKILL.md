@@ -682,7 +682,7 @@ temps certificates complete cert-123
 
 **Self-hosted behind NAT/firewall with `*.temps.dev` subdomain:**
 
-If your Temps instance is behind NAT or a firewall and cannot receive HTTP-01 challenges on port 80, use `acme.sh` with the Temps Cloud ACME API for DNS-01 validation. This lets you provision TLS certificates for your `*.temps.dev` subdomain without exposing port 80.
+If your Temps instance is behind NAT or a firewall and cannot receive HTTP-01 challenges on port 80, use `acme.sh` with `@temps-sdk/cli` cloud ACME commands for DNS-01 validation. This lets you provision TLS certificates for your `*.temps.dev` subdomain without exposing port 80. The flow uses `temps cloud acme` (from `@temps-sdk/cli`) to manage DNS records and `temps domain import` (server-side Rust binary) to load the certificate into Temps.
 
 See the **Cloud ACME Certificates (acme.sh)** section in the [Temps CLI reference](../temps-cli/SKILL.md) for the complete setup guide, including the DNS hook script and step-by-step certificate flow.
 

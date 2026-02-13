@@ -128,6 +128,10 @@ pub struct ProxyCommand {
     /// Console/Admin address (defaults to random port on localhost)
     #[arg(long, env = "TEMPS_CONSOLE_ADDRESS")]
     pub console_address: Option<String>,
+
+    /// Disable HTTP-to-HTTPS redirect (useful for local development without TLS)
+    #[arg(long, env = "TEMPS_DISABLE_HTTPS_REDIRECT")]
+    pub disable_https_redirect: bool,
 }
 
 impl ProxyCommand {
@@ -216,6 +220,7 @@ impl ProxyCommand {
             console_address,
             tls_address,
             preview_domain,
+            disable_https_redirect: self.disable_https_redirect,
         };
 
         info!(

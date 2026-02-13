@@ -59,6 +59,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
 import { TimeAgo } from '../utils/TimeAgo'
 import { CopyButton } from '../ui/copy-button'
+import { SourceMaps } from '../error-tracking/SourceMaps'
 
 interface ErrorTrackingProps {
   project: ProjectResponse
@@ -75,8 +76,8 @@ export function ErrorTracking({ project }: ErrorTrackingProps) {
 
   // Get tab from URL or default to 'errors'
   const selectedTab =
-    (searchParams.get('tab') as 'errors' | 'analytics' | 'setup') || 'errors'
-  const setSelectedTab = (tab: 'errors' | 'analytics' | 'setup') => {
+    (searchParams.get('tab') as 'errors' | 'analytics' | 'sourcemaps' | 'setup') || 'errors'
+  const setSelectedTab = (tab: 'errors' | 'analytics' | 'sourcemaps' | 'setup') => {
     setSearchParams((prev) => {
       const params = new URLSearchParams(prev)
       params.set('tab', tab)
@@ -409,10 +410,10 @@ export function ErrorTracking({ project }: ErrorTrackingProps) {
       <Tabs
         value={selectedTab}
         onValueChange={(v) =>
-          setSelectedTab(v as 'errors' | 'analytics' | 'setup')
+          setSelectedTab(v as 'errors' | 'analytics' | 'sourcemaps' | 'setup')
         }
       >
-        <TabsList className="grid w-full grid-cols-3 max-w-[600px]">
+        <TabsList className="grid w-full grid-cols-4 max-w-[700px]">
           <TabsTrigger value="errors">
             Error Groups
             {hasErrors && (
@@ -422,6 +423,7 @@ export function ErrorTracking({ project }: ErrorTrackingProps) {
             )}
           </TabsTrigger>
           <TabsTrigger value="analytics">Analytics</TabsTrigger>
+          <TabsTrigger value="sourcemaps">Source Maps</TabsTrigger>
           <TabsTrigger value="setup">
             DSN & Setup
             {!hasDsn && (
@@ -561,6 +563,11 @@ export function ErrorTracking({ project }: ErrorTrackingProps) {
             startDate={new Date(timeRange.startTime)}
             endDate={new Date(timeRange.endTime)}
           />
+        </TabsContent>
+
+        {/* Source Maps Tab */}
+        <TabsContent value="sourcemaps" className="mt-6">
+          <SourceMaps project={project} />
         </TabsContent>
 
         {/* Setup Tab */}

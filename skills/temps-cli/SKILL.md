@@ -20,28 +20,26 @@ npm install -g @temps-sdk/cli
 bun add -g @temps-sdk/cli
 ```
 
-> **Note:** All examples below use `temps` as the command. If running via `npx`/`bunx`, replace `temps` with `npx @temps-sdk/cli` or `bunx @temps-sdk/cli`.
-
 ## Configuration
 
 ```bash
 # Interactive configuration wizard
-temps configure
+bunx @temps-sdk/cli configure
 
 # Set API URL
-temps configure set apiUrl https://your-server.example.com:3000
+bunx @temps-sdk/cli configure set apiUrl https://your-server.example.com:3000
 
 # Set default output format (table, json, minimal)
-temps configure set outputFormat table
+bunx @temps-sdk/cli configure set outputFormat table
 
 # View current configuration
-temps configure show
+bunx @temps-sdk/cli configure show
 
 # List all config values
-temps configure list
+bunx @temps-sdk/cli configure list
 
 # Reset to defaults
-temps configure reset
+bunx @temps-sdk/cli configure reset
 ```
 
 **Config file**: `~/.temps/config.json`
@@ -73,13 +71,13 @@ temps configure reset
 
 ```bash
 # Interactive login (prompts for API key)
-temps login
+bunx @temps-sdk/cli login
 
 # Non-interactive login
-temps login --api-key tk_abc123def456
+bunx @temps-sdk/cli login --api-key tk_abc123def456
 
 # Login to specific server
-temps login --api-key tk_abc123def456 -u https://temps.example.com
+bunx @temps-sdk/cli login --api-key tk_abc123def456 -u https://temps.example.com
 ```
 
 **Example output:**
@@ -92,7 +90,7 @@ temps login --api-key tk_abc123def456 -u https://temps.example.com
 ### Logout
 
 ```bash
-temps logout
+bunx @temps-sdk/cli logout
 ```
 
 **Example output:**
@@ -103,8 +101,8 @@ temps logout
 ### Who Am I
 
 ```bash
-temps whoami
-temps whoami --json
+bunx @temps-sdk/cli whoami
+bunx @temps-sdk/cli whoami --json
 ```
 
 **Example output:**
@@ -135,9 +133,9 @@ temps whoami --json
 ### List Projects
 
 ```bash
-temps projects list
-temps projects ls --json
-temps projects list --page 2 --per-page 10
+bunx @temps-sdk/cli projects list
+bunx @temps-sdk/cli projects ls --json
+bunx @temps-sdk/cli projects list --page 2 --per-page 10
 ```
 
 **Example output:**
@@ -156,17 +154,17 @@ temps projects list --page 2 --per-page 10
 
 ```bash
 # Interactive creation
-temps projects create
+bunx @temps-sdk/cli projects create
 
 # Non-interactive
-temps projects create -n "My App" -d "Description of my app" --repo https://github.com/org/repo
+bunx @temps-sdk/cli projects create -n "My App" -d "Description of my app" --repo https://github.com/org/repo
 ```
 
 ### Show Project
 
 ```bash
-temps projects show -p my-app
-temps projects show -p my-app --json
+bunx @temps-sdk/cli projects show -p my-app
+bunx @temps-sdk/cli projects show -p my-app --json
 ```
 
 **Example output:**
@@ -186,47 +184,47 @@ temps projects show -p my-app --json
 
 ```bash
 # Update name and description
-temps projects update -p my-app -n "New Name" -d "New description"
+bunx @temps-sdk/cli projects update -p my-app -n "New Name" -d "New description"
 
 # Non-interactive mode
-temps projects update -p my-app -n "New Name" -y
+bunx @temps-sdk/cli projects update -p my-app -n "New Name" -y
 ```
 
 ### Update Project Settings
 
 ```bash
 # Update slug and enable attack mode
-temps projects settings -p my-app --slug new-slug --attack-mode
+bunx @temps-sdk/cli projects settings -p my-app --slug new-slug --attack-mode
 
 # Enable preview environments
-temps projects settings -p my-app --preview-envs
+bunx @temps-sdk/cli projects settings -p my-app --preview-envs
 
 # Disable attack mode
-temps projects settings -p my-app --no-attack-mode
+bunx @temps-sdk/cli projects settings -p my-app --no-attack-mode
 ```
 
 ### Update Git Settings
 
 ```bash
-temps projects git -p my-app --owner myorg --repo myrepo --branch main --preset nextjs
-temps projects git -p my-app --directory apps/web --preset nextjs -y
+bunx @temps-sdk/cli projects git -p my-app --owner myorg --repo myrepo --branch main --preset nextjs
+bunx @temps-sdk/cli projects git -p my-app --directory apps/web --preset nextjs -y
 ```
 
 ### Update Deployment Config
 
 ```bash
 # Scale replicas and set resource limits
-temps projects config -p my-app --replicas 3 --cpu-limit 1 --memory-limit 512
+bunx @temps-sdk/cli projects config -p my-app --replicas 3 --cpu-limit 1 --memory-limit 512
 
 # Enable auto-deploy
-temps projects config -p my-app --auto-deploy
+bunx @temps-sdk/cli projects config -p my-app --auto-deploy
 ```
 
 ### Delete Project
 
 ```bash
-temps projects delete -p my-app
-temps projects rm -p my-app -f    # Skip confirmation
+bunx @temps-sdk/cli projects delete -p my-app
+bunx @temps-sdk/cli projects rm -p my-app -f    # Skip confirmation
 ```
 
 ---
@@ -237,13 +235,13 @@ temps projects rm -p my-app -f    # Skip confirmation
 
 ```bash
 # Interactive deployment
-temps deploy my-app
+bunx @temps-sdk/cli deploy my-app
 
 # Specify branch and environment
-temps deploy my-app -b feature/new-ui -e staging
+bunx @temps-sdk/cli deploy my-app -b feature/new-ui -e staging
 
 # Fully automated
-temps deploy -p my-app -b main -e production -y
+bunx @temps-sdk/cli deploy -p my-app -b main -e production -y
 ```
 
 **Example output:**
@@ -263,41 +261,41 @@ temps deploy -p my-app -b main -e production -y
 
 ```bash
 # Deploy a directory
-temps deploy:static --path ./dist -p my-app
+bunx @temps-sdk/cli deploy:static --path ./dist -p my-app
 
 # Deploy an archive
-temps deploy:static --path ./build.tar.gz -p my-app -e production -y
+bunx @temps-sdk/cli deploy:static --path ./build.tar.gz -p my-app -e production -y
 ```
 
 ### Deploy Docker Image
 
 ```bash
 # Deploy a pre-built image
-temps deploy:image --image ghcr.io/org/app:v1.0 -p my-app
+bunx @temps-sdk/cli deploy:image --image ghcr.io/org/app:v1.0 -p my-app
 
 # With environment and automation
-temps deploy:image --image registry.example.com/app:latest -p my-app -e staging -y
+bunx @temps-sdk/cli deploy:image --image registry.example.com/app:latest -p my-app -e staging -y
 ```
 
 ### Deploy Local Docker Image
 
 ```bash
 # Build from Dockerfile and deploy
-temps deploy:local-image -p my-app -f Dockerfile -c .
+bunx @temps-sdk/cli deploy:local-image -p my-app -f Dockerfile -c .
 
 # Deploy an existing local image
-temps deploy:local-image --image my-app:latest -p my-app -e production -y
+bunx @temps-sdk/cli deploy:local-image --image my-app:latest -p my-app -e production -y
 
 # With build arguments
-temps deploy:local-image -p my-app --build-arg NODE_ENV=production --build-arg API_URL=https://api.example.com
+bunx @temps-sdk/cli deploy:local-image -p my-app --build-arg NODE_ENV=production --build-arg API_URL=https://api.example.com
 ```
 
 ### List Deployments
 
 ```bash
-temps deployments list -p my-app
-temps deployments ls -p my-app --limit 5 --json
-temps deployments list -p my-app --page 2 --per-page 10 --environment-id 1
+bunx @temps-sdk/cli deployments list -p my-app
+bunx @temps-sdk/cli deployments ls -p my-app --limit 5 --json
+bunx @temps-sdk/cli deployments list -p my-app --page 2 --per-page 10 --environment-id 1
 ```
 
 **Example output:**
@@ -315,44 +313,44 @@ temps deployments list -p my-app --page 2 --per-page 10 --environment-id 1
 ### Deployment Status
 
 ```bash
-temps deployments status -p my-app -d 42
-temps deployments status -p my-app -d 42 --json
+bunx @temps-sdk/cli deployments status -p my-app -d 42
+bunx @temps-sdk/cli deployments status -p my-app -d 42 --json
 ```
 
 ### Deployment Lifecycle
 
 ```bash
 # Rollback to previous deployment
-temps deployments rollback -p my-app -e production
+bunx @temps-sdk/cli deployments rollback -p my-app -e production
 
 # Rollback to specific deployment
-temps deployments rollback -p my-app --to 40
+bunx @temps-sdk/cli deployments rollback -p my-app --to 40
 
 # Cancel a running deployment
-temps deployments cancel -p 5 -d 42
+bunx @temps-sdk/cli deployments cancel -p 5 -d 42
 
 # Pause/resume
-temps deployments pause -p 5 -d 42
-temps deployments resume -p 5 -d 42
+bunx @temps-sdk/cli deployments pause -p 5 -d 42
+bunx @temps-sdk/cli deployments resume -p 5 -d 42
 
 # Teardown (remove all resources)
-temps deployments teardown -p 5 -d 42
+bunx @temps-sdk/cli deployments teardown -p 5 -d 42
 ```
 
 ### Deployment Logs
 
 ```bash
 # View logs
-temps logs -p my-app
+bunx @temps-sdk/cli logs -p my-app
 
 # Stream logs in real-time
-temps logs -p my-app -f
+bunx @temps-sdk/cli logs -p my-app -f
 
 # Show last 50 lines from staging
-temps logs -p my-app -e staging -n 50
+bunx @temps-sdk/cli logs -p my-app -e staging -n 50
 
 # Logs for specific deployment
-temps logs -p my-app -d 42 -f
+bunx @temps-sdk/cli logs -p my-app -d 42 -f
 ```
 
 ---
@@ -362,72 +360,72 @@ temps logs -p my-app -d 42 -f
 ### List Environments
 
 ```bash
-temps environments list -p my-app
-temps environments ls -p my-app --json
+bunx @temps-sdk/cli environments list -p my-app
+bunx @temps-sdk/cli environments ls -p my-app --json
 ```
 
 ### Create Environment
 
 ```bash
-temps environments create -p my-app -n staging
+bunx @temps-sdk/cli environments create -p my-app -n staging
 ```
 
 ### Delete Environment
 
 ```bash
-temps environments delete -p my-app -n staging
-temps environments rm -p my-app -n staging -f
+bunx @temps-sdk/cli environments delete -p my-app -n staging
+bunx @temps-sdk/cli environments rm -p my-app -n staging -f
 ```
 
 ### Environment Variables
 
 ```bash
 # List all variables
-temps environments vars list -p my-app -e production
-temps environments vars list -p my-app -e production --json
+bunx @temps-sdk/cli environments vars list -p my-app -e production
+bunx @temps-sdk/cli environments vars list -p my-app -e production --json
 
 # Get a specific variable
-temps environments vars get -p my-app -e production -k DATABASE_URL
+bunx @temps-sdk/cli environments vars get -p my-app -e production -k DATABASE_URL
 
 # Set a variable
-temps environments vars set -p my-app -e production -k API_KEY -v "sk_live_abc123"
+bunx @temps-sdk/cli environments vars set -p my-app -e production -k API_KEY -v "sk_live_abc123"
 
 # Set a secret variable (masked in UI)
-temps environments vars set -p my-app -e production -k SECRET_KEY -v "supersecret" --secret
+bunx @temps-sdk/cli environments vars set -p my-app -e production -k SECRET_KEY -v "supersecret" --secret
 
 # Delete a variable
-temps environments vars delete -p my-app -e production -k OLD_KEY -y
+bunx @temps-sdk/cli environments vars delete -p my-app -e production -k OLD_KEY -y
 
 # Import from .env file
-temps environments vars import -p my-app -e production -f .env.production
+bunx @temps-sdk/cli environments vars import -p my-app -e production -f .env.production
 
 # Export to file
-temps environments vars export -p my-app -e production -f .env.backup
+bunx @temps-sdk/cli environments vars export -p my-app -e production -f .env.backup
 ```
 
 ### Environment Resources
 
 ```bash
-temps environments resources -p my-app -e production --json
+bunx @temps-sdk/cli environments resources -p my-app -e production --json
 ```
 
 ### Scale Environment
 
 ```bash
-temps environments scale -p my-app -e production --replicas 3
+bunx @temps-sdk/cli environments scale -p my-app -e production --replicas 3
 ```
 
 ### Cron Jobs
 
 ```bash
 # List cron jobs
-temps environments crons list --project-id 5
+bunx @temps-sdk/cli environments crons list --project-id 5
 
 # Show cron job details
-temps environments crons show --id 1 --json
+bunx @temps-sdk/cli environments crons show --id 1 --json
 
 # List cron executions
-temps environments crons executions --cron-id 1 --limit 10
+bunx @temps-sdk/cli environments crons executions --cron-id 1 --limit 10
 ```
 
 ---
@@ -439,8 +437,8 @@ temps environments crons executions --cron-id 1 --limit 10
 ### List Services
 
 ```bash
-temps services list
-temps services ls --json
+bunx @temps-sdk/cli services list
+bunx @temps-sdk/cli services ls --json
 ```
 
 **Example output:**
@@ -458,16 +456,16 @@ temps services ls --json
 
 ```bash
 # Interactive creation
-temps services create
+bunx @temps-sdk/cli services create
 
 # Non-interactive
-temps services create -t postgres -n main-db -y
-temps services create -t redis -n cache -y
-temps services create -t mongodb -n data-store -y
-temps services create -t s3 -n files -y
+bunx @temps-sdk/cli services create -t postgres -n main-db -y
+bunx @temps-sdk/cli services create -t redis -n cache -y
+bunx @temps-sdk/cli services create -t mongodb -n data-store -y
+bunx @temps-sdk/cli services create -t s3 -n files -y
 
 # With custom parameters
-temps services create -t postgres -n analytics-db --parameters '{"version":"17-alpine"}' -y
+bunx @temps-sdk/cli services create -t postgres -n analytics-db --parameters '{"version":"17-alpine"}' -y
 ```
 
 **Service types**: `postgres`, `mongodb`, `redis`, `s3`
@@ -475,8 +473,8 @@ temps services create -t postgres -n analytics-db --parameters '{"version":"17-a
 ### Show Service
 
 ```bash
-temps services show --id 1
-temps services show --id 1 --json
+bunx @temps-sdk/cli services show --id 1
+bunx @temps-sdk/cli services show --id 1 --json
 ```
 
 **Example output:**
@@ -499,51 +497,51 @@ temps services show --id 1 --json
 
 ```bash
 # Start/stop
-temps services start --id 1
-temps services stop --id 1
+bunx @temps-sdk/cli services start --id 1
+bunx @temps-sdk/cli services stop --id 1
 
 # Update
-temps services update --id 1 -n postgres:17-alpine
+bunx @temps-sdk/cli services update --id 1 -n postgres:17-alpine
 
 # Upgrade version
-temps services upgrade --id 1 -v postgres:17-alpine
+bunx @temps-sdk/cli services upgrade --id 1 -v postgres:17-alpine
 
 # Remove
-temps services remove --id 1
-temps services rm --id 1 -f
+bunx @temps-sdk/cli services remove --id 1
+bunx @temps-sdk/cli services rm --id 1 -f
 ```
 
 ### Import Existing Service
 
 ```bash
 # Import a running Docker container as a managed service
-temps services import -t postgres -n imported-db --container-id my-postgres-container -y
+bunx @temps-sdk/cli services import -t postgres -n imported-db --container-id my-postgres-container -y
 ```
 
 ### Link/Unlink to Projects
 
 ```bash
 # Link service to project (injects env vars)
-temps services link --id 1 --project-id 5
+bunx @temps-sdk/cli services link --id 1 --project-id 5
 
 # Unlink
-temps services unlink --id 1 --project-id 5
+bunx @temps-sdk/cli services unlink --id 1 --project-id 5
 
 # View linked projects
-temps services projects --id 1
+bunx @temps-sdk/cli services projects --id 1
 
 # View injected env vars
-temps services env --id 1 --project-id 5
+bunx @temps-sdk/cli services env --id 1 --project-id 5
 
 # Get specific env var
-temps services env-var --id 1 --project-id 5 --var DATABASE_URL
+bunx @temps-sdk/cli services env-var --id 1 --project-id 5 --var DATABASE_URL
 ```
 
 ### List Service Types
 
 ```bash
-temps services types
-temps services types --json
+bunx @temps-sdk/cli services types
+bunx @temps-sdk/cli services types --json
 ```
 
 ---
@@ -553,55 +551,55 @@ temps services types --json
 ### List Providers
 
 ```bash
-temps providers list
-temps providers ls --json
+bunx @temps-sdk/cli providers list
+bunx @temps-sdk/cli providers ls --json
 ```
 
 ### Add Provider
 
 ```bash
 # Interactive
-temps providers add
+bunx @temps-sdk/cli providers add
 
 # Non-interactive
-temps providers add --type github --name "My GitHub" --token ghp_abc123 -y
-temps providers add --type gitlab --name "My GitLab" --token glpat-abc123 -y
+bunx @temps-sdk/cli providers add --type github --name "My GitHub" --token ghp_abc123 -y
+bunx @temps-sdk/cli providers add --type gitlab --name "My GitLab" --token glpat-abc123 -y
 ```
 
 ### Manage Providers
 
 ```bash
-temps providers show --id 1 --json
-temps providers activate --id 1
-temps providers deactivate --id 1
-temps providers remove --id 1 -f
+bunx @temps-sdk/cli providers show --id 1 --json
+bunx @temps-sdk/cli providers activate --id 1
+bunx @temps-sdk/cli providers deactivate --id 1
+bunx @temps-sdk/cli providers remove --id 1 -f
 
 # Safe delete (checks for dependencies)
-temps providers safe-delete --id 1 -y
-temps providers deletion-check --id 1 --json
+bunx @temps-sdk/cli providers safe-delete --id 1 -y
+bunx @temps-sdk/cli providers deletion-check --id 1 --json
 ```
 
 ### Git Connections
 
 ```bash
 # Connect git to project
-temps providers git connect --project my-app --provider-id 1 --repo org/repo --branch main
+bunx @temps-sdk/cli providers git connect --project my-app --provider-id 1 --repo org/repo --branch main
 
 # List repos from provider
-temps providers git repos --id 1
-temps providers git repos --search "my-app" --language typescript --page 1 --per-page 50
-temps providers git repos --sort stars --direction desc --owner myorg
+bunx @temps-sdk/cli providers git repos --id 1
+bunx @temps-sdk/cli providers git repos --search "my-app" --language typescript --page 1 --per-page 50
+bunx @temps-sdk/cli providers git repos --sort stars --direction desc --owner myorg
 
 # Manage connections
-temps providers connections list --json
-temps providers connections list --page 1 --per-page 50 --sort account_name --direction asc
-temps providers connections show --id 1
-temps providers connections sync --id 1
-temps providers connections validate --id 1
-temps providers connections update-token --id 1 --token ghp_newtoken
-temps providers connections activate --id 1
-temps providers connections deactivate --id 1
-temps providers connections delete --id 1 -y
+bunx @temps-sdk/cli providers connections list --json
+bunx @temps-sdk/cli providers connections list --page 1 --per-page 50 --sort account_name --direction asc
+bunx @temps-sdk/cli providers connections show --id 1
+bunx @temps-sdk/cli providers connections sync --id 1
+bunx @temps-sdk/cli providers connections validate --id 1
+bunx @temps-sdk/cli providers connections update-token --id 1 --token ghp_newtoken
+bunx @temps-sdk/cli providers connections activate --id 1
+bunx @temps-sdk/cli providers connections deactivate --id 1
+bunx @temps-sdk/cli providers connections delete --id 1 -y
 ```
 
 ---
@@ -611,57 +609,57 @@ temps providers connections delete --id 1 -y
 ### List Domains
 
 ```bash
-temps domains list -p my-app
-temps domains ls -p my-app --json
+bunx @temps-sdk/cli domains list -p my-app
+bunx @temps-sdk/cli domains ls -p my-app --json
 ```
 
 ### Add Domain
 
 ```bash
-temps domains add -p my-app -d example.com -y
+bunx @temps-sdk/cli domains add -p my-app -d example.com -y
 ```
 
 ### Verify & Status
 
 ```bash
-temps domains verify -p my-app -d example.com
-temps domains status -p my-app -d example.com --json
-temps domains ssl -p my-app -d example.com --json
+bunx @temps-sdk/cli domains verify -p my-app -d example.com
+bunx @temps-sdk/cli domains status -p my-app -d example.com --json
+bunx @temps-sdk/cli domains ssl -p my-app -d example.com --json
 ```
 
 ### Remove Domain
 
 ```bash
-temps domains remove -p my-app -d example.com -f
+bunx @temps-sdk/cli domains remove -p my-app -d example.com -f
 ```
 
 ### Certificate Orders
 
 ```bash
 # List certificate orders
-temps domains orders list --json
+bunx @temps-sdk/cli domains orders list --json
 
 # Create order
-temps domains orders create --domain-id 1 --challenge-type http-01
+bunx @temps-sdk/cli domains orders create --domain-id 1 --challenge-type http-01
 
 # Show order details
-temps domains orders show --order-id 1 --json
+bunx @temps-sdk/cli domains orders show --order-id 1 --json
 
 # Finalize (verify challenge and issue certificate)
-temps domains orders finalize --domain-id 1
+bunx @temps-sdk/cli domains orders finalize --domain-id 1
 
 # Cancel order
-temps domains orders cancel --order-id 1 -y
+bunx @temps-sdk/cli domains orders cancel --order-id 1 -y
 ```
 
 ### DNS Challenges
 
 ```bash
 # Get DNS challenge record to add
-temps domains dns-challenge --domain-id 1 --json
+bunx @temps-sdk/cli domains dns-challenge --domain-id 1 --json
 
 # Debug HTTP challenge accessibility
-temps domains http-debug --domain example.com --token abc123 --expected xyz789
+bunx @temps-sdk/cli domains http-debug --domain example.com --token abc123 --expected xyz789
 ```
 
 ---
@@ -672,25 +670,25 @@ temps domains http-debug --domain example.com --token abc123 --expected xyz789
 
 ```bash
 # List custom domains
-temps custom-domains list --project-id 5 --json
+bunx @temps-sdk/cli custom-domains list --project-id 5 --json
 
 # Create with environment targeting
-temps custom-domains create --project-id 5 -d app.example.com --environment-id 1 -y
+bunx @temps-sdk/cli custom-domains create --project-id 5 -d app.example.com --environment-id 1 -y
 
 # Create redirect domain
-temps custom-domains create --project-id 5 -d old.example.com --redirect-to https://new.example.com --status-code 301 -y
+bunx @temps-sdk/cli custom-domains create --project-id 5 -d old.example.com --redirect-to https://new.example.com --status-code 301 -y
 
 # Show details
-temps custom-domains show --project-id 5 --domain-id 1 --json
+bunx @temps-sdk/cli custom-domains show --project-id 5 --domain-id 1 --json
 
 # Update
-temps custom-domains update --project-id 5 --domain-id 1 --branch feature/v2
+bunx @temps-sdk/cli custom-domains update --project-id 5 --domain-id 1 --branch feature/v2
 
 # Link certificate
-temps custom-domains link-cert --project-id 5 --domain-id 1 --certificate-id 3
+bunx @temps-sdk/cli custom-domains link-cert --project-id 5 --domain-id 1 --certificate-id 3
 
 # Remove
-temps custom-domains remove --project-id 5 --domain-id 1 -f
+bunx @temps-sdk/cli custom-domains remove --project-id 5 --domain-id 1 -f
 ```
 
 ---
@@ -699,22 +697,22 @@ temps custom-domains remove --project-id 5 --domain-id 1 -f
 
 ```bash
 # List DNS records
-temps dns list --json
+bunx @temps-sdk/cli dns list --json
 
 # Add record
-temps dns add --type A --name app --content 1.2.3.4 --ttl 3600 -y
+bunx @temps-sdk/cli dns add --type A --name app --content 1.2.3.4 --ttl 3600 -y
 
 # Show record
-temps dns show --id 1 --json
+bunx @temps-sdk/cli dns show --id 1 --json
 
 # Test DNS resolution
-temps dns test --name app.example.com --type A --json
+bunx @temps-sdk/cli dns test --name app.example.com --type A --json
 
 # List zones
-temps dns zones --json
+bunx @temps-sdk/cli dns zones --json
 
 # Remove record
-temps dns remove --id 1 -f
+bunx @temps-sdk/cli dns remove --id 1 -f
 ```
 
 ---
@@ -725,28 +723,28 @@ temps dns remove --id 1 -f
 
 ```bash
 # List DNS providers
-temps dns-providers list --json
+bunx @temps-sdk/cli dns-providers list --json
 
 # Create Cloudflare provider
-temps dns-providers create -n "Cloudflare" -t cloudflare --api-token cf_abc123 -y
+bunx @temps-sdk/cli dns-providers create -n "Cloudflare" -t cloudflare --api-token cf_abc123 -y
 
 # Create Route53 provider
-temps dns-providers create -n "AWS" -t route53 --access-key-id AKIA... --secret-access-key secret --region us-east-1 -y
+bunx @temps-sdk/cli dns-providers create -n "AWS" -t route53 --access-key-id AKIA... --secret-access-key secret --region us-east-1 -y
 
 # Test provider connection
-temps dns-providers test --id 1
+bunx @temps-sdk/cli dns-providers test --id 1
 
 # List provider zones
-temps dns-providers zones --id 1 --json
+bunx @temps-sdk/cli dns-providers zones --id 1 --json
 
 # Manage domains
-temps dns-providers domains list --id 1 --json
-temps dns-providers domains add --id 1 -d example.com --auto-manage
-temps dns-providers domains verify --provider-id 1 -d example.com
-temps dns-providers domains remove --provider-id 1 -d example.com -f
+bunx @temps-sdk/cli dns-providers domains list --id 1 --json
+bunx @temps-sdk/cli dns-providers domains add --id 1 -d example.com --auto-manage
+bunx @temps-sdk/cli dns-providers domains verify --provider-id 1 -d example.com
+bunx @temps-sdk/cli dns-providers domains remove --provider-id 1 -d example.com -f
 
 # DNS lookup
-temps dns-providers lookup -d example.com --json
+bunx @temps-sdk/cli dns-providers lookup -d example.com --json
 ```
 
 **Provider types**: `cloudflare`, `namecheap`, `route53`, `digitalocean`, `gcp`, `azure`, `manual`
@@ -759,24 +757,24 @@ temps dns-providers lookup -d example.com --json
 
 ```bash
 # List providers
-temps notifications list --json
+bunx @temps-sdk/cli notifications list --json
 
 # Add Slack provider
-temps notifications add --type slack --name "Alerts" --webhook-url https://hooks.slack.com/... --channel "#alerts" -y
+bunx @temps-sdk/cli notifications add --type slack --name "Alerts" --webhook-url https://hooks.slack.com/... --channel "#alerts" -y
 
 # Add Email provider
-temps notifications add --type email --name "Email Alerts" --smtp-host smtp.gmail.com --smtp-port 587 --smtp-user user@gmail.com --smtp-pass apppassword --from alerts@example.com --to team@example.com -y
+bunx @temps-sdk/cli notifications add --type email --name "Email Alerts" --smtp-host smtp.gmail.com --smtp-port 587 --smtp-user user@gmail.com --smtp-pass apppassword --from alerts@example.com --to team@example.com -y
 
 # Add Webhook provider
-temps notifications add --type webhook --name "Custom Hook" --url https://example.com/webhook --secret mysecret -y
+bunx @temps-sdk/cli notifications add --type webhook --name "Custom Hook" --url https://example.com/webhook --secret mysecret -y
 
 # Show/manage providers
-temps notifications show --id 1 --json
-temps notifications enable --id 1
-temps notifications disable --id 1
-temps notifications update --id 1 --name "New Name"
-temps notifications test --id 1
-temps notifications remove --id 1 -f
+bunx @temps-sdk/cli notifications show --id 1 --json
+bunx @temps-sdk/cli notifications enable --id 1
+bunx @temps-sdk/cli notifications disable --id 1
+bunx @temps-sdk/cli notifications update --id 1 --name "New Name"
+bunx @temps-sdk/cli notifications test --id 1
+bunx @temps-sdk/cli notifications remove --id 1 -f
 ```
 
 ### Notification Preferences
@@ -785,16 +783,16 @@ temps notifications remove --id 1 -f
 
 ```bash
 # Show current preferences
-temps notification-preferences show --json
+bunx @temps-sdk/cli notification-preferences show --json
 
 # Update preferences
-temps notification-preferences update -k email_enabled -v true
-temps notification-preferences update -k deployment_failures_enabled -v true
-temps notification-preferences update -k ssl_days_before_expiration -v 30
-temps notification-preferences update -k minimum_severity -v warning
+bunx @temps-sdk/cli notification-preferences update -k email_enabled -v true
+bunx @temps-sdk/cli notification-preferences update -k deployment_failures_enabled -v true
+bunx @temps-sdk/cli notification-preferences update -k ssl_days_before_expiration -v 30
+bunx @temps-sdk/cli notification-preferences update -k minimum_severity -v warning
 
 # Reset to defaults
-temps notification-preferences reset -y
+bunx @temps-sdk/cli notification-preferences reset -y
 ```
 
 **Available preference keys:**
@@ -810,25 +808,25 @@ temps notification-preferences reset -y
 
 ```bash
 # List monitors
-temps monitors list --project-id 5 --json
+bunx @temps-sdk/cli monitors list --project-id 5 --json
 
 # Create HTTP monitor
-temps monitors create --project-id 5 -n "API Health" -t http -i 60 -y
+bunx @temps-sdk/cli monitors create --project-id 5 -n "API Health" -t http -i 60 -y
 
 # Create TCP monitor
-temps monitors create --project-id 5 -n "DB Connection" -t tcp -i 300 -y
+bunx @temps-sdk/cli monitors create --project-id 5 -n "DB Connection" -t tcp -i 300 -y
 
 # Show details
-temps monitors show --id 1 --json
+bunx @temps-sdk/cli monitors show --id 1 --json
 
 # Current status
-temps monitors status --id 1 --json
+bunx @temps-sdk/cli monitors status --id 1 --json
 
 # Uptime history
-temps monitors history --id 1 --days 30 --json
+bunx @temps-sdk/cli monitors history --id 1 --days 30 --json
 
 # Remove
-temps monitors remove --id 1 -f
+bunx @temps-sdk/cli monitors remove --id 1 -f
 ```
 
 **Monitor types**: `http`, `tcp`, `ping`
@@ -840,24 +838,24 @@ temps monitors remove --id 1 -f
 
 ```bash
 # List incidents
-temps incidents list --project-id 5 --status investigating --json
-temps incidents list --project-id 5 --page 1 --page-size 20 --environment-id 1
+bunx @temps-sdk/cli incidents list --project-id 5 --status investigating --json
+bunx @temps-sdk/cli incidents list --project-id 5 --page 1 --page-size 20 --environment-id 1
 
 # Create incident
-temps incidents create --project-id 5 -t "API Degradation" -d "High response times" -s major -y
+bunx @temps-sdk/cli incidents create --project-id 5 -t "API Degradation" -d "High response times" -s major -y
 
 # Show incident
-temps incidents show --id 1 --json
+bunx @temps-sdk/cli incidents show --id 1 --json
 
 # Update status
-temps incidents update-status --id 1 -s monitoring -m "Fix deployed, monitoring"
-temps incidents update-status --id 1 -s resolved -m "Issue resolved"
+bunx @temps-sdk/cli incidents update-status --id 1 -s monitoring -m "Fix deployed, monitoring"
+bunx @temps-sdk/cli incidents update-status --id 1 -s resolved -m "Issue resolved"
 
 # List updates
-temps incidents updates --id 1 --json
+bunx @temps-sdk/cli incidents updates --id 1 --json
 
 # Bucketed incidents (time series)
-temps incidents bucketed --project-id 5 -i hourly --json
+bunx @temps-sdk/cli incidents bucketed --project-id 5 -i hourly --json
 ```
 
 **Severities**: `critical`, `major`, `minor`
@@ -871,22 +869,22 @@ temps incidents bucketed --project-id 5 -i hourly --json
 
 ```bash
 # List containers
-temps containers list -p 5 -e 1 --json
+bunx @temps-sdk/cli containers list -p 5 -e 1 --json
 
 # Show container details
-temps containers show -p 5 -e 1 -c abc123 --json
+bunx @temps-sdk/cli containers show -p 5 -e 1 -c abc123 --json
 
 # Start/stop/restart
-temps containers start -p 5 -e 1 -c abc123
-temps containers stop -p 5 -e 1 -c abc123
-temps containers restart -p 5 -e 1 -c abc123
+bunx @temps-sdk/cli containers start -p 5 -e 1 -c abc123
+bunx @temps-sdk/cli containers stop -p 5 -e 1 -c abc123
+bunx @temps-sdk/cli containers restart -p 5 -e 1 -c abc123
 
 # Force stop
-temps containers stop -p 5 -e 1 -c abc123 -f
+bunx @temps-sdk/cli containers stop -p 5 -e 1 -c abc123 -f
 
 # Live metrics (auto-refresh)
-temps containers metrics -p 5 -e 1 -c abc123 -w -i 2
-temps containers metrics -p 5 -e 1 -c abc123 --json
+bunx @temps-sdk/cli containers metrics -p 5 -e 1 -c abc123 -w -i 2
+bunx @temps-sdk/cli containers metrics -p 5 -e 1 -c abc123 --json
 ```
 
 ---
@@ -897,16 +895,16 @@ temps containers metrics -p 5 -e 1 -c abc123 --json
 
 ```bash
 # Stream container runtime logs
-temps runtime-logs -p my-app
+bunx @temps-sdk/cli runtime-logs -p my-app
 
 # Follow mode with specific environment
-temps runtime-logs -p my-app -e staging -f
+bunx @temps-sdk/cli runtime-logs -p my-app -e staging -f
 
 # Show specific container
-temps runtime-logs -p my-app --container web-1 --tail 200
+bunx @temps-sdk/cli runtime-logs -p my-app --container web-1 --tail 200
 
 # JSON output
-temps runtime-logs -p my-app --json
+bunx @temps-sdk/cli runtime-logs -p my-app --json
 ```
 
 ---
@@ -917,58 +915,58 @@ temps runtime-logs -p my-app --json
 
 ```bash
 # List sources
-temps backups sources list --json
+bunx @temps-sdk/cli backups sources list --json
 
 # Create source
-temps backups sources create -n "Main DB" --source-type postgres --connection-string "postgresql://..." -y
+bunx @temps-sdk/cli backups sources create -n "Main DB" --source-type postgres --connection-string "postgresql://..." -y
 
 # Show source
-temps backups sources show --id 1 --json
+bunx @temps-sdk/cli backups sources show --id 1 --json
 
 # Update source
-temps backups sources update --id 1 -n "Primary DB"
+bunx @temps-sdk/cli backups sources update --id 1 -n "Primary DB"
 
 # List backups for source
-temps backups sources backups --id 1 --json
+bunx @temps-sdk/cli backups sources backups --id 1 --json
 
 # Trigger manual backup
-temps backups sources run --id 1
+bunx @temps-sdk/cli backups sources run --id 1
 
 # Remove source
-temps backups sources remove --id 1 -f
+bunx @temps-sdk/cli backups sources remove --id 1 -f
 ```
 
 ### Backup Schedules
 
 ```bash
 # List schedules
-temps backups schedules list --json
+bunx @temps-sdk/cli backups schedules list --json
 
 # Create schedule
-temps backups schedules create --source-id 1 --cron "0 2 * * *" --retention-count 7 --storage-backend local -y
+bunx @temps-sdk/cli backups schedules create --source-id 1 --cron "0 2 * * *" --retention-count 7 --storage-backend local -y
 
 # Show schedule
-temps backups schedules show --id 1 --json
+bunx @temps-sdk/cli backups schedules show --id 1 --json
 
 # Enable/disable
-temps backups schedules enable --id 1
-temps backups schedules disable --id 1
+bunx @temps-sdk/cli backups schedules enable --id 1
+bunx @temps-sdk/cli backups schedules disable --id 1
 
 # Delete schedule
-temps backups schedules delete --id 1 -f
+bunx @temps-sdk/cli backups schedules delete --id 1 -f
 ```
 
 ### Backups
 
 ```bash
 # List all backups
-temps backups list --json
+bunx @temps-sdk/cli backups list --json
 
 # Show backup details
-temps backups show --id 1 --json
+bunx @temps-sdk/cli backups show --id 1 --json
 
 # Run a service backup
-temps backups run-service --service-id 1 --json
+bunx @temps-sdk/cli backups run-service --service-id 1 --json
 ```
 
 ---
@@ -979,30 +977,30 @@ temps backups run-service --service-id 1 --json
 
 ```bash
 # List project scans
-temps scans list --project-id 5 --json
-temps scans list --project-id 5 --page 2 --page-size 10
+bunx @temps-sdk/cli scans list --project-id 5 --json
+bunx @temps-sdk/cli scans list --project-id 5 --page 2 --page-size 10
 
 # Trigger scan
-temps scans trigger --project-id 5 --environment-id 1
+bunx @temps-sdk/cli scans trigger --project-id 5 --environment-id 1
 
 # Latest scan
-temps scans latest --project-id 5 --json
+bunx @temps-sdk/cli scans latest --project-id 5 --json
 
 # Scans per environment
-temps scans environments --project-id 5 --json
+bunx @temps-sdk/cli scans environments --project-id 5 --json
 
 # Show scan details
-temps scans show --id 1 --json
+bunx @temps-sdk/cli scans show --id 1 --json
 
 # List vulnerabilities
-temps scans vulnerabilities --id 1 --json
-temps scans vulns --id 1 --severity CRITICAL --json
+bunx @temps-sdk/cli scans vulnerabilities --id 1 --json
+bunx @temps-sdk/cli scans vulns --id 1 --severity CRITICAL --json
 
 # Scan by deployment
-temps scans by-deployment --deployment-id 42 --json
+bunx @temps-sdk/cli scans by-deployment --deployment-id 42 --json
 
 # Remove scan
-temps scans remove --id 1 -f
+bunx @temps-sdk/cli scans remove --id 1 -f
 ```
 
 **Severity filter**: `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`
@@ -1015,31 +1013,31 @@ temps scans remove --id 1 -f
 
 ```bash
 # List error groups
-temps errors list --project-id 5 --json
-temps errors list --project-id 5 --status unresolved --page 1 --page-size 20
-temps errors list --project-id 5 --environment-id 1 --start-date 2025-01-01 --end-date 2025-01-31
-temps errors list --project-id 5 --sort-by total_count --sort-order desc
+bunx @temps-sdk/cli errors list --project-id 5 --json
+bunx @temps-sdk/cli errors list --project-id 5 --status unresolved --page 1 --page-size 20
+bunx @temps-sdk/cli errors list --project-id 5 --environment-id 1 --start-date 2025-01-01 --end-date 2025-01-31
+bunx @temps-sdk/cli errors list --project-id 5 --sort-by total_count --sort-order desc
 
 # Show error group
-temps errors show --project-id 5 --group-id abc123 --json
+bunx @temps-sdk/cli errors show --project-id 5 --group-id abc123 --json
 
 # Update error group status
-temps errors update --project-id 5 --group-id abc123 --status resolved
+bunx @temps-sdk/cli errors update --project-id 5 --group-id abc123 --status resolved
 
 # List events for error group
-temps errors events --project-id 5 --group-id abc123 --json
+bunx @temps-sdk/cli errors events --project-id 5 --group-id abc123 --json
 
 # Show single event
-temps errors event --project-id 5 --group-id abc123 --event-id evt456 --json
+bunx @temps-sdk/cli errors event --project-id 5 --group-id abc123 --event-id evt456 --json
 
 # Statistics
-temps errors stats --project-id 5 --json
+bunx @temps-sdk/cli errors stats --project-id 5 --json
 
 # Timeline
-temps errors timeline --project-id 5 --days 7 --bucket 1h --json
+bunx @temps-sdk/cli errors timeline --project-id 5 --days 7 --bucket 1h --json
 
 # Dashboard
-temps errors dashboard --project-id 5 --days 7 --compare --json
+bunx @temps-sdk/cli errors dashboard --project-id 5 --days 7 --compare --json
 ```
 
 **Statuses**: `unresolved`, `resolved`, `ignored`
@@ -1052,36 +1050,36 @@ temps errors dashboard --project-id 5 --days 7 --compare --json
 
 ```bash
 # List webhooks
-temps webhooks list --project-id 5 --json
+bunx @temps-sdk/cli webhooks list --project-id 5 --json
 
 # List deliveries with limit
-temps webhooks deliveries list --project-id 5 --webhook-id 1 --limit 100 --json
+bunx @temps-sdk/cli webhooks deliveries list --project-id 5 --webhook-id 1 --limit 100 --json
 
 # Create webhook
-temps webhooks create --project-id 5 -u https://example.com/webhook -e "deployment.success,deployment.failed" -s mysecret -y
+bunx @temps-sdk/cli webhooks create --project-id 5 -u https://example.com/webhook -e "deployment.success,deployment.failed" -s mysecret -y
 
 # Show webhook
-temps webhooks show --project-id 5 --webhook-id 1 --json
+bunx @temps-sdk/cli webhooks show --project-id 5 --webhook-id 1 --json
 
 # Update webhook
-temps webhooks update --project-id 5 --webhook-id 1 -u https://new-endpoint.com/webhook
+bunx @temps-sdk/cli webhooks update --project-id 5 --webhook-id 1 -u https://new-endpoint.com/webhook
 
 # Enable/disable
-temps webhooks enable --project-id 5 --webhook-id 1
-temps webhooks disable --project-id 5 --webhook-id 1
+bunx @temps-sdk/cli webhooks enable --project-id 5 --webhook-id 1
+bunx @temps-sdk/cli webhooks disable --project-id 5 --webhook-id 1
 
 # List available event types
-temps webhooks events --json
+bunx @temps-sdk/cli webhooks events --json
 
 # View deliveries
-temps webhooks deliveries list --project-id 5 --webhook-id 1 --json
-temps webhooks deliveries show --project-id 5 --webhook-id 1 --delivery-id 1 --json
+bunx @temps-sdk/cli webhooks deliveries list --project-id 5 --webhook-id 1 --json
+bunx @temps-sdk/cli webhooks deliveries show --project-id 5 --webhook-id 1 --delivery-id 1 --json
 
 # Retry failed delivery
-temps webhooks deliveries retry --project-id 5 --webhook-id 1 --delivery-id 1
+bunx @temps-sdk/cli webhooks deliveries retry --project-id 5 --webhook-id 1 --delivery-id 1
 
 # Remove webhook
-temps webhooks remove --project-id 5 --webhook-id 1 -f
+bunx @temps-sdk/cli webhooks remove --project-id 5 --webhook-id 1 -f
 ```
 
 ---
@@ -1092,26 +1090,26 @@ temps webhooks remove --project-id 5 --webhook-id 1 -f
 
 ```bash
 # List API keys
-temps apikeys list --json
+bunx @temps-sdk/cli apikeys list --json
 
 # Create API key
-temps apikeys create -n "CI/CD Key" -r developer -e 90 -y
+bunx @temps-sdk/cli apikeys create -n "CI/CD Key" -r developer -e 90 -y
 
 # Create with specific permissions
-temps apikeys create -n "Deploy Only" -r developer -p "deployments:create,deployments:read" -e 30 -y
+bunx @temps-sdk/cli apikeys create -n "Deploy Only" -r developer -p "deployments:create,deployments:read" -e 30 -y
 
 # Show key details
-temps apikeys show --id 1 --json
+bunx @temps-sdk/cli apikeys show --id 1 --json
 
 # Activate/deactivate
-temps apikeys activate --id 1
-temps apikeys deactivate --id 1
+bunx @temps-sdk/cli apikeys activate --id 1
+bunx @temps-sdk/cli apikeys deactivate --id 1
 
 # List available permissions
-temps apikeys permissions --json
+bunx @temps-sdk/cli apikeys permissions --json
 
 # Remove
-temps apikeys remove --id 1 -f
+bunx @temps-sdk/cli apikeys remove --id 1 -f
 ```
 
 **Roles**: `admin`, `developer`, `viewer`, `readonly`
@@ -1125,19 +1123,19 @@ temps apikeys remove --id 1 -f
 
 ```bash
 # List tokens
-temps tokens list -p my-app --json
+bunx @temps-sdk/cli tokens list -p my-app --json
 
 # Create token
-temps tokens create -p my-app -n "Analytics Token" --permissions "analytics:read,events:write" -e 90 -y
+bunx @temps-sdk/cli tokens create -p my-app -n "Analytics Token" --permissions "analytics:read,events:write" -e 90 -y
 
 # Show token
-temps tokens show -p my-app --id 1 --json
+bunx @temps-sdk/cli tokens show -p my-app --id 1 --json
 
 # Delete token
-temps tokens delete -p my-app --id 1 -f
+bunx @temps-sdk/cli tokens delete -p my-app --id 1 -f
 
 # List available permissions
-temps tokens permissions --json
+bunx @temps-sdk/cli tokens permissions --json
 ```
 
 **Permissions**: `*`, `visitors:enrich`, `emails:send`, `analytics:read`, `events:write`, `errors:read`
@@ -1149,22 +1147,22 @@ temps tokens permissions --json
 
 ```bash
 # List users
-temps users list --json
+bunx @temps-sdk/cli users list --json
 
 # Create user
-temps users create --email user@example.com --name "New User" --password "secure123" --role developer -y
+bunx @temps-sdk/cli users create --email user@example.com --name "New User" --password "secure123" --role developer -y
 
 # Show current user
-temps users me --json
+bunx @temps-sdk/cli users me --json
 
 # Change user role
-temps users role --id 2 --role admin
+bunx @temps-sdk/cli users role --id 2 --role admin
 
 # Remove user (soft delete)
-temps users remove --id 2 -f
+bunx @temps-sdk/cli users remove --id 2 -f
 
 # Restore deleted user
-temps users restore --id 2
+bunx @temps-sdk/cli users restore --id 2
 ```
 
 ---
@@ -1173,19 +1171,19 @@ temps users restore --id 2
 
 ```bash
 # List DSNs
-temps dsn list --project-id 5 --json
+bunx @temps-sdk/cli dsn list --project-id 5 --json
 
 # Create DSN
-temps dsn create --project-id 5 -n "Production DSN" --environment-id 1 -y
+bunx @temps-sdk/cli dsn create --project-id 5 -n "Production DSN" --environment-id 1 -y
 
 # Get or create DSN (idempotent)
-temps dsn get-or-create --project-id 5 --environment-id 1 --json
+bunx @temps-sdk/cli dsn get-or-create --project-id 5 --environment-id 1 --json
 
 # Regenerate DSN key
-temps dsn regenerate --project-id 5 --dsn-id 1 -f
+bunx @temps-sdk/cli dsn regenerate --project-id 5 --dsn-id 1 -f
 
 # Revoke DSN
-temps dsn revoke --project-id 5 --dsn-id 1 -f
+bunx @temps-sdk/cli dsn revoke --project-id 5 --dsn-id 1 -f
 ```
 
 ---
@@ -1196,24 +1194,24 @@ temps dsn revoke --project-id 5 --dsn-id 1 -f
 
 ```bash
 # List funnels
-temps funnels list --project-id 5 --json
+bunx @temps-sdk/cli funnels list --project-id 5 --json
 
 # Create funnel
-temps funnels create --project-id 5 -n "Signup Funnel" \
+bunx @temps-sdk/cli funnels create --project-id 5 -n "Signup Funnel" \
   -s '[{"event_name":"page_view","filters":{"path":"/signup"}},{"event_name":"form_submit"},{"event_name":"signup_complete"}]' -y
 
 # Update funnel
-temps funnels update --project-id 5 --funnel-id 1 -n "Updated Funnel"
+bunx @temps-sdk/cli funnels update --project-id 5 --funnel-id 1 -n "Updated Funnel"
 
 # View funnel metrics
-temps funnels metrics --project-id 5 --funnel-id 1 --json
+bunx @temps-sdk/cli funnels metrics --project-id 5 --funnel-id 1 --json
 
 # Preview metrics (without saving)
-temps funnels preview --project-id 5 \
+bunx @temps-sdk/cli funnels preview --project-id 5 \
   -s '[{"event_name":"page_view"},{"event_name":"signup"}]' --json
 
 # Remove funnel
-temps funnels remove --project-id 5 --funnel-id 1 -f
+bunx @temps-sdk/cli funnels remove --project-id 5 --funnel-id 1 -f
 ```
 
 ---
@@ -1226,19 +1224,19 @@ temps funnels remove --project-id 5 --funnel-id 1 -f
 
 ```bash
 # List email providers
-temps email-providers list --json
+bunx @temps-sdk/cli email-providers list --json
 
 # Create SES provider
-temps email-providers create -n "AWS SES" -t ses --access-key-id AKIA... --secret-access-key secret --region us-east-1 -y
+bunx @temps-sdk/cli email-providers create -n "AWS SES" -t ses --access-key-id AKIA... --secret-access-key secret --region us-east-1 -y
 
 # Create Scaleway provider
-temps email-providers create -n "Scaleway" -t scaleway --api-key scw_abc --project-id proj123 --region fr-par -y
+bunx @temps-sdk/cli email-providers create -n "Scaleway" -t scaleway --api-key scw_abc --project-id proj123 --region fr-par -y
 
 # Test provider
-temps email-providers test --id 1 --from noreply@example.com
+bunx @temps-sdk/cli email-providers test --id 1 --from noreply@example.com
 
 # Remove
-temps email-providers remove --id 1 -f
+bunx @temps-sdk/cli email-providers remove --id 1 -f
 ```
 
 ### Email Domains
@@ -1247,25 +1245,25 @@ temps email-providers remove --id 1 -f
 
 ```bash
 # List domains
-temps email-domains list --json
+bunx @temps-sdk/cli email-domains list --json
 
 # Create email domain
-temps email-domains create -d example.com --provider-id 1 -y
+bunx @temps-sdk/cli email-domains create -d example.com --provider-id 1 -y
 
 # Show domain
-temps email-domains show --id 1 --json
+bunx @temps-sdk/cli email-domains show --id 1 --json
 
 # Get DNS records to configure
-temps email-domains dns-records --id 1 --json
+bunx @temps-sdk/cli email-domains dns-records --id 1 --json
 
 # Auto-setup DNS records
-temps email-domains setup-dns --id 1 --dns-provider-id 2
+bunx @temps-sdk/cli email-domains setup-dns --id 1 --dns-provider-id 2
 
 # Verify domain
-temps email-domains verify --id 1
+bunx @temps-sdk/cli email-domains verify --id 1
 
 # Remove
-temps email-domains remove --id 1 -f
+bunx @temps-sdk/cli email-domains remove --id 1 -f
 ```
 
 ### Emails
@@ -1274,21 +1272,21 @@ temps email-domains remove --id 1 -f
 
 ```bash
 # List sent emails
-temps emails list --json
-temps emails list --page 1 --page-size 20 --status delivered
-temps emails list --domain-id 1 --project-id 5 --from-address noreply@example.com
+bunx @temps-sdk/cli emails list --json
+bunx @temps-sdk/cli emails list --page 1 --page-size 20 --status delivered
+bunx @temps-sdk/cli emails list --domain-id 1 --project-id 5 --from-address noreply@example.com
 
 # Send email
-temps emails send --to user@example.com --subject "Hello" --body "Welcome!" --from noreply@example.com -y
+bunx @temps-sdk/cli emails send --to user@example.com --subject "Hello" --body "Welcome!" --from noreply@example.com -y
 
 # Show email details
-temps emails show --id 1 --json
+bunx @temps-sdk/cli emails show --id 1 --json
 
 # Email statistics
-temps emails stats --json
+bunx @temps-sdk/cli emails stats --json
 
 # Validate email address
-temps emails validate --email user@example.com --json
+bunx @temps-sdk/cli emails validate --email user@example.com --json
 ```
 
 ---
@@ -1299,22 +1297,22 @@ temps emails validate --email user@example.com --json
 
 ```bash
 # List rules
-temps ip-access list --json
+bunx @temps-sdk/cli ip-access list --json
 
 # Allow an IP
-temps ip-access create --ip 203.0.113.0/24 --action allow --description "Office network" -y
+bunx @temps-sdk/cli ip-access create --ip 203.0.113.0/24 --action allow --description "Office network" -y
 
 # Block an IP
-temps ip-access create --ip 198.51.100.5 --action deny --description "Suspicious traffic" -y
+bunx @temps-sdk/cli ip-access create --ip 198.51.100.5 --action deny --description "Suspicious traffic" -y
 
 # Check if IP is blocked
-temps ip-access check --ip 198.51.100.5 --json
+bunx @temps-sdk/cli ip-access check --ip 198.51.100.5 --json
 
 # Update rule
-temps ip-access update --id 1 --description "Updated description"
+bunx @temps-sdk/cli ip-access update --id 1 --description "Updated description"
 
 # Remove rule
-temps ip-access remove --id 1 -f
+bunx @temps-sdk/cli ip-access remove --id 1 -f
 ```
 
 ---
@@ -1325,19 +1323,19 @@ temps ip-access remove --id 1 -f
 
 ```bash
 # List routes
-temps load-balancer list --json
+bunx @temps-sdk/cli load-balancer list --json
 
 # Create route
-temps load-balancer create -d app.example.com -t http://localhost:8080 -y
+bunx @temps-sdk/cli load-balancer create -d app.example.com -t http://localhost:8080 -y
 
 # Show route
-temps load-balancer show -d app.example.com --json
+bunx @temps-sdk/cli load-balancer show -d app.example.com --json
 
 # Update route
-temps load-balancer update -d app.example.com -t http://localhost:9090
+bunx @temps-sdk/cli load-balancer update -d app.example.com -t http://localhost:9090
 
 # Remove route
-temps load-balancer remove -d app.example.com -f
+bunx @temps-sdk/cli load-balancer remove -d app.example.com -f
 ```
 
 ---
@@ -1346,15 +1344,15 @@ temps load-balancer remove -d app.example.com -f
 
 ```bash
 # List audit logs
-temps audit list --limit 50 --json
+bunx @temps-sdk/cli audit list --limit 50 --json
 
 # With pagination and filters
-temps audit list --limit 20 --offset 40
-temps audit list --operation-type PROJECT_CREATED --user-id 1
-temps audit list --from 2025-01-01T00:00:00Z --to 2025-01-31T23:59:59Z
+bunx @temps-sdk/cli audit list --limit 20 --offset 40
+bunx @temps-sdk/cli audit list --operation-type PROJECT_CREATED --user-id 1
+bunx @temps-sdk/cli audit list --from 2025-01-01T00:00:00Z --to 2025-01-31T23:59:59Z
 
 # Show audit log entry
-temps audit show --id 1 --json
+bunx @temps-sdk/cli audit show --id 1 --json
 ```
 
 **Example output:**
@@ -1376,29 +1374,29 @@ temps audit show --id 1 --json
 
 ```bash
 # List proxy logs
-temps proxy-logs list --limit 20 --json
+bunx @temps-sdk/cli proxy-logs list --limit 20 --json
 
 # With pagination and filters
-temps proxy-logs list --page 2 --limit 50
-temps proxy-logs list --project-id 5 --environment-id 1
-temps proxy-logs list --method POST --status-code 500
-temps proxy-logs list --host app.example.com --path /api/users
-temps proxy-logs list --start-date 2025-01-20T00:00:00Z --end-date 2025-01-21T00:00:00Z
-temps proxy-logs list --sort-by response_time_ms --sort-order desc
-temps proxy-logs list --is-bot --json
-temps proxy-logs list --has-error --json
+bunx @temps-sdk/cli proxy-logs list --page 2 --limit 50
+bunx @temps-sdk/cli proxy-logs list --project-id 5 --environment-id 1
+bunx @temps-sdk/cli proxy-logs list --method POST --status-code 500
+bunx @temps-sdk/cli proxy-logs list --host app.example.com --path /api/users
+bunx @temps-sdk/cli proxy-logs list --start-date 2025-01-20T00:00:00Z --end-date 2025-01-21T00:00:00Z
+bunx @temps-sdk/cli proxy-logs list --sort-by response_time_ms --sort-order desc
+bunx @temps-sdk/cli proxy-logs list --is-bot --json
+bunx @temps-sdk/cli proxy-logs list --has-error --json
 
 # Show log details
-temps proxy-logs show --id 1 --json
+bunx @temps-sdk/cli proxy-logs show --id 1 --json
 
 # Get log by request ID
-temps proxy-logs by-request --request-id req_abc123 --json
+bunx @temps-sdk/cli proxy-logs by-request --request-id req_abc123 --json
 
 # Request statistics
-temps proxy-logs stats --json
+bunx @temps-sdk/cli proxy-logs stats --json
 
 # Today's statistics
-temps proxy-logs today --json
+bunx @temps-sdk/cli proxy-logs today --json
 ```
 
 ---
@@ -1409,16 +1407,16 @@ temps proxy-logs today --json
 
 ```bash
 # Platform info (OS, architecture)
-temps platform info --json
+bunx @temps-sdk/cli platform info --json
 
 # Access/networking info
-temps platform access --json
+bunx @temps-sdk/cli platform access --json
 
 # Public IP
-temps platform public-ip
+bunx @temps-sdk/cli platform public-ip
 
 # Private IP
-temps platform private-ip
+bunx @temps-sdk/cli platform private-ip
 ```
 
 **Example output (`platform access --json`):**
@@ -1438,16 +1436,16 @@ temps platform private-ip
 
 ```bash
 # Show platform settings
-temps settings show --json
+bunx @temps-sdk/cli settings show --json
 
 # Update settings
-temps settings update --preview-domain example.com
+bunx @temps-sdk/cli settings update --preview-domain example.com
 
 # Set external URL
-temps settings set-external-url --url https://app.example.com
+bunx @temps-sdk/cli settings set-external-url --url https://app.example.com
 
 # Set preview domain
-temps settings set-preview-domain --domain preview.example.com
+bunx @temps-sdk/cli settings set-preview-domain --domain preview.example.com
 ```
 
 ---
@@ -1456,16 +1454,16 @@ temps settings set-preview-domain --domain preview.example.com
 
 ```bash
 # List build presets
-temps presets list --json
-temps presets list --type server
-temps presets list --type static
+bunx @temps-sdk/cli presets list --json
+bunx @temps-sdk/cli presets list --type server
+bunx @temps-sdk/cli presets list --type static
 
 # Show preset details
-temps presets show nextjs --json
+bunx @temps-sdk/cli presets show nextjs --json
 
 # List deployment templates
-temps templates list --json
-temps templates list --type server
+bunx @temps-sdk/cli templates list --json
+bunx @temps-sdk/cli templates list --type server
 ```
 
 ---
@@ -1474,19 +1472,19 @@ temps templates list --type server
 
 ```bash
 # List import sources
-temps imports sources --json
+bunx @temps-sdk/cli imports sources --json
 
 # Discover workloads
-temps imports discover -s docker --json
+bunx @temps-sdk/cli imports discover -s docker --json
 
 # Create import plan
-temps imports plan -s docker -w my-container
+bunx @temps-sdk/cli imports plan -s docker -w my-container
 
 # Execute import
-temps imports execute -s docker -w my-container -y
+bunx @temps-sdk/cli imports execute -s docker -w my-container -y
 
 # Check import status
-temps imports status --session-id sess_abc123 --json
+bunx @temps-sdk/cli imports status --session-id sess_abc123 --json
 ```
 
 **Workflow**: `sources` -> `discover` -> `plan` -> `execute` -> `status`
@@ -1497,16 +1495,16 @@ temps imports status --session-id sess_abc123 --json
 
 ```bash
 # Generate markdown docs
-temps docs
+bunx @temps-sdk/cli docs
 
 # Generate MDX docs
-temps docs -f mdx
+bunx @temps-sdk/cli docs -f mdx
 
 # Generate JSON docs
-temps docs -f json
+bunx @temps-sdk/cli docs -f json
 
 # Write to file
-temps docs -f markdown -o docs/cli-reference.md
+bunx @temps-sdk/cli docs -f markdown -o docs/cli-reference.md
 ```
 
 ---
@@ -1526,13 +1524,13 @@ Temps Cloud (`temps.sh`) is a managed hosting service separate from self-hosted 
 
 ```bash
 # Login via device authorization flow (opens browser)
-temps cloud login
+bunx @temps-sdk/cli cloud login
 
 # Show current cloud account
-temps cloud whoami
+bunx @temps-sdk/cli cloud whoami
 
 # Logout from Temps Cloud
-temps cloud logout
+bunx @temps-sdk/cli cloud logout
 ```
 
 **Example output (`cloud whoami`):**
@@ -1553,8 +1551,8 @@ Manage cloud VPS instances. Public endpoints (images, locations, types) work wit
 #### List VPS Instances
 
 ```bash
-temps cloud vps list
-temps cloud vps list --json
+bunx @temps-sdk/cli cloud vps list
+bunx @temps-sdk/cli cloud vps list --json
 ```
 
 **Example output:**
@@ -1570,19 +1568,19 @@ temps cloud vps list --json
 #### Create VPS Instance
 
 ```bash
-# Interactive wizard (image → location → server type)
-temps cloud vps create
+# Interactive wizard (image -> location -> server type)
+bunx @temps-sdk/cli cloud vps create
 
 # Non-interactive
-temps cloud vps create --image ubuntu-22.04 --location fsn1 --type cx22
-temps cloud vps create --image ubuntu-22.04 --location fsn1 --type cx22 --json
+bunx @temps-sdk/cli cloud vps create --image ubuntu-22.04 --location fsn1 --type cx22
+bunx @temps-sdk/cli cloud vps create --image ubuntu-22.04 --location fsn1 --type cx22 --json
 ```
 
 #### Show VPS Details
 
 ```bash
-temps cloud vps show abc12def
-temps cloud vps show abc12def --json
+bunx @temps-sdk/cli cloud vps show abc12def
+bunx @temps-sdk/cli cloud vps show abc12def --json
 ```
 
 Shows instance details, server specs, and provisioning logs.
@@ -1591,20 +1589,20 @@ Shows instance details, server specs, and provisioning logs.
 
 ```bash
 # With confirmation prompt
-temps cloud vps destroy abc12def
+bunx @temps-sdk/cli cloud vps destroy abc12def
 ```
 
 #### Retry Failed Provisioning
 
 ```bash
-temps cloud vps retry abc12def
+bunx @temps-sdk/cli cloud vps retry abc12def
 ```
 
 #### Show VPS Credentials
 
 ```bash
-temps cloud vps credentials abc12def
-temps cloud vps credentials abc12def --json
+bunx @temps-sdk/cli cloud vps credentials abc12def
+bunx @temps-sdk/cli cloud vps credentials abc12def --json
 ```
 
 Shows web panel URL, username, and password.
@@ -1612,23 +1610,23 @@ Shows web panel URL, username, and password.
 #### List Available OS Images (No Auth Required)
 
 ```bash
-temps cloud vps images
-temps cloud vps images --json
+bunx @temps-sdk/cli cloud vps images
+bunx @temps-sdk/cli cloud vps images --json
 ```
 
 #### List Available Locations (No Auth Required)
 
 ```bash
-temps cloud vps locations
-temps cloud vps locations --json
+bunx @temps-sdk/cli cloud vps locations
+bunx @temps-sdk/cli cloud vps locations --json
 ```
 
 #### List Server Types with Pricing (No Auth Required)
 
 ```bash
-temps cloud vps types
-temps cloud vps types --location fsn1
-temps cloud vps types --json
+bunx @temps-sdk/cli cloud vps types
+bunx @temps-sdk/cli cloud vps types --location fsn1
+bunx @temps-sdk/cli cloud vps types --json
 ```
 
 **Example output:**
@@ -1651,14 +1649,15 @@ Provision TLS certificates for `*.temps.dev` subdomains using `acme.sh` with DNS
 
 1. `acme.sh` requests a certificate from Let's Encrypt for your `*.temps.dev` subdomain
 2. Let's Encrypt asks for a DNS TXT record at `_acme-challenge.your-host.username.temps.dev`
-3. The custom DNS hook calls `temps cloud acme set` to create the TXT record on Cloudflare
+3. The custom DNS hook calls `bunx @temps-sdk/cli cloud acme set` to create the TXT record on Cloudflare
 4. Let's Encrypt verifies the record and issues the certificate
 5. `acme.sh` saves the certificate locally and handles auto-renewal
 
 #### Prerequisites
 
-- **Temps CLI** installed (`npm install -g @temps-sdk/cli` or use `bunx @temps-sdk/cli`)
-- **Temps Cloud account** — authenticate with `temps cloud login`
+- **Temps CLI** (`@temps-sdk/cli`) installed — for cloud ACME commands (`bunx @temps-sdk/cli cloud acme`)
+- **Temps server binary** (`temps`) installed on the server — for certificate import (`temps domain import`)
+- **Temps Cloud account** — authenticate with `bunx @temps-sdk/cli cloud login`
 - **acme.sh** installed (see installation below)
 
 #### Hostname Format
@@ -1683,7 +1682,7 @@ Manage `_acme-challenge` TXT records on Cloudflare for DNS-01 validation via the
 
 ```bash
 # Set ACME challenge TXT record for a hostname
-temps cloud acme set --hostname myserver.david --token "token-value-from-acme"
+bunx @temps-sdk/cli cloud acme set --hostname myserver.david --token "token-value-from-acme"
 ```
 
 **Example output:**
@@ -1698,8 +1697,8 @@ temps cloud acme set --hostname myserver.david --token "token-value-from-acme"
 **Check propagation status:**
 
 ```bash
-temps cloud acme status --hostname myserver.david
-temps cloud acme status --hostname myserver.david --json
+bunx @temps-sdk/cli cloud acme status --hostname myserver.david
+bunx @temps-sdk/cli cloud acme status --hostname myserver.david --json
 ```
 
 **Example output:**
@@ -1721,7 +1720,7 @@ temps cloud acme status --hostname myserver.david --json
 **Clean up TXT record:**
 
 ```bash
-temps cloud acme clean --hostname myserver.david
+bunx @temps-sdk/cli cloud acme clean --hostname myserver.david
 ```
 
 **Example output:**
@@ -1733,7 +1732,7 @@ temps cloud acme clean --hostname myserver.david
 
 ```bash
 # Set record and wait until DNS propagation is confirmed (polls every 5s, max 120s)
-temps cloud acme set --hostname myserver.david --token "token-value" --wait
+bunx @temps-sdk/cli cloud acme set --hostname myserver.david --token "token-value" --wait
 ```
 
 #### acme.sh DNS Hook Script
@@ -1744,11 +1743,12 @@ Create the file `~/.acme.sh/dnsapi/dns_temps.sh`:
 #!/usr/bin/env bash
 
 # Temps Cloud DNS hook for acme.sh
-# Uses the Temps CLI (temps cloud acme) to manage _acme-challenge TXT records
+# Uses @temps-sdk/cli (temps cloud acme) to manage _acme-challenge TXT records
 # for *.temps.dev subdomains.
 #
 # Prerequisites:
-#   - temps CLI installed and on PATH
+#   - @temps-sdk/cli installed globally (npm install -g @temps-sdk/cli)
+#     or available via bunx/npx
 #   - Authenticated to Temps Cloud: temps cloud login
 
 dns_temps_add() {
@@ -1767,7 +1767,7 @@ dns_temps_add() {
   fi
 
   # Set TXT record and wait for DNS propagation
-  if ! temps cloud acme set --hostname "$hostname" --token "$txtvalue" --wait; then
+  if ! bunx @temps-sdk/cli cloud acme set --hostname "$hostname" --token "$txtvalue" --wait; then
     _err "Failed to set TXT record via temps CLI"
     return 1
   fi
@@ -1789,7 +1789,7 @@ dns_temps_rm() {
     return 1
   fi
 
-  if ! temps cloud acme clean --hostname "$hostname"; then
+  if ! bunx @temps-sdk/cli cloud acme clean --hostname "$hostname"; then
     _err "Failed to remove TXT record via temps CLI"
     return 1
   fi
@@ -1814,13 +1814,13 @@ curl https://get.acme.sh | sh -s email=your-email@example.com
 source ~/.bashrc  # or ~/.zshrc
 ```
 
-**2. Authenticate to Temps Cloud:**
+**2. Authenticate to Temps Cloud (using `@temps-sdk/cli`):**
 
 ```bash
-temps cloud login
+bunx @temps-sdk/cli cloud login
 ```
 
-The hook script uses the Temps CLI, which reads credentials from `~/.temps/.secrets` automatically.
+The hook script uses the `@temps-sdk/cli`, which reads credentials from `~/.temps/.secrets` automatically.
 
 **3. Issue the certificate:**
 
@@ -1832,7 +1832,7 @@ acme.sh --issue --dns dns_temps \
 
 This will:
 - Request a certificate from Let's Encrypt
-- Call `dns_temps_add()` which runs `temps cloud acme set --wait`
+- Call `dns_temps_add()` which runs `bunx @temps-sdk/cli cloud acme set --wait`
 - Wait for DNS propagation
 - Complete the ACME challenge
 - Save the certificate
@@ -1847,9 +1847,9 @@ This will:
 └── myserver.david.temps.dev.key  # Private key
 ```
 
-**5. Import the certificate into Temps:**
+**5. Import the certificate into Temps (server-side):**
 
-Temps stores certificates in the database (encrypted at rest) and loads them dynamically via SNI during TLS handshake. Use the `temps domain import` command to import the certificate:
+Temps stores certificates in the database (encrypted at rest) and loads them dynamically via SNI during TLS handshake. Run the `temps domain import` command **on the server** using the Temps server binary (not the `@temps-sdk/cli`):
 
 ```bash
 # Import the wildcard certificate
@@ -1867,6 +1867,8 @@ temps domain import \
   --database-url "$TEMPS_DATABASE_URL"
 ```
 
+> **Note:** `temps domain import` is a server-side command from the Temps Rust binary (`temps`), not the `@temps-sdk/cli` package. It runs directly on the server where Temps is installed and requires `--database-url` access.
+
 Use `--force` to overwrite an existing certificate (e.g., on renewal):
 
 ```bash
@@ -1878,7 +1880,7 @@ temps domain import \
   --force
 ```
 
-**6. Verify the certificate is loaded:**
+**6. Verify the certificate is loaded (server-side):**
 
 ```bash
 temps domain list --database-url "$TEMPS_DATABASE_URL"
@@ -1900,7 +1902,7 @@ The hook script automatically polls for propagation via `--wait`. To verify manu
 
 ```bash
 # Using Temps CLI
-temps cloud acme status --hostname myserver.david
+bunx @temps-sdk/cli cloud acme status --hostname myserver.david
 
 # Using dig
 dig TXT _acme-challenge.myserver.david.temps.dev @1.1.1.1
@@ -1908,7 +1910,7 @@ dig TXT _acme-challenge.myserver.david.temps.dev @1.1.1.1
 
 #### Auto-Renewal
 
-`acme.sh` automatically renews certificates via cron (every 60 days by default). To also re-import the renewed certificate into Temps, use the `--install-cert` hook with a `--reloadcmd`:
+`acme.sh` automatically renews certificates via cron (every 60 days by default). To also re-import the renewed certificate into Temps, use the `--install-cert` hook with a `--reloadcmd` that calls the server-side `temps domain import`:
 
 ```bash
 acme.sh --install-cert -d 'myserver.david.temps.dev' \
@@ -1921,6 +1923,8 @@ acme.sh --install-cert -d 'myserver.david.temps.dev' \
     --private-key ~/.acme.sh/myserver.david.temps.dev/myserver.david.temps.dev.key \
     --database-url "$TEMPS_DATABASE_URL" --force'
 ```
+
+> **Note:** The `--reloadcmd` runs on the server where both `acme.sh` and the Temps binary are installed. The `temps domain import` here refers to the server-side Rust binary, not `@temps-sdk/cli`.
 
 This registers a reload command that `acme.sh` runs after every successful renewal, automatically importing the fresh certificate into Temps.
 
@@ -1938,13 +1942,13 @@ acme.sh --renew -d 'myserver.david.temps.dev' --force
 
 #### Troubleshooting
 
-**Authentication error (401/403):**
-- Verify you're logged in: `temps cloud whoami`
-- Re-authenticate: `temps cloud login`
+**Authentication error (401/403) on cloud ACME commands:**
+- Verify you're logged in: `bunx @temps-sdk/cli cloud whoami`
+- Re-authenticate: `bunx @temps-sdk/cli cloud login`
 
 **DNS propagation timeout:**
 - Cloudflare TTL is usually 60–120s; the `--wait` flag polls up to 120s
-- Verify the record was created: `temps cloud acme status --hostname myserver.david`
+- Verify the record was created: `bunx @temps-sdk/cli cloud acme status --hostname myserver.david`
 - Check manually with `dig TXT _acme-challenge.myserver.david.temps.dev @1.1.1.1`
 
 **Let's Encrypt rate limits:**
@@ -1970,9 +1974,9 @@ All write commands support `-y/--yes` to skip interactive prompts:
 export TEMPS_TOKEN=tk_abc123
 export TEMPS_API_URL=https://temps.example.com
 
-temps deploy my-app -b main -e production -y
-temps environments vars set -p my-app -e production -k VERSION -v "1.2.3"
-temps scans trigger --project-id 5 --environment-id 1
+bunx @temps-sdk/cli deploy my-app -b main -e production -y
+bunx @temps-sdk/cli environments vars set -p my-app -e production -k VERSION -v "1.2.3"
+bunx @temps-sdk/cli scans trigger --project-id 5 --environment-id 1
 ```
 
 ### JSON Output
@@ -1981,44 +1985,44 @@ Every list/show command supports `--json` for scripting:
 
 ```bash
 # Get project ID from slug
-temps projects show -p my-app --json | jq '.id'
+bunx @temps-sdk/cli projects show -p my-app --json | jq '.id'
 
 # List running services
-temps services list --json | jq '.[] | select(.status == "running")'
+bunx @temps-sdk/cli services list --json | jq '.[] | select(.status == "running")'
 
 # Check deployment status
-temps deployments status -p my-app -d 42 --json | jq '.status'
+bunx @temps-sdk/cli deployments status -p my-app -d 42 --json | jq '.status'
 ```
 
 ### Command Aliases
 
 | Full Command | Short Alias |
 |---|---|
-| `temps projects` | `temps p` |
-| `temps services` | `temps svc` |
-| `temps containers` | `temps cts` |
-| `temps deployments` | `temps deploys` |
-| `temps runtime-logs` | `temps rtlogs` |
-| `temps webhooks` | `temps hooks` |
-| `temps proxy-logs` | `temps plogs` |
-| `temps apikeys` | `temps keys` |
-| `temps tokens` | `temps token` |
-| `temps custom-domains` | `temps cdom` |
-| `temps dns-providers` | `temps dnsp` |
-| `temps email-domains` | `temps edom` |
-| `temps email-providers` | `temps eprov` |
-| `temps ip-access` | `temps ipa` |
-| `temps load-balancer` | `temps lb` |
-| `temps platform` | `temps plat` |
-| `temps scans` | `temps scan` |
-| `temps errors` | `temps error` |
-| `temps funnels` | `temps funnel` |
-| `temps incidents` | `temps incident` |
-| `temps emails` | `temps email` |
-| `temps templates` | `temps tpl` |
-| `temps presets` | `temps preset` |
-| `temps notification-preferences` | `temps notif-prefs` |
+| `bunx @temps-sdk/cli projects` | `bunx @temps-sdk/cli p` |
+| `bunx @temps-sdk/cli services` | `bunx @temps-sdk/cli svc` |
+| `bunx @temps-sdk/cli containers` | `bunx @temps-sdk/cli cts` |
+| `bunx @temps-sdk/cli deployments` | `bunx @temps-sdk/cli deploys` |
+| `bunx @temps-sdk/cli runtime-logs` | `bunx @temps-sdk/cli rtlogs` |
+| `bunx @temps-sdk/cli webhooks` | `bunx @temps-sdk/cli hooks` |
+| `bunx @temps-sdk/cli proxy-logs` | `bunx @temps-sdk/cli plogs` |
+| `bunx @temps-sdk/cli apikeys` | `bunx @temps-sdk/cli keys` |
+| `bunx @temps-sdk/cli tokens` | `bunx @temps-sdk/cli token` |
+| `bunx @temps-sdk/cli custom-domains` | `bunx @temps-sdk/cli cdom` |
+| `bunx @temps-sdk/cli dns-providers` | `bunx @temps-sdk/cli dnsp` |
+| `bunx @temps-sdk/cli email-domains` | `bunx @temps-sdk/cli edom` |
+| `bunx @temps-sdk/cli email-providers` | `bunx @temps-sdk/cli eprov` |
+| `bunx @temps-sdk/cli ip-access` | `bunx @temps-sdk/cli ipa` |
+| `bunx @temps-sdk/cli load-balancer` | `bunx @temps-sdk/cli lb` |
+| `bunx @temps-sdk/cli platform` | `bunx @temps-sdk/cli plat` |
+| `bunx @temps-sdk/cli scans` | `bunx @temps-sdk/cli scan` |
+| `bunx @temps-sdk/cli errors` | `bunx @temps-sdk/cli error` |
+| `bunx @temps-sdk/cli funnels` | `bunx @temps-sdk/cli funnel` |
+| `bunx @temps-sdk/cli incidents` | `bunx @temps-sdk/cli incident` |
+| `bunx @temps-sdk/cli emails` | `bunx @temps-sdk/cli email` |
+| `bunx @temps-sdk/cli templates` | `bunx @temps-sdk/cli tpl` |
+| `bunx @temps-sdk/cli presets` | `bunx @temps-sdk/cli preset` |
+| `bunx @temps-sdk/cli notification-preferences` | `bunx @temps-sdk/cli notif-prefs` |
 
-| `temps cloud vps` | — |
+| `bunx @temps-sdk/cli cloud vps` | — |
 
 Within commands, common subcommand aliases: `list` -> `ls`, `create` -> `add`/`new`, `remove` -> `rm`, `show` -> `get`.

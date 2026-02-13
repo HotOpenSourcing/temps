@@ -22,10 +22,7 @@ import { ProtectedLayout } from './components/layout/ProtectedLayout'
 import { SidebarInset, SidebarProvider } from './components/ui/sidebar'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import { BreadcrumbProvider } from './contexts/BreadcrumbContext'
-import {
-  PlatformAccessProvider,
-  usePlatformAccess,
-} from './contexts/PlatformAccessContext'
+import { PlatformAccessProvider } from './contexts/PlatformAccessContext'
 import './globals.css'
 import { MonitoringSettings } from './components/monitoring/MonitoringSettings'
 import { AddNotificationProvider } from './pages/AddNotificationProvider'
@@ -300,33 +297,14 @@ const AuthenticatedRoutes = () => {
     return <DemoRoutes />
   }
 
-  return <FullAppRoutes />
+  return (
+    <PlatformAccessProvider>
+      <FullAppRoutes />
+    </PlatformAccessProvider>
+  )
 }
 
-// Component that uses the PlatformAccess context
 const AppContent = () => {
-  const { accessInfo, isLoading, error } = usePlatformAccess()
-
-  // Show loading state while fetching platform info (optional - can be removed for smoother UX)
-  if (isLoading && !accessInfo) {
-    return (
-      <div className="flex items-center justify-center min-h-screen">
-        <div className="text-center space-y-2">
-          <Loader2 className="h-8 w-8 animate-spin mx-auto text-muted-foreground" />
-          <p className="text-sm text-muted-foreground">
-            Initializing platform...
-          </p>
-        </div>
-      </div>
-    )
-  }
-
-  // Show error state if platform info fails to load (optional)
-  if (error && !accessInfo) {
-    console.error('[PlatformAccess] Error loading platform info:', error)
-    // Continue rendering the app even if platform info fails
-  }
-
   return (
     <BrowserRouter>
       <AuthProvider>
@@ -403,9 +381,7 @@ const App = () => {
     <ThemeProvider defaultTheme="system" enableSystem attribute="class">
       <ThemeWrapper>
         <QueryClientProvider client={queryClient}>
-          <PlatformAccessProvider>
-            <AppContent />
-          </PlatformAccessProvider>
+          <AppContent />
         </QueryClientProvider>
         <Toaster position="top-center" />
       </ThemeWrapper>

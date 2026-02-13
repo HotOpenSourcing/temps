@@ -192,6 +192,27 @@ impl PerformanceService {
         Self { db }
     }
 
+    /// Translate frontend device type filter values ("desktop", "mobile") to the
+    /// woothee category values stored in the database ("pc", "smartphone", "mobilephone").
+    fn woothee_device_types(device_type: &str) -> Vec<String> {
+        match device_type.to_lowercase().as_str() {
+            "desktop" => vec!["pc".to_string()],
+            "mobile" => vec!["smartphone".to_string(), "mobilephone".to_string()],
+            // Pass through as-is for any other value (e.g. direct woothee categories)
+            other => vec![other.to_string()],
+        }
+    }
+
+    /// Apply device type filter to a SeaORM query, translating frontend values
+    /// to woothee categories stored in the database.
+    fn apply_device_filter(
+        query: Select<performance_metrics::Entity>,
+        device_type: &str,
+    ) -> Select<performance_metrics::Entity> {
+        let categories = Self::woothee_device_types(device_type);
+        query.filter(performance_metrics::Column::DeviceType.is_in(categories))
+    }
+
     pub async fn get_metrics(
         &self,
         start_date: UtcDateTime,
@@ -199,6 +220,7 @@ impl PerformanceService {
         project_id: i32,
         environment_id: Option<i32>,
         deployment_id: Option<i32>,
+        device_type: Option<String>,
     ) -> Result<PerformanceMetricsResponse, PerformanceError> {
         // Get all metrics for the project and date range
         let mut query = performance_metrics::Entity::find()
@@ -211,6 +233,10 @@ impl PerformanceService {
 
         if let Some(dep_id) = deployment_id {
             query = query.filter(performance_metrics::Column::DeploymentId.eq(dep_id));
+        }
+
+        if let Some(ref device) = device_type {
+            query = Self::apply_device_filter(query, device);
         }
 
         let metrics = query.all(self.db.as_ref()).await?;
@@ -275,6 +301,7 @@ impl PerformanceService {
         project_id: i32,
         environment_id: Option<i32>,
         deployment_id: Option<i32>,
+        device_type: Option<String>,
     ) -> Result<MetricsOverTimeResponse, PerformanceError> {
         // Get all metrics for percentile calculations
         let mut percentile_query = performance_metrics::Entity::find()
@@ -289,6 +316,10 @@ impl PerformanceService {
         if let Some(dep_id) = deployment_id {
             percentile_query =
                 percentile_query.filter(performance_metrics::Column::DeploymentId.eq(dep_id));
+        }
+
+        if let Some(ref device) = device_type {
+            percentile_query = Self::apply_device_filter(percentile_query, device);
         }
 
         let all_metrics = percentile_query.all(self.db.as_ref()).await?;
@@ -320,6 +351,10 @@ impl PerformanceService {
 
         if let Some(dep_id) = deployment_id {
             time_query = time_query.filter(performance_metrics::Column::DeploymentId.eq(dep_id));
+        }
+
+        if let Some(ref device) = device_type {
+            time_query = Self::apply_device_filter(time_query, device);
         }
 
         let metrics = time_query.all(self.db.as_ref()).await?;

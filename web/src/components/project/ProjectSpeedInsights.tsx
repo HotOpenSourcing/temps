@@ -2,6 +2,7 @@ import { ProjectResponse } from '@/api/client'
 import {
   getEnvironmentsOptions,
   getMetricsOverTimeOptions,
+  hasPerformanceMetricsOptions,
 } from '@/api/client/@tanstack/react-query.gen'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
@@ -251,6 +252,15 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
   )
   const endDate = useMemo(() => new Date().toISOString(), [])
 
+  // Check if the project has ANY performance data (regardless of device filter)
+  const { data: hasMetricsData } = useQuery({
+    ...hasPerformanceMetricsOptions({
+      query: {
+        project_id: project.id,
+      },
+    }),
+  })
+
   const {
     data: metrics,
     isLoading,
@@ -263,6 +273,7 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
         end_date: endDate,
         project_id: project.id,
         environment_id: selectedEnvironment!,
+        device_type: device,
       },
     }),
     enabled: selectedEnvironment !== null, // Only fetch when environment is selected
@@ -318,11 +329,13 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
     return avgValidPercent < 50
   }, [metrics])
 
-  // Check if we have no performance data at all
-  const hasNoData = useMemo(() => {
+  // Check if the project has NO performance data at all (show setup screen)
+  const hasNoDataAtAll = hasMetricsData?.has_metrics === false
+
+  // Check if the current filtered query returned no data (show empty filter state)
+  const hasNoFilteredData = useMemo(() => {
     if (!metrics || isLoading) return false
 
-    // Check if all metric arrays are empty or all values are null
     const countValid = (arr: any[]) =>
       arr?.filter((v) => v !== null && v !== undefined).length || 0
 
@@ -370,8 +383,8 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
     )
   }
 
-  // Show setup instructions if no data
-  if (hasNoData && !isLoading) {
+  // Show setup instructions only if there's no data at all for the project
+  if (hasNoDataAtAll && !isLoading) {
     return (
       <div className="space-y-6">
         {/* Header */}
@@ -634,6 +647,23 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
             <Skeleton className="h-[400px] w-full" />
           </div>
         </div>
+      ) : hasNoFilteredData ? (
+        <Card>
+          <CardContent className="flex flex-col items-center justify-center py-16">
+            {device === 'mobile' ? (
+              <Smartphone className="h-10 w-10 text-muted-foreground mb-4" />
+            ) : (
+              <Monitor className="h-10 w-10 text-muted-foreground mb-4" />
+            )}
+            <h3 className="text-lg font-semibold mb-1">
+              No {device} data available
+            </h3>
+            <p className="text-sm text-muted-foreground text-center max-w-md">
+              No performance metrics have been recorded for {device} devices in the selected time range. Try switching to{' '}
+              {device === 'desktop' ? 'mobile' : 'desktop'} or selecting a different time range.
+            </p>
+          </CardContent>
+        </Card>
       ) : (
         <div className="grid gap-6 lg:grid-cols-[350px_1fr]">
           {/* Metrics Overview */}

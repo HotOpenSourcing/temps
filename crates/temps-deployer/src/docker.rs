@@ -747,6 +747,13 @@ impl ImageBuilder for DockerRuntime {
 
         let created = inspect.created.map(|dt| dt.to_rfc3339());
 
+        // Extract WORKDIR from the image config
+        let working_dir = inspect
+            .config
+            .as_ref()
+            .and_then(|c| c.working_dir.clone())
+            .filter(|w| !w.is_empty());
+
         Ok(crate::ImageInfo {
             id: inspect.id.unwrap_or_default(),
             architecture,
@@ -755,6 +762,7 @@ impl ImageBuilder for DockerRuntime {
             size_bytes,
             tags,
             created,
+            working_dir,
         })
     }
 

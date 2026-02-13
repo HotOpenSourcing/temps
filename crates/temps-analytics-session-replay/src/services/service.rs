@@ -6,7 +6,7 @@ use flate2::read::ZlibDecoder;
 use sea_orm::sea_query::Expr;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, FromQueryResult,
-    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, RelationTrait, Set,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -14,9 +14,9 @@ use std::io::Read;
 use std::sync::Arc;
 use temps_core::UtcDateTime;
 use thiserror::Error;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
-use temps_entities::{session_replay_events, session_replay_sessions, visitor};
+use temps_entities::{ip_geolocations, session_replay_events, session_replay_sessions, visitor};
 
 #[derive(Error, Debug)]
 pub enum SessionReplayError {
@@ -101,7 +101,7 @@ pub struct VisitorInfo {
     pub user_agent: Option<String>,
     pub is_crawler: bool,
     pub crawler_name: Option<String>,
-    pub custom_data: Option<String>,
+    pub custom_data: Option<serde_json::Value>,
 }
 
 // Typed query result struct for efficient row parsing
@@ -131,7 +131,12 @@ pub struct SessionReplayQueryResult {
     pub visitor_user_agent: Option<String>,
     pub visitor_is_crawler: bool,
     pub visitor_crawler_name: Option<String>,
-    pub visitor_custom_data: Option<String>,
+    pub visitor_custom_data: Option<serde_json::Value>,
+    // Geolocation fields
+    pub visitor_city: Option<String>,
+    pub visitor_country: Option<String>,
+    pub visitor_country_code: Option<String>,
+    pub visitor_region: Option<String>,
 }
 
 // Projection for list query
@@ -166,7 +171,12 @@ struct SessionWithVisitorAndCountRow {
     pub visitor_user_agent: Option<String>,
     pub visitor_is_crawler: bool,
     pub visitor_crawler_name: Option<String>,
-    pub visitor_custom_data: Option<String>,
+    pub visitor_custom_data: Option<serde_json::Value>,
+    // Geolocation fields (from ip_geolocations via visitor)
+    pub visitor_city: Option<String>,
+    pub visitor_country: Option<String>,
+    pub visitor_country_code: Option<String>,
+    pub visitor_region: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -218,7 +228,12 @@ pub struct SessionReplayWithVisitor {
     pub visitor_last_seen: UtcDateTime,
     pub visitor_is_crawler: bool,
     pub visitor_crawler_name: Option<String>,
-    pub visitor_custom_data: Option<String>,
+    pub visitor_custom_data: Option<serde_json::Value>,
+    // Geolocation fields
+    pub visitor_city: Option<String>,
+    pub visitor_country: Option<String>,
+    pub visitor_country_code: Option<String>,
+    pub visitor_region: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -759,6 +774,10 @@ impl SessionReplayService {
         let mut query = session_replay_sessions::Entity::find()
             .filter(session_replay_sessions::Column::ProjectId.eq(project_id))
             .inner_join(visitor::Entity)
+            .join(
+                sea_orm::JoinType::LeftJoin,
+                visitor::Relation::IpGeolocations.def(),
+            )
             .select_only()
             .columns([
                 session_replay_sessions::Column::Id,
@@ -820,6 +839,26 @@ impl SessionReplayService {
                 Expr::col((visitor::Entity, visitor::Column::CustomData)),
                 "visitor_custom_data",
             )
+            // Geolocation fields from ip_geolocations (LEFT JOIN)
+            .expr_as(
+                Expr::col((ip_geolocations::Entity, ip_geolocations::Column::City)),
+                "visitor_city",
+            )
+            .expr_as(
+                Expr::col((ip_geolocations::Entity, ip_geolocations::Column::Country)),
+                "visitor_country",
+            )
+            .expr_as(
+                Expr::col((
+                    ip_geolocations::Entity,
+                    ip_geolocations::Column::CountryCode,
+                )),
+                "visitor_country_code",
+            )
+            .expr_as(
+                Expr::col((ip_geolocations::Entity, ip_geolocations::Column::Region)),
+                "visitor_region",
+            )
             .order_by_desc(session_replay_sessions::Column::CreatedAt);
 
         if let Some(env_id) = environment_id {
@@ -868,6 +907,11 @@ impl SessionReplayService {
                     visitor_is_crawler: row.visitor_is_crawler,
                     visitor_crawler_name: row.visitor_crawler_name,
                     visitor_custom_data: row.visitor_custom_data,
+                    // Geolocation fields
+                    visitor_city: row.visitor_city,
+                    visitor_country: row.visitor_country,
+                    visitor_country_code: row.visitor_country_code,
+                    visitor_region: row.visitor_region,
                 }
             })
             .collect();
@@ -914,9 +958,14 @@ impl SessionReplayService {
                 v.user_agent as visitor_user_agent,
                 v.is_crawler as visitor_is_crawler,
                 v.crawler_name as visitor_crawler_name,
-                v.custom_data as visitor_custom_data
+                v.custom_data as visitor_custom_data,
+                g.city as visitor_city,
+                g.country as visitor_country,
+                g.country_code as visitor_country_code,
+                g.region as visitor_region
             FROM session_replay_sessions s
             INNER JOIN visitor v ON s.visitor_id = v.id
+            LEFT JOIN ip_geolocations g ON v.ip_address_id = g.id
             WHERE s.visitor_id = $1
             ORDER BY s.created_at DESC
             LIMIT {} OFFSET {}
@@ -959,7 +1008,11 @@ impl SessionReplayService {
             pub visitor_user_agent: Option<String>,
             pub visitor_is_crawler: bool,
             pub visitor_crawler_name: Option<String>,
-            pub visitor_custom_data: Option<String>,
+            pub visitor_custom_data: Option<serde_json::Value>,
+            pub visitor_city: Option<String>,
+            pub visitor_country: Option<String>,
+            pub visitor_country_code: Option<String>,
+            pub visitor_region: Option<String>,
         }
 
         let query_results = SessionReplayWithVisitorQueryRow::find_by_statement(statement)
@@ -1000,6 +1053,11 @@ impl SessionReplayService {
                     visitor_is_crawler: row.visitor_is_crawler,
                     visitor_crawler_name: row.visitor_crawler_name,
                     visitor_custom_data: row.visitor_custom_data,
+                    // Geolocation fields
+                    visitor_city: row.visitor_city,
+                    visitor_country: row.visitor_country,
+                    visitor_country_code: row.visitor_country_code,
+                    visitor_region: row.visitor_region,
                 }
             })
             .collect();
@@ -1044,9 +1102,14 @@ impl SessionReplayService {
                 v.user_agent as visitor_user_agent,
                 v.is_crawler as visitor_is_crawler,
                 v.crawler_name as visitor_crawler_name,
-                v.custom_data as visitor_custom_data
+                v.custom_data as visitor_custom_data,
+                g.city as visitor_city,
+                g.country as visitor_country,
+                g.country_code as visitor_country_code,
+                g.region as visitor_region
             FROM session_replay_sessions s
             INNER JOIN visitor v ON s.visitor_id = v.id
+            LEFT JOIN ip_geolocations g ON v.ip_address_id = g.id
             WHERE s.id = $1
         "#;
 
@@ -1157,9 +1220,14 @@ impl SessionReplayService {
                 v.user_agent as visitor_user_agent,
                 v.is_crawler as visitor_is_crawler,
                 v.crawler_name as visitor_crawler_name,
-                v.custom_data as visitor_custom_data
+                v.custom_data as visitor_custom_data,
+                g.city as visitor_city,
+                g.country as visitor_country,
+                g.country_code as visitor_country_code,
+                g.region as visitor_region
             FROM session_replay_sessions s
             INNER JOIN visitor v ON s.visitor_id = v.id
+            LEFT JOIN ip_geolocations g ON v.ip_address_id = g.id
             WHERE s.id = $1
         "#;
 
@@ -1198,7 +1266,11 @@ impl SessionReplayService {
             pub visitor_user_agent: Option<String>,
             pub visitor_is_crawler: bool,
             pub visitor_crawler_name: Option<String>,
-            pub visitor_custom_data: Option<String>,
+            pub visitor_custom_data: Option<serde_json::Value>,
+            pub visitor_city: Option<String>,
+            pub visitor_country: Option<String>,
+            pub visitor_country_code: Option<String>,
+            pub visitor_region: Option<String>,
         }
 
         let row = SessionReplayWithVisitorRow::find_by_statement(statement)
@@ -1237,6 +1309,11 @@ impl SessionReplayService {
             visitor_is_crawler: row.visitor_is_crawler,
             visitor_crawler_name: row.visitor_crawler_name,
             visitor_custom_data: row.visitor_custom_data,
+            // Geolocation fields
+            visitor_city: row.visitor_city,
+            visitor_country: row.visitor_country,
+            visitor_country_code: row.visitor_country_code,
+            visitor_region: row.visitor_region,
         })
     }
 

@@ -1305,6 +1305,10 @@ export type DeleteBlobResponse = {
     deleted: number;
 };
 
+export type DeleteResponse = {
+    deleted: number;
+};
+
 /**
  * Demo mode settings for allowing unauthenticated access to demo subdomain
  */
@@ -3558,6 +3562,142 @@ export type IpAccessControlResponse = {
 };
 
 /**
+ * A single event in the visitor journey timeline
+ */
+export type JourneyEvent = {
+    /**
+     * Custom event properties (for custom events)
+     */
+    event_data?: unknown;
+    /**
+     * Resolved event name (event_name for custom events, event_type for system events)
+     */
+    event_name: string;
+    /**
+     * Event type: "page_view", "page_leave", "custom", "web_vitals"
+     */
+    event_type: string;
+    /**
+     * Event ID
+     */
+    id: number;
+    /**
+     * Whether this was a bounce
+     */
+    is_bounce: boolean;
+    /**
+     * Whether this is the entry page of the session
+     */
+    is_entry: boolean;
+    /**
+     * Whether this is the exit page of the session
+     */
+    is_exit: boolean;
+    /**
+     * When the event occurred
+     */
+    occurred_at: string;
+    /**
+     * Page path where the event happened
+     */
+    page_path?: string | null;
+    /**
+     * Page title (if available)
+     */
+    page_title?: string | null;
+    /**
+     * Referrer URL for this event
+     */
+    referrer?: string | null;
+    /**
+     * Scroll depth percentage (0-100)
+     */
+    scroll_depth?: number | null;
+    /**
+     * Page number within the session (1-indexed)
+     */
+    session_page_number?: number | null;
+    /**
+     * Time spent on page in seconds (computed, not from column)
+     */
+    time_on_page?: number | null;
+};
+
+/**
+ * A session within the visitor journey, grouping events
+ */
+export type JourneySession = {
+    /**
+     * Traffic source: channel (e.g. "organic", "direct", "social")
+     */
+    channel?: string | null;
+    /**
+     * Session duration in seconds
+     */
+    duration_seconds: number;
+    /**
+     * When the session ended
+     */
+    ended_at?: string | null;
+    /**
+     * Entry page path
+     */
+    entry_path?: string | null;
+    /**
+     * Events within this session, ordered chronologically
+     */
+    events: Array<JourneyEvent>;
+    /**
+     * Total events in this session
+     */
+    events_count: number;
+    /**
+     * Exit page path
+     */
+    exit_path?: string | null;
+    /**
+     * Whether the session was a bounce
+     */
+    is_bounced: boolean;
+    /**
+     * Whether the visitor was engaged (had non-pageview events)
+     */
+    is_engaged: boolean;
+    /**
+     * Number of page views in this session
+     */
+    page_views: number;
+    /**
+     * Traffic source: referrer URL
+     */
+    referrer?: string | null;
+    /**
+     * Traffic source: referrer hostname
+     */
+    referrer_hostname?: string | null;
+    /**
+     * Session internal ID
+     */
+    session_id: number;
+    /**
+     * When the session started
+     */
+    started_at: string;
+    /**
+     * UTM campaign parameter
+     */
+    utm_campaign?: string | null;
+    /**
+     * UTM medium parameter
+     */
+    utm_medium?: string | null;
+    /**
+     * UTM source parameter
+     */
+    utm_source?: string | null;
+};
+
+/**
  * Request to get keys matching a pattern
  */
 export type KeysRequest = {
@@ -3790,6 +3930,10 @@ export type LiveVisitorInfo = {
     country?: string | null;
     country_code?: string | null;
     crawler_name?: string | null;
+    /**
+     * Most recent page path visited by this visitor
+     */
+    current_page?: string | null;
     custom_data?: unknown;
     environment_id: number;
     first_seen: string;
@@ -4194,6 +4338,92 @@ export type PagePathDetailResponse = {
     unique_visitors: number;
 };
 
+/**
+ * A single page with its entry/exit/bounce statistics
+ */
+export type PageFlowEntry = {
+    /** The page path */
+    page_path: string;
+    /** Number of times this page was the entry page of a session */
+    entry_count: number;
+    /** Number of times this page was the exit page of a session */
+    exit_count: number;
+    /** Number of times visitors bounced on this page */
+    bounce_count: number;
+    /** Total page views for this page */
+    total_views: number;
+    /** Average time spent on this page in seconds */
+    avg_time_on_page?: number | null;
+    /** Entry rate: entry_count / total_views */
+    entry_rate: number;
+    /** Exit rate: exit_count / total_views */
+    exit_rate: number;
+    /** Bounce rate: bounce_count / entry_count */
+    bounce_rate: number;
+};
+
+/**
+ * A page-to-page transition with count
+ */
+export type PageTransition = {
+    /** The source page path */
+    from_page: string;
+    /** The destination page path */
+    to_page: string;
+    /** Number of times this transition occurred */
+    transition_count: number;
+    /** Percentage of transitions from the source page that go to this destination */
+    percentage: number;
+};
+
+/**
+ * Drop-off point: pages where visitors leave the site
+ */
+export type DropOffPoint = {
+    /** The page path where visitors drop off */
+    page_path: string;
+    /** Number of exits from this page */
+    exit_count: number;
+    /** Total views of this page */
+    total_views: number;
+    /** Exit rate for this page */
+    exit_rate: number;
+};
+
+/**
+ * Complete page flow analytics response
+ */
+export type PageFlowResponse = {
+    /** Top entry pages (where visitors land), sorted by entry_count DESC */
+    top_entry_pages: Array<PageFlowEntry>;
+    /** Top exit pages (where visitors leave), sorted by exit_count DESC */
+    top_exit_pages: Array<PageFlowEntry>;
+    /** Top drop-off points (highest exit rates with meaningful traffic) */
+    drop_off_points: Array<DropOffPoint>;
+    /** Page-to-page transitions (most common navigation paths) */
+    transitions: Array<PageTransition>;
+    /** Total unique pages seen in the period */
+    total_pages: number;
+    /** Total sessions in the period */
+    total_sessions: number;
+};
+
+/**
+ * Query parameters for page flow analytics
+ */
+export type PageFlowQuery = {
+    project_id: number;
+    environment_id?: number | null;
+    start_date: string;
+    end_date: string;
+    /** Maximum number of entry/exit pages to return (default: 20) */
+    limit?: number | null;
+    /** Maximum number of transitions to return (default: 50) */
+    transitions_limit?: number | null;
+    /** Minimum views for drop-off analysis (default: 5) */
+    min_views_for_dropoff?: number | null;
+};
+
 export type PagePathInfo = {
     avg_time_seconds?: number | null;
     first_seen: string;
@@ -4201,6 +4431,54 @@ export type PagePathInfo = {
     page_path: string;
     page_view_count: number;
     session_count: number;
+};
+
+/**
+ * Query parameters for page path visitors
+ */
+export type PagePathVisitorsQuery = {
+    end_date: string;
+    environment_id?: number | null;
+    /**
+     * Page number (1-based, default: 1)
+     */
+    page?: number | null;
+    /**
+     * The specific page path to get visitors for
+     */
+    page_path: string;
+    /**
+     * Items per page (default: 50, max: 100)
+     */
+    per_page?: number | null;
+    project_id: number;
+    start_date: string;
+};
+
+/**
+ * Response for page path visitors endpoint
+ */
+export type PagePathVisitorsResponse = {
+    /**
+     * Current page number
+     */
+    page: number;
+    /**
+     * The page path
+     */
+    page_path: string;
+    /**
+     * Items per page
+     */
+    per_page: number;
+    /**
+     * Individual visitor sessions
+     */
+    sessions: Array<PageVisitorSession>;
+    /**
+     * Total number of visitor sessions matching the query
+     */
+    total_count: number;
 };
 
 export type PagePathsQuery = {
@@ -4263,6 +4541,76 @@ export type PageSessionStatsQuery = {
 export type PageVisit = {
     path: string;
     visits: number;
+};
+
+/**
+ * Individual visitor session that viewed a specific page
+ */
+export type PageVisitorSession = {
+    /**
+     * Browser name
+     */
+    browser?: string | null;
+    /**
+     * Visitor's city
+     */
+    city?: string | null;
+    /**
+     * Visitor's country
+     */
+    country?: string | null;
+    /**
+     * Visitor's country code
+     */
+    country_code?: string | null;
+    /**
+     * Device type (Desktop, Mobile, Tablet)
+     */
+    device_type?: string | null;
+    /**
+     * Whether this was a bounce
+     */
+    is_bounce: boolean;
+    /**
+     * Whether this was the entry page for the session
+     */
+    is_entry: boolean;
+    /**
+     * Whether this was the exit page for the session
+     */
+    is_exit: boolean;
+    /**
+     * Operating system
+     */
+    operating_system?: string | null;
+    /**
+     * Referrer URL
+     */
+    referrer?: string | null;
+    /**
+     * Session ID
+     */
+    session_id?: string | null;
+    /**
+     * Page number in session flow
+     */
+    session_page_number?: number | null;
+    /**
+     * Time spent on this page in seconds
+     */
+    time_on_page?: number | null;
+    /**
+     * When the page was viewed
+     */
+    viewed_at: string;
+    /**
+     * Visitor numeric ID
+     */
+    visitor_id: number;
+    /**
+     * Visitor UUID
+     */
+    visitor_uuid: string;
 };
 
 export type PagesComparisonResponse = {
@@ -4368,6 +4716,10 @@ export type PathVisitorsResponse = {
 
 export type PerformanceMetricsQuery = {
     deployment_id?: number | null;
+    /**
+     * Device type filter: "desktop" or "mobile"
+     */
+    device_type?: string | null;
     end_date: string;
     environment_id?: number | null;
     project_id: number;
@@ -5115,6 +5467,10 @@ export type RegisterRequest = {
     password: string;
 };
 
+export type ReleaseListResponse = {
+    releases: Array<string>;
+};
+
 export type RepositoryListQuery = {
     direction?: string | null;
     language?: string | null;
@@ -5456,6 +5812,29 @@ export type SendEmailResponseBody = {
     status: string;
 };
 
+export type SentryChunkUploadResponse = {
+    accept: Array<string>;
+    chunkSize: number;
+    chunksPerRequest: number;
+    compression: Array<string>;
+    concurrency: number;
+    hashAlgorithm: string;
+    maxFileSize: number;
+    maxRequestSize: number;
+    url: string;
+};
+
+export type SentryCreateReleaseRequest = {
+    /**
+     * Project slugs this release belongs to
+     */
+    projects?: Array<string>;
+    /**
+     * Release version identifier
+     */
+    version: string;
+};
+
 export type SentryEventRequest = {
     event_id?: string | null;
     message?: string | null;
@@ -5465,6 +5844,29 @@ export type SentryEventRequest = {
 
 export type SentryEventResponse = {
     id: string;
+};
+
+export type SentryReleaseFileResponse = {
+    dateCreated: string;
+    dist?: string | null;
+    headers: unknown;
+    id: string;
+    name: string;
+    sha1: string;
+    size: number;
+};
+
+export type SentryReleaseProjectRef = {
+    name: string;
+    slug: string;
+};
+
+export type SentryReleaseResponse = {
+    dateCreated: string;
+    dateReleased?: string | null;
+    projects: Array<SentryReleaseProjectRef>;
+    shortVersion: string;
+    version: string;
 };
 
 /**
@@ -5646,14 +6048,18 @@ export type SessionReplayWithVisitorDto = {
     user_agent?: string | null;
     viewport_height?: number | null;
     viewport_width?: number | null;
+    visitor_city?: string | null;
+    visitor_country?: string | null;
+    visitor_country_code?: string | null;
     visitor_crawler_name?: string | null;
-    visitor_custom_data?: string | null;
+    visitor_custom_data?: unknown;
     visitor_environment_id: number;
     visitor_first_seen: string;
     visitor_id: number;
     visitor_is_crawler: boolean;
     visitor_last_seen: string;
     visitor_project_id: number;
+    visitor_region?: string | null;
     visitor_uuid: string;
 };
 
@@ -5975,6 +6381,22 @@ export type SourceBackupIndexResponse = {
      * When the index was last updated
      */
     last_updated: string;
+};
+
+export type SourceMapListResponse = {
+    source_maps: Array<SourceMapResponse>;
+    total: number;
+};
+
+export type SourceMapResponse = {
+    checksum?: string | null;
+    created_at: string;
+    dist?: string | null;
+    file_path: string;
+    id: number;
+    project_id: number;
+    release: string;
+    size_bytes: number;
 };
 
 /**
@@ -7016,6 +7438,10 @@ export type VisitorInfo = {
     country?: string | null;
     country_code?: string | null;
     crawler_name?: string | null;
+    /**
+     * Most recent page path visited by this visitor
+     */
+    current_page?: string | null;
     custom_data?: unknown;
     environment_id: number;
     first_seen: string;
@@ -7032,6 +7458,33 @@ export type VisitorInfo = {
     timezone?: string | null;
     user_agent?: string | null;
     visitor_id: string;
+};
+
+export type VisitorJourneyQuery = {
+    limit_sessions?: number | null;
+    project_id: number;
+};
+
+/**
+ * Complete visitor journey response
+ */
+export type VisitorJourneyResponse = {
+    /**
+     * Sessions with their events, ordered newest first
+     */
+    sessions: Array<JourneySession>;
+    /**
+     * Total number of events across all sessions
+     */
+    total_events: number;
+    /**
+     * Total number of sessions
+     */
+    total_sessions: number;
+    /**
+     * Visitor internal ID
+     */
+    visitor_id: number;
 };
 
 export type VisitorLocationsQuery = {
@@ -7302,6 +7755,17 @@ export type GetPlatformInfoData = {
     path?: never;
     query?: never;
     url: '/.well-known/temps.json';
+};
+
+export type GetPlatformInfoErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
 };
 
 export type GetPlatformInfoResponses = {
@@ -7753,6 +8217,118 @@ export type GetPagePathDetailResponses = {
 };
 
 export type GetPagePathDetailResponse = GetPagePathDetailResponses[keyof GetPagePathDetailResponses];
+
+export type GetPageFlowData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * Environment ID (optional)
+         */
+        environment_id?: number;
+        /**
+         * Start date in ISO 8601 format
+         */
+        start_date: string;
+        /**
+         * End date in ISO 8601 format
+         */
+        end_date: string;
+        /**
+         * Max entry/exit pages to return (default: 20, max: 100)
+         */
+        limit?: number;
+        /**
+         * Max page transitions to return (default: 50, max: 200)
+         */
+        transitions_limit?: number;
+        /**
+         * Minimum views for drop-off analysis (default: 5)
+         */
+        min_views_for_dropoff?: number;
+    };
+    url: '/analytics/page-flow';
+};
+
+export type GetPageFlowErrors = {
+    /**
+     * Invalid parameters
+     */
+    400: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GetPageFlowResponses = {
+    /**
+     * Successfully retrieved page flow analytics
+     */
+    200: PageFlowResponse;
+};
+
+export type GetPageFlowResponse = GetPageFlowResponses[keyof GetPageFlowResponses];
+
+export type GetPagePathVisitorsData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * The page path to get visitors for (URL-encoded)
+         */
+        page_path: string;
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * Environment ID (optional)
+         */
+        environment_id?: number;
+        /**
+         * Start date in ISO 8601 format
+         */
+        start_date: string;
+        /**
+         * End date in ISO 8601 format
+         */
+        end_date: string;
+        /**
+         * Page number (1-based, default: 1)
+         */
+        page?: number;
+        /**
+         * Items per page (default: 50, max: 100)
+         */
+        per_page?: number;
+    };
+    url: '/analytics/page-path-visitors';
+};
+
+export type GetPagePathVisitorsErrors = {
+    /**
+     * Invalid parameters
+     */
+    400: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GetPagePathVisitorsResponses = {
+    /**
+     * Successfully retrieved page path visitors
+     */
+    200: PagePathVisitorsResponse;
+};
+
+export type GetPagePathVisitorsResponse = GetPagePathVisitorsResponses[keyof GetPagePathVisitorsResponses];
 
 export type GetPagePathsData = {
     body?: never;
@@ -8246,6 +8822,51 @@ export type GetVisitorInfoResponses = {
 
 export type GetVisitorInfoResponse = GetVisitorInfoResponses[keyof GetVisitorInfoResponses];
 
+export type GetVisitorJourneyData = {
+    body?: never;
+    path: {
+        /**
+         * Visitor numeric ID
+         */
+        visitor_id: number;
+    };
+    query: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * Maximum number of sessions to return (default: 50)
+         */
+        limit_sessions?: number;
+    };
+    url: '/analytics/visitors/{visitor_id}/journey';
+};
+
+export type GetVisitorJourneyErrors = {
+    /**
+     * Invalid parameters
+     */
+    400: unknown;
+    /**
+     * Visitor not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GetVisitorJourneyResponses = {
+    /**
+     * Successfully retrieved visitor journey
+     */
+    200: VisitorJourneyResponse;
+};
+
+export type GetVisitorJourneyResponse = GetVisitorJourneyResponses[keyof GetVisitorJourneyResponses];
+
 export type GetVisitorSessionsData = {
     body?: never;
     path: {
@@ -8649,6 +9270,139 @@ export type DeactivateApiKeyResponses = {
 };
 
 export type DeactivateApiKeyResponse = DeactivateApiKeyResponses[keyof DeactivateApiKeyResponses];
+
+export type ChunkUploadOptionsData = {
+    body?: never;
+    path: {
+        /**
+         * Organization slug (ignored)
+         */
+        org_slug: string;
+    };
+    query?: never;
+    url: '/api/0/organizations/{org_slug}/chunk-upload/';
+};
+
+export type ChunkUploadOptionsResponses = {
+    /**
+     * Chunk upload options
+     */
+    200: SentryChunkUploadResponse;
+};
+
+export type ChunkUploadOptionsResponse = ChunkUploadOptionsResponses[keyof ChunkUploadOptionsResponses];
+
+export type CreateReleaseData = {
+    body: SentryCreateReleaseRequest;
+    path: {
+        /**
+         * Organization slug (ignored in single-tenant mode)
+         */
+        org_slug: string;
+    };
+    query?: never;
+    url: '/api/0/organizations/{org_slug}/releases/';
+};
+
+export type CreateReleaseErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+};
+
+export type CreateReleaseResponses = {
+    /**
+     * Release created
+     */
+    201: SentryReleaseResponse;
+};
+
+export type CreateReleaseResponse = CreateReleaseResponses[keyof CreateReleaseResponses];
+
+export type ListReleaseFilesData = {
+    body?: never;
+    path: {
+        /**
+         * Organization slug (ignored)
+         */
+        org_slug: string;
+        /**
+         * Project slug or numeric ID
+         */
+        project_slug: string;
+        /**
+         * Release version
+         */
+        version: string;
+    };
+    query?: never;
+    url: '/api/0/projects/{org_slug}/{project_slug}/releases/{version}/files/';
+};
+
+export type ListReleaseFilesErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Project not found
+     */
+    404: unknown;
+};
+
+export type ListReleaseFilesResponses = {
+    /**
+     * List of release files
+     */
+    200: Array<SentryReleaseFileResponse>;
+};
+
+export type ListReleaseFilesResponse = ListReleaseFilesResponses[keyof ListReleaseFilesResponses];
+
+export type UploadReleaseFileData = {
+    body?: never;
+    path: {
+        /**
+         * Organization slug (ignored)
+         */
+        org_slug: string;
+        /**
+         * Project slug or numeric ID
+         */
+        project_slug: string;
+        /**
+         * Release version
+         */
+        version: string;
+    };
+    query?: never;
+    url: '/api/0/projects/{org_slug}/{project_slug}/releases/{version}/files/';
+};
+
+export type UploadReleaseFileErrors = {
+    /**
+     * Bad request
+     */
+    400: unknown;
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Project not found
+     */
+    404: unknown;
+};
+
+export type UploadReleaseFileResponses = {
+    /**
+     * File uploaded
+     */
+    201: SentryReleaseFileResponse;
+};
+
+export type UploadReleaseFileResponse = UploadReleaseFileResponses[keyof UploadReleaseFileResponses];
 
 export type GetDeploymentJobLogsData = {
     body?: never;
@@ -15303,6 +16057,10 @@ export type GetPerformanceMetricsData = {
          * Deployment ID (optional)
          */
         deployment_id?: number;
+        /**
+         * Device type filter: desktop or mobile (optional)
+         */
+        device_type?: string;
     };
     url: '/performance/metrics';
 };
@@ -15353,6 +16111,10 @@ export type GetMetricsOverTimeData = {
          * Deployment ID (optional)
          */
         deployment_id?: number;
+        /**
+         * Device type filter: desktop or mobile (optional)
+         */
+        device_type?: string;
     };
     url: '/performance/metrics-over-time';
 };
@@ -15442,6 +16204,14 @@ export type GetAccessInfoData = {
 
 export type GetAccessInfoErrors = {
     /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
      * Internal server error
      */
     500: unknown;
@@ -15463,6 +16233,17 @@ export type GetPrivateIpData = {
     url: '/platform/private-ip';
 };
 
+export type GetPrivateIpErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+};
+
 export type GetPrivateIpResponses = {
     /**
      * Successfully retrieved private IP address
@@ -15475,6 +16256,17 @@ export type GetPublicIpData = {
     path?: never;
     query?: never;
     url: '/platform/public-ip';
+};
+
+export type GetPublicIpErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
 };
 
 export type GetPublicIpResponses = {
@@ -19573,6 +20365,122 @@ export type CreateMonitorResponses = {
 
 export type CreateMonitorResponse = CreateMonitorResponses[keyof CreateMonitorResponses];
 
+export type DeleteReleaseSourceMapsData = {
+    body?: never;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * Release version
+         */
+        release: string;
+    };
+    query?: never;
+    url: '/projects/{project_id}/releases/{release}/source-maps';
+};
+
+export type DeleteReleaseSourceMapsErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+};
+
+export type DeleteReleaseSourceMapsResponses = {
+    /**
+     * Source maps deleted
+     */
+    200: DeleteResponse;
+};
+
+export type DeleteReleaseSourceMapsResponse = DeleteReleaseSourceMapsResponses[keyof DeleteReleaseSourceMapsResponses];
+
+export type ListSourceMapsData = {
+    body?: never;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * Release version
+         */
+        release: string;
+    };
+    query?: never;
+    url: '/projects/{project_id}/releases/{release}/source-maps';
+};
+
+export type ListSourceMapsErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+};
+
+export type ListSourceMapsResponses = {
+    /**
+     * List of source maps
+     */
+    200: SourceMapListResponse;
+};
+
+export type ListSourceMapsResponse = ListSourceMapsResponses[keyof ListSourceMapsResponses];
+
+export type UploadSourceMapData = {
+    body?: never;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * Release version
+         */
+        release: string;
+    };
+    query?: never;
+    url: '/projects/{project_id}/releases/{release}/source-maps';
+};
+
+export type UploadSourceMapErrors = {
+    /**
+     * Invalid source map or missing fields
+     */
+    400: unknown;
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
+     * Source map too large
+     */
+    413: unknown;
+};
+
+export type UploadSourceMapResponses = {
+    /**
+     * Source map uploaded
+     */
+    201: SourceMapResponse;
+};
+
+export type UploadSourceMapResponse = UploadSourceMapResponses[keyof UploadSourceMapResponses];
+
 export type UpdateProjectSettingsData = {
     body: UpdateProjectSettingsRequest;
     path: {
@@ -19612,6 +20520,78 @@ export type UpdateProjectSettingsResponses = {
 };
 
 export type UpdateProjectSettingsResponse = UpdateProjectSettingsResponses[keyof UpdateProjectSettingsResponses];
+
+export type ListReleasesData = {
+    body?: never;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/source-map-releases';
+};
+
+export type ListReleasesErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+};
+
+export type ListReleasesResponses = {
+    /**
+     * List of releases
+     */
+    200: ReleaseListResponse;
+};
+
+export type ListReleasesResponse = ListReleasesResponses[keyof ListReleasesResponses];
+
+export type DeleteSourceMapData = {
+    body?: never;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * Source map ID
+         */
+        source_map_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/source-maps/{source_map_id}';
+};
+
+export type DeleteSourceMapErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
+     * Source map not found
+     */
+    404: unknown;
+};
+
+export type DeleteSourceMapResponses = {
+    /**
+     * Source map deleted
+     */
+    204: void;
+};
+
+export type DeleteSourceMapResponse = DeleteSourceMapResponses[keyof DeleteSourceMapResponses];
 
 export type ListStaticBundlesData = {
     body?: never;

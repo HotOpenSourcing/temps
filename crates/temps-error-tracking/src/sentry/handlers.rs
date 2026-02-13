@@ -16,6 +16,7 @@ use utoipa::OpenApi;
 use crate::providers::{sentry::SentryProvider, ErrorProvider};
 use crate::sentry::types::{SentryEventRequest, SentryEventResponse};
 use crate::services::error_tracking_service::ErrorTrackingService;
+use temps_geo::IpAddressService;
 
 #[derive(OpenApi)]
 #[openapi(
@@ -38,6 +39,8 @@ pub struct AppState {
     pub sentry_provider: Arc<SentryProvider>,
     pub error_tracking_service: Arc<ErrorTrackingService>,
     pub audit_service: Arc<dyn temps_core::AuditLogger>,
+    pub ip_address_service: Option<Arc<IpAddressService>>,
+    pub db: Option<Arc<sea_orm::DatabaseConnection>>,
 }
 
 pub fn configure_routes() -> Router<Arc<AppState>> {
@@ -102,13 +105,23 @@ async fn ingest_sentry_event(
     };
 
     // Parse event using the provider
-    let parsed_event = match state.sentry_provider.parse_json_event(event, &auth).await {
+    let mut parsed_event = match state.sentry_provider.parse_json_event(event, &auth).await {
         Ok(event) => event,
         Err(e) => {
             tracing::error!("Failed to parse event: {:?}", e);
             return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
         }
     };
+
+    // Enrich with IP geolocation and visitor correlation
+    let client_ip = extract_client_ip(&headers);
+    enrich_error_event(
+        &mut parsed_event.error_data,
+        client_ip.as_deref(),
+        state.ip_address_service.as_ref(),
+        state.db.as_ref(),
+    )
+    .await;
 
     // Store event using the error tracking service
     match state
@@ -210,8 +223,20 @@ async fn ingest_sentry_envelope(
         }
     };
 
+    // Extract client IP for enrichment
+    let client_ip = extract_client_ip(&headers);
+
     // Store each event using the error tracking service
-    for event in parsed_events {
+    for mut event in parsed_events {
+        // Enrich with IP geolocation and visitor correlation
+        enrich_error_event(
+            &mut event.error_data,
+            client_ip.as_deref(),
+            state.ip_address_service.as_ref(),
+            state.db.as_ref(),
+        )
+        .await;
+
         if let Err(e) = state
             .error_tracking_service
             .process_error_event(event.error_data)
@@ -259,6 +284,87 @@ fn decompress_if_needed(headers: &HeaderMap, body: &Bytes) -> Result<Bytes, Stri
     );
 
     Ok(Bytes::from(decompressed))
+}
+
+/// Extract client IP address from request headers.
+/// Checks X-Forwarded-For (first IP in chain), then X-Real-IP.
+fn extract_client_ip(headers: &HeaderMap) -> Option<String> {
+    // X-Forwarded-For (first IP in chain is the client)
+    if let Some(forwarded) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        if let Some(first_ip) = forwarded.split(',').next() {
+            let ip = first_ip.trim().to_string();
+            if !ip.is_empty() {
+                return Some(ip);
+            }
+        }
+    }
+
+    // X-Real-IP
+    if let Some(real_ip) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
+        let ip = real_ip.trim().to_string();
+        if !ip.is_empty() {
+            return Some(ip);
+        }
+    }
+
+    None
+}
+
+/// Enrich error event data with IP geolocation and visitor information.
+///
+/// This resolves the client IP to a geolocation record and looks up the
+/// most recent visitor for this project with the same IP address.
+async fn enrich_error_event(
+    error_data: &mut crate::services::types::CreateErrorEventData,
+    client_ip: Option<&str>,
+    ip_address_service: Option<&Arc<IpAddressService>>,
+    db: Option<&Arc<sea_orm::DatabaseConnection>>,
+) {
+    let ip = match client_ip.or(error_data.user_ip_address.as_deref()) {
+        Some(ip) if !ip.is_empty() => ip,
+        _ => return,
+    };
+
+    let ip_service = match ip_address_service {
+        Some(s) => s,
+        None => return,
+    };
+
+    // Resolve IP geolocation
+    match ip_service.get_or_create_ip(ip).await {
+        Ok(ip_info) => {
+            let geo_id = ip_info.id;
+            error_data.ip_geolocation_id = Some(geo_id);
+
+            // Try to find a visitor with this IP for this project
+            if let Some(db) = db {
+                use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
+                use temps_entities::visitor;
+
+                match visitor::Entity::find()
+                    .filter(visitor::Column::ProjectId.eq(error_data.project_id))
+                    .filter(visitor::Column::IpAddressId.eq(geo_id))
+                    .order_by_desc(visitor::Column::LastSeen)
+                    .one(db.as_ref())
+                    .await
+                {
+                    Ok(Some(v)) => {
+                        error_data.visitor_id = Some(v.id);
+                        debug!("Linked error event to visitor {} (ip: {})", v.id, ip);
+                    }
+                    Ok(None) => {
+                        // No visitor found for this IP — that's fine
+                    }
+                    Err(e) => {
+                        debug!("Failed to look up visitor by IP: {}", e);
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            debug!("Failed to resolve IP geolocation for {}: {}", ip, e);
+        }
+    }
 }
 
 /// Extract DSN key from Sentry auth headers or query parameters
@@ -384,6 +490,8 @@ mod tests {
             sentry_provider,
             error_tracking_service,
             audit_service,
+            ip_address_service: None,
+            db: None,
         });
 
         TestContext {
