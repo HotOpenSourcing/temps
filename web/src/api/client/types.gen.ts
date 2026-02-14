@@ -969,6 +969,10 @@ export type CreateMonitorRequest = {
  */
 export type CreatePlanRequest = {
     /**
+     * Platform credentials (required for cloud platforms like Vercel, Railway)
+     */
+    credentials?: ImportCredentials;
+    /**
      * Optional repository ID to associate with the import
      * If provided, preset will be detected from the repository
      */
@@ -1201,6 +1205,24 @@ export type CreateWebhookRequestBody = {
     url: string;
 };
 
+/**
+ * Resource created during import (for rollback / audit)
+ */
+export type CreatedResource = {
+    /**
+     * Resource ID
+     */
+    resource_id: number;
+    /**
+     * Resource name
+     */
+    resource_name: string;
+    /**
+     * Resource type (project, environment, deployment, service, domain, etc.)
+     */
+    resource_type: string;
+};
+
 export type CronExecutionInfo = {
     cron_id: number;
     error_message?: string | null;
@@ -1256,6 +1278,59 @@ export type CustomDomainResponse = {
     status_code?: number | null;
     updated_at: number;
 };
+
+/**
+ * Query parameters for batch dashboard analytics
+ */
+export type DashboardProjectsAnalyticsQuery = {
+    /**
+     * End date for the query range
+     */
+    end_date: string;
+    /**
+     * Comma-separated list of project IDs
+     */
+    project_ids: string;
+    /**
+     * Start date for the query range
+     */
+    start_date: string;
+};
+
+/**
+ * Batch response for dashboard project analytics
+ */
+export type DashboardProjectsAnalyticsResponse = {
+    /**
+     * Map of project_id -> analytics data
+     */
+    projects: {
+        [key: string]: ProjectDashboardAnalytics;
+    };
+};
+
+/**
+ * A specific data implication the user needs to understand
+ */
+export type DataImplication = {
+    /**
+     * Human-readable description of what could happen
+     */
+    message: string;
+    /**
+     * What the user should do about it (if anything)
+     */
+    recommended_action?: string | null;
+    /**
+     * Severity of this implication
+     */
+    severity: DataImplicationSeverity;
+};
+
+/**
+ * Severity of a data implication
+ */
+export type DataImplicationSeverity = 'info' | 'warning' | 'data-not-migrated' | 'potential-data-loss';
 
 /**
  * Request to delete keys
@@ -1703,6 +1778,10 @@ export type DisableMfaRequest = {
  */
 export type DiscoverRequest = {
     /**
+     * Platform credentials (required for cloud platforms like Vercel, Railway)
+     */
+    credentials?: ImportCredentials;
+    /**
      * Optional selector to filter workloads
      */
     selector?: ImportSelector;
@@ -2133,6 +2212,11 @@ export type DockerfilePresetConfig = {
     dockerfilePath?: string | null;
 };
 
+/**
+ * What to do with a domain during migration
+ */
+export type DomainAction = 'import' | 'skip';
+
 export type DomainChallengeResponse = {
     domain: string;
     status: string;
@@ -2154,6 +2238,36 @@ export type DomainError = {
     message: string;
 };
 
+/**
+ * Plan for migrating a single custom domain
+ */
+export type DomainPlan = {
+    /**
+     * What to do with this domain
+     */
+    action: DomainAction;
+    /**
+     * Human-readable explanation
+     */
+    action_description: string;
+    /**
+     * Full domain name
+     */
+    domain: string;
+    /**
+     * Which environment to associate with ("production")
+     */
+    environment: string;
+    /**
+     * Redirect target (if this is a redirect domain)
+     */
+    redirect_to?: string | null;
+    /**
+     * Redirect status code
+     */
+    status_code?: number | null;
+};
+
 export type DomainResponse = {
     /**
      * The PEM-encoded certificate chain (can be displayed in browser or downloaded)
@@ -2172,6 +2286,28 @@ export type DomainResponse = {
     status: string;
     updated_at: number;
     verification_method: string;
+};
+
+/**
+ * Drop-off point: pages where visitors leave the site
+ */
+export type DropOffPoint = {
+    /**
+     * Number of exits from this page
+     */
+    exit_count: number;
+    /**
+     * Exit rate for this page (exit_count / total_views)
+     */
+    exit_rate: number;
+    /**
+     * The page path where visitors drop off
+     */
+    page_path: string;
+    /**
+     * Total views of this page
+     */
+    total_views: number;
 };
 
 export type EmailConfig = {
@@ -2517,6 +2653,10 @@ export type EnvironmentVariable = {
      */
     key: string;
     /**
+     * Where this env var originates from (for traceability)
+     */
+    source_description?: string | null;
+    /**
      * Variable value (may be redacted for secrets)
      */
     value: string;
@@ -2798,6 +2938,10 @@ export type ExecuteImportResponse = {
      * Execution status
      */
     status: ImportExecutionStatus;
+    /**
+     * Per-step results (in execution order)
+     */
+    step_results: Array<StepResult>;
 };
 
 export type ExecuteOperationRequest = {
@@ -2952,12 +3096,28 @@ export type GeneralStatsQuery = {
 export type GeneralStatsResponse = {
     avg_bounce_rate: number;
     avg_engagement_rate: number;
+    /**
+     * Percentage change in page views vs previous period
+     */
+    page_views_trend_percentage?: number | null;
+    /**
+     * Previous period page views
+     */
+    previous_page_views?: number | null;
+    /**
+     * Previous period unique visitors (same duration, shifted back)
+     */
+    previous_unique_visitors?: number | null;
     project_breakdown: Array<ProjectStatsBreakdown>;
     total_events: number;
     total_page_views: number;
     total_projects: number;
     total_unique_visitors: number;
     total_visits: number;
+    /**
+     * Percentage change in unique visitors vs previous period
+     */
+    visitors_trend_percentage?: number | null;
 };
 
 /**
@@ -3284,6 +3444,38 @@ export type HttpChallengeDebugResponse = {
 };
 
 /**
+ * Platform-specific credentials for accessing the source system.
+ *
+ * For platforms like Vercel and Railway, this contains the API token.
+ * For self-hosted platforms like Coolify and Dokploy, this also contains
+ * the `base_url` of the instance.
+ *
+ * Local importers (Docker) can use `ImportCredentials::none()`.
+ */
+export type ImportCredentials = {
+    /**
+     * Base URL override (for self-hosted platforms like Coolify, Dokploy)
+     *
+     * Example: `https://coolify.example.com`
+     */
+    base_url?: string | null;
+    /**
+     * Additional platform-specific parameters
+     */
+    extra?: {
+        [key: string]: string;
+    };
+    /**
+     * Team or organization ID (for platforms with team scoping like Vercel)
+     */
+    team_id?: string | null;
+    /**
+     * API token / bearer token for the source platform
+     */
+    token?: string | null;
+};
+
+/**
  * Import execution status
  */
 export type ImportExecutionStatus = 'pending' | 'inprogress' | 'completed' | 'failed';
@@ -3317,13 +3509,25 @@ export type ImportExternalServiceRequest = {
 };
 
 /**
- * Complete import plan describing all operations to onboard a workload
+ * Complete import plan describing all operations to onboard a workload.
+ *
+ * The plan is generated from a snapshot and presented to the user for review
+ * before any resources are created. Users can modify individual items
+ * (skip services, change actions) before approving execution.
  */
 export type ImportPlan = {
     /**
-     * Deployment configuration
+     * Additional deployments (workers, cron jobs, etc.)
+     */
+    additional_deployments?: Array<DeploymentConfiguration>;
+    /**
+     * Primary deployment configuration
      */
     deployment: DeploymentConfiguration;
+    /**
+     * Custom domains to migrate
+     */
+    domains?: Array<DomainPlan>;
     /**
      * Environment configuration
      */
@@ -3337,13 +3541,32 @@ export type ImportPlan = {
      */
     project: ProjectConfiguration;
     /**
+     * Services to migrate (databases, caches, blob stores)
+     *
+     * Each service has an `action` field the user can change before execution.
+     */
+    services?: Array<ServicePlan>;
+    /**
      * Source system this plan was generated from
      */
     source: string;
     /**
-     * Source container ID
+     * Source workload / project ID in the source system
      */
-    source_container_id: string;
+    source_id: string;
+    /**
+     * Ordered list of migration steps that will be executed.
+     *
+     * This is the human-readable execution plan. Each step describes what
+     * will happen, what risks are involved, and what the user should verify.
+     * Steps are executed in order. If a step fails, execution stops and
+     * already-created resources are reported for manual cleanup.
+     */
+    steps?: Array<MigrationStep>;
+    /**
+     * Human-readable summary of the entire migration
+     */
+    summary: MigrationSummary;
     /**
      * Plan version for compatibility tracking
      */
@@ -3387,10 +3610,26 @@ export type ImportSource = 'docker' | 'coolify' | 'dokploy' | 'vercel' | 'netlif
  * Source capabilities
  */
 export type ImportSourceCapabilities = {
+    /**
+     * Whether this source requires API credentials (token, base URL)
+     */
+    requires_credentials: boolean;
     supports_build: boolean;
+    /**
+     * Supports custom domain migration
+     */
+    supports_domains: boolean;
     supports_health_checks: boolean;
     supports_networks: boolean;
+    /**
+     * Supports full project-level snapshots
+     */
+    supports_project_snapshot: boolean;
     supports_resource_limits: boolean;
+    /**
+     * Supports service migration (databases, caches, etc.)
+     */
+    supports_services: boolean;
     supports_volumes: boolean;
 };
 
@@ -3997,6 +4236,29 @@ export type ManagedDomainResponse = {
     zone_id?: string | null;
 };
 
+/**
+ * A manual action the user must perform outside of the automated migration
+ */
+export type ManualAction = {
+    /**
+     * Human-readable description
+     */
+    description: string;
+    /**
+     * Why this can't be automated
+     */
+    reason: string;
+    /**
+     * When this action needs to happen
+     */
+    timing: ManualActionTiming;
+};
+
+/**
+ * When a manual action needs to happen relative to migration
+ */
+export type ManualActionTiming = 'before-migration' | 'after-migration' | 'within-hours';
+
 export type MetricsOverTimeResponse = {
     cls: Array<number | null>;
     cls_p75?: number | null;
@@ -4052,6 +4314,99 @@ export type MfaSetupResponse = {
 
 export type MfaVerificationRequest = {
     code: string;
+};
+
+/**
+ * A single step in the migration execution plan.
+ *
+ * Steps are presented to the user before execution so they know exactly
+ * what will happen. During execution, each step runs in order and reports
+ * its outcome before proceeding to the next.
+ */
+export type MigrationStep = {
+    /**
+     * Data implications — what could go wrong or what the user needs to know
+     */
+    data_implications?: Array<DataImplication>;
+    /**
+     * Detailed description of what this step does
+     */
+    description: string;
+    /**
+     * Estimated duration hint (e.g., "< 1 second", "10-30 seconds")
+     */
+    estimated_duration?: string | null;
+    /**
+     * Machine-readable step identifier (e.g., "create-project", "create-service-postgres")
+     */
+    id: string;
+    /**
+     * Step number (1-based, for display)
+     */
+    order: number;
+    /**
+     * Things the user should verify AFTER this step completes
+     */
+    post_conditions?: Array<string>;
+    /**
+     * Things the user should verify BEFORE this step runs
+     */
+    pre_conditions?: Array<string>;
+    /**
+     * What kind of resource this step creates/modifies
+     */
+    resource_type: StepResourceType;
+    /**
+     * Whether this step is reversible (can be cleaned up on failure)
+     */
+    reversible: boolean;
+    /**
+     * Risk level for this step
+     */
+    risk: RiskLevel;
+    /**
+     * Whether this step can be skipped by the user
+     */
+    skippable: boolean;
+    /**
+     * Whether the user has chosen to skip this step (set during review)
+     */
+    skipped?: boolean;
+    /**
+     * Human-readable title (e.g., "Create project 'my-app'")
+     */
+    title: string;
+};
+
+/**
+ * Human-readable summary of the entire migration plan
+ */
+export type MigrationSummary = {
+    /**
+     * Critical warnings that must be acknowledged before proceeding.
+     * These are the most important things the user needs to know.
+     */
+    critical_warnings?: Array<string>;
+    /**
+     * One-line summary (e.g., "Migrate 'my-app' from Vercel with 1 database, 2 domains")
+     */
+    headline: string;
+    /**
+     * Manual actions the user must perform (before or after migration)
+     */
+    manual_actions_required?: Array<ManualAction>;
+    /**
+     * Overall risk assessment for the migration
+     */
+    overall_risk: RiskLevel;
+    /**
+     * Resource counts for quick overview
+     */
+    resource_counts: ResourceCounts;
+    /**
+     * Features from the source platform that cannot be migrated
+     */
+    unsupported_features?: Array<UnsupportedFeature>;
 };
 
 /**
@@ -4252,6 +4607,100 @@ export type PageCountryStats = {
 };
 
 /**
+ * A single page with its entry/exit/bounce statistics
+ */
+export type PageFlowEntry = {
+    /**
+     * Average time spent on this page in seconds
+     */
+    avg_time_on_page?: number | null;
+    /**
+     * Number of times visitors bounced on this page
+     */
+    bounce_count: number;
+    /**
+     * Bounce rate: bounce_count / entry_count (only meaningful for entry pages)
+     */
+    bounce_rate: number;
+    /**
+     * Number of times this page was the entry page of a session
+     */
+    entry_count: number;
+    /**
+     * Entry rate: entry_count / total_views
+     */
+    entry_rate: number;
+    /**
+     * Number of times this page was the exit page of a session
+     */
+    exit_count: number;
+    /**
+     * Exit rate: exit_count / total_views
+     */
+    exit_rate: number;
+    /**
+     * The page path (e.g. "/pricing", "/docs/getting-started")
+     */
+    page_path: string;
+    /**
+     * Total page views for this page
+     */
+    total_views: number;
+};
+
+/**
+ * Query parameters for page flow analytics
+ */
+export type PageFlowQuery = {
+    end_date: string;
+    environment_id?: number | null;
+    /**
+     * Maximum number of entry/exit pages to return (default: 20)
+     */
+    limit?: number | null;
+    /**
+     * Minimum views for drop-off analysis (default: 5)
+     */
+    min_views_for_dropoff?: number | null;
+    project_id: number;
+    start_date: string;
+    /**
+     * Maximum number of transitions to return (default: 50)
+     */
+    transitions_limit?: number | null;
+};
+
+/**
+ * Complete page flow analytics response
+ */
+export type PageFlowResponse = {
+    /**
+     * Top drop-off points (highest exit rates with meaningful traffic)
+     */
+    drop_off_points: Array<DropOffPoint>;
+    /**
+     * Top entry pages (where visitors land), sorted by entry_count DESC
+     */
+    top_entry_pages: Array<PageFlowEntry>;
+    /**
+     * Top exit pages (where visitors leave), sorted by exit_count DESC
+     */
+    top_exit_pages: Array<PageFlowEntry>;
+    /**
+     * Total unique pages seen in the period
+     */
+    total_pages: number;
+    /**
+     * Total sessions in the period
+     */
+    total_sessions: number;
+    /**
+     * Page-to-page transitions (most common navigation paths)
+     */
+    transitions: Array<PageTransition>;
+};
+
+/**
  * Query parameters for page hourly sessions endpoint
  */
 export type PageHourlySessionsQuery = {
@@ -4268,6 +4717,20 @@ export type PageHourlySessionsResponse = {
     hours: number;
     page_path: string;
     total_sessions: number;
+};
+
+export type PagePathSparklinePoint = {
+    session_count: number;
+    timestamp: string;
+};
+
+export type PagePathSparkline = {
+    page_path: string;
+    points: Array<PagePathSparklinePoint>;
+};
+
+export type PagePathsSparklineResponse = {
+    sparklines: Array<PagePathSparkline>;
 };
 
 /**
@@ -4336,92 +4799,6 @@ export type PagePathDetailResponse = {
      * Total unique visitors to this page in the date range
      */
     unique_visitors: number;
-};
-
-/**
- * A single page with its entry/exit/bounce statistics
- */
-export type PageFlowEntry = {
-    /** The page path */
-    page_path: string;
-    /** Number of times this page was the entry page of a session */
-    entry_count: number;
-    /** Number of times this page was the exit page of a session */
-    exit_count: number;
-    /** Number of times visitors bounced on this page */
-    bounce_count: number;
-    /** Total page views for this page */
-    total_views: number;
-    /** Average time spent on this page in seconds */
-    avg_time_on_page?: number | null;
-    /** Entry rate: entry_count / total_views */
-    entry_rate: number;
-    /** Exit rate: exit_count / total_views */
-    exit_rate: number;
-    /** Bounce rate: bounce_count / entry_count */
-    bounce_rate: number;
-};
-
-/**
- * A page-to-page transition with count
- */
-export type PageTransition = {
-    /** The source page path */
-    from_page: string;
-    /** The destination page path */
-    to_page: string;
-    /** Number of times this transition occurred */
-    transition_count: number;
-    /** Percentage of transitions from the source page that go to this destination */
-    percentage: number;
-};
-
-/**
- * Drop-off point: pages where visitors leave the site
- */
-export type DropOffPoint = {
-    /** The page path where visitors drop off */
-    page_path: string;
-    /** Number of exits from this page */
-    exit_count: number;
-    /** Total views of this page */
-    total_views: number;
-    /** Exit rate for this page */
-    exit_rate: number;
-};
-
-/**
- * Complete page flow analytics response
- */
-export type PageFlowResponse = {
-    /** Top entry pages (where visitors land), sorted by entry_count DESC */
-    top_entry_pages: Array<PageFlowEntry>;
-    /** Top exit pages (where visitors leave), sorted by exit_count DESC */
-    top_exit_pages: Array<PageFlowEntry>;
-    /** Top drop-off points (highest exit rates with meaningful traffic) */
-    drop_off_points: Array<DropOffPoint>;
-    /** Page-to-page transitions (most common navigation paths) */
-    transitions: Array<PageTransition>;
-    /** Total unique pages seen in the period */
-    total_pages: number;
-    /** Total sessions in the period */
-    total_sessions: number;
-};
-
-/**
- * Query parameters for page flow analytics
- */
-export type PageFlowQuery = {
-    project_id: number;
-    environment_id?: number | null;
-    start_date: string;
-    end_date: string;
-    /** Maximum number of entry/exit pages to return (default: 20) */
-    limit?: number | null;
-    /** Maximum number of transitions to return (default: 50) */
-    transitions_limit?: number | null;
-    /** Minimum views for drop-off analysis (default: 5) */
-    min_views_for_dropoff?: number | null;
 };
 
 export type PagePathInfo = {
@@ -4536,6 +4913,28 @@ export type PageSessionStatsQuery = {
     page_path: string;
     project_id: number;
     start_date: string;
+};
+
+/**
+ * A page-to-page transition with count
+ */
+export type PageTransition = {
+    /**
+     * The source page path
+     */
+    from_page: string;
+    /**
+     * Percentage of transitions from the source page that go to this destination
+     */
+    percentage: number;
+    /**
+     * The destination page path
+     */
+    to_page: string;
+    /**
+     * Number of times this transition occurred
+     */
+    transition_count: number;
 };
 
 export type PageVisit = {
@@ -4971,6 +5370,30 @@ export type ProjectDsnResponse = {
     public_key: string;
 };
 
+/**
+ * Analytics data for a single project in the dashboard batch response
+ */
+export type ProjectDashboardAnalytics = {
+    /**
+     * Hourly sparkline data points
+     */
+    hourly_visits: Array<EventTimeline>;
+    /**
+     * Unique visitor count in the previous period (same duration, shifted back)
+     */
+    previous_unique_visitors: number;
+    project_id: number;
+    /**
+     * Percentage change from previous period (positive = growth, negative = decline)
+     * Null when previous period had zero visitors (no baseline to compare)
+     */
+    trend_percentage?: number | null;
+    /**
+     * Unique visitor count in the current time range
+     */
+    unique_visitors: number;
+};
+
 export type ProjectInfo = {
     created_at: string;
     id: number;
@@ -5054,7 +5477,7 @@ export type ProjectStatsBreakdown = {
 /**
  * Project type enumeration
  */
-export type ProjectType = 'static' | 'docker' | 'buildpack';
+export type ProjectType = 'static' | 'docker' | 'buildpack' | 'git';
 
 export type ProjectUsageInfoResponse = {
     connection_id: number;
@@ -5530,6 +5953,18 @@ export type ResetPasswordRequest = {
 };
 
 /**
+ * Quick count of resources involved in the migration
+ */
+export type ResourceCounts = {
+    deployments: number;
+    domains: number;
+    environment_variables: number;
+    environments: number;
+    projects: number;
+    services: number;
+};
+
+/**
  * Resource limits and requests
  */
 export type ResourceLimits = {
@@ -5560,6 +5995,11 @@ export type ResourceLimitsResponse = {
     memory_limit?: number | null;
     memory_request?: number | null;
 };
+
+/**
+ * Risk level for a migration step
+ */
+export type RiskLevel = 'none' | 'low' | 'medium' | 'high' | 'critical';
 
 /**
  * Information about a role
@@ -5895,6 +6335,11 @@ export type ServiceAccessInfo = {
     public_ip?: string | null;
 };
 
+/**
+ * What to do with a service during migration
+ */
+export type ServiceAction = 'create' | 'link-external' | 'skip';
+
 export type ServiceParameter = {
     choices?: Array<string> | null;
     default_value?: string | null;
@@ -5903,6 +6348,51 @@ export type ServiceParameter = {
     name: string;
     required: boolean;
     validation_pattern?: string | null;
+};
+
+/**
+ * Plan for migrating a single service (database, cache, etc.)
+ */
+export type ServicePlan = {
+    /**
+     * What to do with this service
+     */
+    action: ServiceAction;
+    /**
+     * Human-readable explanation of what this action means
+     */
+    action_description: string;
+    /**
+     * Data implications specific to this service
+     */
+    data_implications?: Array<DataImplication>;
+    /**
+     * Environment variable key mappings: source_key -> temps_key
+     *
+     * For example, Vercel's `POSTGRES_URL` might map to Temps' `DATABASE_URL`.
+     * Both keys will be set during migration so the app works with either.
+     */
+    env_var_mappings?: {
+        [key: string]: string;
+    };
+    /**
+     * Human-readable service name
+     */
+    name: string;
+    /**
+     * Parameters for creating the service in Temps
+     */
+    parameters?: {
+        [key: string]: unknown;
+    };
+    /**
+     * Service type (maps to temps-providers ServiceType)
+     */
+    service_type: string;
+    /**
+     * Service version to create (e.g., "16" for Postgres 16)
+     */
+    version?: string | null;
 };
 
 export type ServiceTypeInfo = {
@@ -6577,6 +7067,45 @@ export type StepConversionResponse = {
     step_order: number;
 };
 
+/**
+ * What kind of resource a migration step operates on
+ */
+export type StepResourceType = 'project' | 'environment' | 'deployment' | 'environment-variable' | 'service' | 'domain' | 'git-link' | 'other';
+
+/**
+ * Result of executing a single migration step
+ */
+export type StepResult = {
+    /**
+     * Resources created by this step
+     */
+    created_resources: Array<CreatedResource>;
+    /**
+     * Duration of this step
+     */
+    duration_seconds: number;
+    /**
+     * Human-readable message about what happened
+     */
+    message: string;
+    /**
+     * Whether this step was skipped
+     */
+    skipped: boolean;
+    /**
+     * Step ID (matches `MigrationStep.id`)
+     */
+    step_id: string;
+    /**
+     * Step title (for display)
+     */
+    step_title: string;
+    /**
+     * Whether this step succeeded
+     */
+    success: boolean;
+};
+
 export type SyncedRepositoryListQuery = {
     direction?: string | null;
     git_provider_connection_id?: number | null;
@@ -6865,6 +7394,24 @@ export type UniqueCountsQuery = {
 
 export type UniqueCountsResponse = {
     count: number;
+};
+
+/**
+ * A feature from the source platform that cannot be migrated
+ */
+export type UnsupportedFeature = {
+    /**
+     * Suggested alternative in Temps (if any)
+     */
+    alternative?: string | null;
+    /**
+     * Feature name (e.g., "Edge Middleware", "Serverless Functions", "Cron Jobs")
+     */
+    feature: string;
+    /**
+     * Why it can't be migrated
+     */
+    reason: string;
 };
 
 export type UpdateApiKeyRequest = {
@@ -7724,7 +8271,7 @@ export type WorkloadStatus = 'running' | 'paused' | 'stopped' | 'exited' | 'fail
 /**
  * Workload type
  */
-export type WorkloadType = 'container' | 'function' | 'static-site' | 'server-side-app' | 'worker' | 'database' | 'message-queue' | 'cache' | 'other';
+export type WorkloadType = 'container' | 'function' | 'static-site' | 'server-side-app' | 'worker' | 'database' | 'message-queue' | 'cache' | 'cron-job' | 'other';
 
 /**
  * Zone list response
@@ -8114,110 +8661,6 @@ export type GetLiveVisitorsListResponses = {
 
 export type GetLiveVisitorsListResponse = GetLiveVisitorsListResponses[keyof GetLiveVisitorsListResponses];
 
-export type GetPageHourlySessionsData = {
-    body?: never;
-    path?: never;
-    query: {
-        /**
-         * The page path to get sessions for
-         */
-        page_path: string;
-        /**
-         * Project ID
-         */
-        project_id: number;
-        /**
-         * Environment ID (optional)
-         */
-        environment_id?: number;
-        /**
-         * Start time in format YYYY-MM-DD HH:MM:SS
-         */
-        start_time: string;
-        /**
-         * End time in format YYYY-MM-DD HH:MM:SS
-         */
-        end_time: string;
-        /**
-         * Bucket interval: 'hour', 'day', 'week', or 'month' (default: auto-determined based on range)
-         */
-        bucket_interval?: string;
-    };
-    url: '/analytics/page-hourly-sessions';
-};
-
-export type GetPageHourlySessionsErrors = {
-    /**
-     * Invalid parameters or project not found
-     */
-    400: unknown;
-    /**
-     * Internal server error
-     */
-    500: unknown;
-};
-
-export type GetPageHourlySessionsResponses = {
-    /**
-     * Successfully retrieved page sessions with time buckets
-     */
-    200: PageHourlySessionsResponse;
-};
-
-export type GetPageHourlySessionsResponse = GetPageHourlySessionsResponses[keyof GetPageHourlySessionsResponses];
-
-export type GetPagePathDetailData = {
-    body?: never;
-    path?: never;
-    query: {
-        /**
-         * The page path to get details for (URL-encoded)
-         */
-        page_path: string;
-        /**
-         * Project ID
-         */
-        project_id: number;
-        /**
-         * Environment ID (optional)
-         */
-        environment_id?: number;
-        /**
-         * Start date in ISO 8601 format
-         */
-        start_date: string;
-        /**
-         * End date in ISO 8601 format
-         */
-        end_date: string;
-        /**
-         * Bucket interval for time series: 'hour', 'day', 'week', 'month' (default: auto based on date range)
-         */
-        bucket_interval?: string;
-    };
-    url: '/analytics/page-path-detail';
-};
-
-export type GetPagePathDetailErrors = {
-    /**
-     * Invalid parameters or project not found
-     */
-    400: unknown;
-    /**
-     * Internal server error
-     */
-    500: unknown;
-};
-
-export type GetPagePathDetailResponses = {
-    /**
-     * Successfully retrieved page path detail analytics
-     */
-    200: PagePathDetailResponse;
-};
-
-export type GetPagePathDetailResponse = GetPagePathDetailResponses[keyof GetPagePathDetailResponses];
-
 export type GetPageFlowData = {
     body?: never;
     path?: never;
@@ -8273,6 +8716,149 @@ export type GetPageFlowResponses = {
 };
 
 export type GetPageFlowResponse = GetPageFlowResponses[keyof GetPageFlowResponses];
+
+export type GetPageHourlySessionsData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * The page path to get sessions for
+         */
+        page_path: string;
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * Environment ID (optional)
+         */
+        environment_id?: number;
+        /**
+         * Start time in format YYYY-MM-DD HH:MM:SS
+         */
+        start_time: string;
+        /**
+         * End time in format YYYY-MM-DD HH:MM:SS
+         */
+        end_time: string;
+        /**
+         * Bucket interval: 'hour', 'day', 'week', or 'month' (default: auto-determined based on range)
+         */
+        bucket_interval?: string;
+    };
+    url: '/analytics/page-hourly-sessions';
+};
+
+export type GetPageHourlySessionsErrors = {
+    /**
+     * Invalid parameters or project not found
+     */
+    400: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GetPageHourlySessionsResponses = {
+    /**
+     * Successfully retrieved page sessions with time buckets
+     */
+    200: PageHourlySessionsResponse;
+};
+
+export type GetPageHourlySessionsResponse = GetPageHourlySessionsResponses[keyof GetPageHourlySessionsResponses];
+
+export type GetPagePathsSparklineData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * Environment ID (optional)
+         */
+        environment_id?: number;
+        /**
+         * Start time in ISO 8601 format
+         */
+        start_time: string;
+        /**
+         * End time in ISO 8601 format
+         */
+        end_time: string;
+        /**
+         * Comma-separated list of page paths
+         */
+        page_paths: string;
+    };
+    url: '/analytics/page-paths-sparklines';
+};
+
+export type GetPagePathsSparklineErrors = {
+    400: unknown;
+    500: unknown;
+};
+
+export type GetPagePathsSparklineResponses = {
+    200: PagePathsSparklineResponse;
+};
+
+export type GetPagePathsSparklineResponse = GetPagePathsSparklineResponses[keyof GetPagePathsSparklineResponses];
+
+export type GetPagePathDetailData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * The page path to get details for (URL-encoded)
+         */
+        page_path: string;
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * Environment ID (optional)
+         */
+        environment_id?: number;
+        /**
+         * Start date in ISO 8601 format
+         */
+        start_date: string;
+        /**
+         * End date in ISO 8601 format
+         */
+        end_date: string;
+        /**
+         * Bucket interval for time series: 'hour', 'day', 'week', 'month' (default: auto based on date range)
+         */
+        bucket_interval?: string;
+    };
+    url: '/analytics/page-path-detail';
+};
+
+export type GetPagePathDetailErrors = {
+    /**
+     * Invalid parameters or project not found
+     */
+    400: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GetPagePathDetailResponses = {
+    /**
+     * Successfully retrieved page path detail analytics
+     */
+    200: PagePathDetailResponse;
+};
+
+export type GetPagePathDetailResponse = GetPagePathDetailResponses[keyof GetPagePathDetailResponses];
 
 export type GetPagePathVisitorsData = {
     body?: never;
@@ -10562,6 +11148,50 @@ export type BlobHeadResponses = {
      */
     200: unknown;
 };
+
+export type GetDashboardProjectsAnalyticsData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Comma-separated list of project IDs
+         */
+        project_ids: string;
+        /**
+         * Start date for filtering
+         */
+        start_date: string;
+        /**
+         * End date for filtering
+         */
+        end_date: string;
+    };
+    url: '/dashboard/projects-analytics';
+};
+
+export type GetDashboardProjectsAnalyticsErrors = {
+    /**
+     * Bad request
+     */
+    400: unknown;
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GetDashboardProjectsAnalyticsResponses = {
+    /**
+     * Successfully retrieved batch analytics
+     */
+    200: DashboardProjectsAnalyticsResponse;
+};
+
+export type GetDashboardProjectsAnalyticsResponse = GetDashboardProjectsAnalyticsResponses[keyof GetDashboardProjectsAnalyticsResponses];
 
 export type GetActivityGraphData = {
     body?: never;

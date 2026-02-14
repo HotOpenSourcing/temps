@@ -1,9 +1,9 @@
 <div align="center">
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="temps-logo-assets/logo/temps-logo-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="temps-logo-assets/logo/temps-logo-light.png">
-  <img alt="Temps" src="temps-logo-assets/logo/temps-logo-dark.png" width="280">
+  <source media="(prefers-color-scheme: dark)" srcset="web/public/logo/temps-logo-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="web/public/logo/temps-logo-light.png">
+  <img alt="Temps" src="web/public/logo/temps-logo-dark.png" width="280">
 </picture>
 
 **Self-hosted deployment platform with built-in analytics, monitoring, and error tracking.**

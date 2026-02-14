@@ -4,6 +4,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Checkbox } from '@/components/ui/checkbox'
+import { CopyButton } from '@/components/ui/copy-button'
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -19,6 +20,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { Separator } from '@/components/ui/separator'
 import {
   Table,
   TableBody,
@@ -36,16 +38,18 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronRight as ChevronExpand,
   ChevronsLeft,
   ChevronsRight,
   Columns,
+  ExternalLink,
   Filter,
   Loader2,
   Search,
   X,
 } from 'lucide-react'
-import { useEffect, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Link, useSearchParams } from 'react-router-dom'
 
 interface ProxyLogsDataTableProps {
   projectId?: number
@@ -123,35 +127,178 @@ const getInitialVisibleColumns = (): Set<ColumnKey> => {
   ])
 }
 
+// Helper to parse FilterState from URL search params
+function parseFiltersFromParams(params: URLSearchParams): FilterState {
+  const f: FilterState = {}
+  const str = (key: string) => params.get(key) || undefined
+  const bool = (key: string) => {
+    const v = params.get(key)
+    if (v === 'true') return true
+    if (v === 'false') return false
+    return null
+  }
+  f.deployment_id = str('deployment_id')
+  f.start_date = str('start_date')
+  f.end_date = str('end_date')
+  f.method = str('method')
+  f.host = str('host')
+  f.path = str('path')
+  f.client_ip = str('client_ip')
+  f.status_code = str('status_code')
+  f.response_time_min = str('response_time_min')
+  f.response_time_max = str('response_time_max')
+  f.routing_status = str('routing_status')
+  f.request_source = str('request_source')
+  f.is_system_request = bool('is_system_request')
+  f.user_agent = str('user_agent')
+  f.browser = str('browser')
+  f.operating_system = str('operating_system')
+  f.device_type = str('device_type')
+  f.is_bot = bool('is_bot')
+  f.bot_name = str('bot_name')
+  f.request_size_min = str('request_size_min')
+  f.request_size_max = str('request_size_max')
+  f.response_size_min = str('response_size_min')
+  f.response_size_max = str('response_size_max')
+  f.cache_status = str('cache_status')
+  f.container_id = str('container_id')
+  f.upstream_host = str('upstream_host')
+  f.has_error = bool('has_error')
+  // Clean out undefined values
+  return Object.fromEntries(
+    Object.entries(f).filter(([, v]) => v !== undefined && v !== null)
+  ) as FilterState
+}
+
+function serializeFiltersToParams(
+  filters: FilterState,
+  params: URLSearchParams
+) {
+  // Filter keys to serialize
+  const filterKeys: (keyof FilterState)[] = [
+    'deployment_id',
+    'start_date',
+    'end_date',
+    'method',
+    'host',
+    'path',
+    'client_ip',
+    'status_code',
+    'response_time_min',
+    'response_time_max',
+    'routing_status',
+    'request_source',
+    'is_system_request',
+    'user_agent',
+    'browser',
+    'operating_system',
+    'device_type',
+    'is_bot',
+    'bot_name',
+    'request_size_min',
+    'request_size_max',
+    'response_size_min',
+    'response_size_max',
+    'cache_status',
+    'container_id',
+    'upstream_host',
+    'has_error',
+  ]
+  for (const key of filterKeys) {
+    const val = filters[key]
+    if (val !== undefined && val !== null && val !== '') {
+      params.set(key, String(val))
+    } else {
+      params.delete(key)
+    }
+  }
+}
+
+function formatBytes(bytes: number | null | undefined): string {
+  if (!bytes) return '-'
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
 export function ProxyLogsDataTable({
   projectId,
   environmentId,
   onRowClick,
 }: ProxyLogsDataTableProps) {
   const [searchParams, setSearchParams] = useSearchParams()
+  const isInitialMount = useRef(true)
 
-  // Initialize page from URL params or default to 1
+  // Initialize ALL state from URL search params
   const [page, setPage] = useState(() => {
-    const pageParam = searchParams.get('page')
-    return pageParam ? parseInt(pageParam, 10) : 1
+    const v = searchParams.get('page')
+    return v ? parseInt(v, 10) : 1
   })
 
-  const [pageSize, setPageSize] = useState(20)
-  const [sortBy, setSortBy] = useState<string>('timestamp')
-  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc')
-  const [showFilters, setShowFilters] = useState(false)
-  const [filters, setFilters] = useState<FilterState>({})
-  const [pendingFilters, setPendingFilters] = useState<FilterState>({})
+  const [pageSize, setPageSize] = useState(() => {
+    const v = searchParams.get('page_size')
+    return v ? parseInt(v, 10) : 20
+  })
+
+  const [sortBy, setSortBy] = useState<string>(() => {
+    return searchParams.get('sort_by') || 'timestamp'
+  })
+
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>(() => {
+    const v = searchParams.get('sort_order')
+    return v === 'asc' ? 'asc' : 'desc'
+  })
+
+  const [showFilters, setShowFilters] = useState(() => {
+    return searchParams.get('filters') === 'open'
+  })
+
+  const [filters, setFilters] = useState<FilterState>(() =>
+    parseFiltersFromParams(searchParams)
+  )
+
+  const [pendingFilters, setPendingFilters] = useState<FilterState>(() =>
+    parseFiltersFromParams(searchParams)
+  )
+
   const [visibleColumns, setVisibleColumns] = useState<Set<ColumnKey>>(
     getInitialVisibleColumns()
   )
 
-  // Update URL when page changes
+  const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set())
+
+  // Sync ALL state to URL search params
+  const syncToUrl = useCallback(() => {
+    const params = new URLSearchParams()
+    if (page !== 1) params.set('page', page.toString())
+    if (pageSize !== 20) params.set('page_size', pageSize.toString())
+    if (sortBy !== 'timestamp') params.set('sort_by', sortBy)
+    if (sortOrder !== 'desc') params.set('sort_order', sortOrder)
+    if (showFilters) params.set('filters', 'open')
+    serializeFiltersToParams(filters, params)
+    setSearchParams(params, { replace: true })
+  }, [page, pageSize, sortBy, sortOrder, showFilters, filters, setSearchParams])
+
   useEffect(() => {
-    const newParams = new URLSearchParams(searchParams)
-    newParams.set('page', page.toString())
-    setSearchParams(newParams, { replace: true })
-  }, [page, searchParams, setSearchParams])
+    // Skip the initial mount to avoid overwriting params we just read from
+    if (isInitialMount.current) {
+      isInitialMount.current = false
+      return
+    }
+    syncToUrl()
+  }, [syncToUrl])
+
+  const toggleRow = useCallback((logId: number) => {
+    setExpandedRows((prev) => {
+      const next = new Set(prev)
+      if (next.has(logId)) {
+        next.delete(logId)
+      } else {
+        next.add(logId)
+      }
+      return next
+    })
+  }, [])
 
   const { data, isLoading, error } = useQuery({
     ...getProxyLogsOptions({
@@ -887,6 +1034,7 @@ export function ProxyLogsDataTable({
                 <Table>
                   <TableHeader>
                     <TableRow>
+                      <TableHead className="w-8" />
                       {columns
                         .filter((col) => visibleColumns.has(col.key))
                         .map((column) => (
@@ -914,108 +1062,31 @@ export function ProxyLogsDataTable({
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {data.logs.map((log: ProxyLogResponse) => (
-                      <TableRow
-                        key={log.id}
-                        className={
-                          onRowClick ? 'cursor-pointer hover:bg-muted/50' : ''
-                        }
-                        onClick={() => onRowClick?.(log)}
-                      >
-                        {visibleColumns.has('timestamp') && (
-                          <TableCell className="font-mono text-xs">
-                            {format(
-                              new Date(log.timestamp),
-                              'MMM dd, HH:mm:ss'
-                            )}
-                          </TableCell>
-                        )}
-                        {visibleColumns.has('method') && (
-                          <TableCell>
-                            <Badge variant="outline">{log.method}</Badge>
-                          </TableCell>
-                        )}
-                        {visibleColumns.has('host') && (
-                          <TableCell className="font-mono text-xs max-w-[200px] truncate">
-                            {log.host}
-                          </TableCell>
-                        )}
-                        {visibleColumns.has('path') && (
-                          <TableCell className="font-mono text-xs max-w-[300px] truncate">
-                            {log.path}
-                          </TableCell>
-                        )}
-                        {visibleColumns.has('status_code') && (
-                          <TableCell>
-                            <Badge
-                              variant={getStatusBadgeVariant(log.status_code)}
-                            >
-                              {log.status_code}
-                            </Badge>
-                          </TableCell>
-                        )}
-                        {visibleColumns.has('routing_status') && (
-                          <TableCell>
-                            {getRoutingStatusBadge(log.routing_status)}
-                          </TableCell>
-                        )}
-                        {visibleColumns.has('request_source') && (
-                          <TableCell>
-                            <Badge variant="secondary" className="capitalize">
-                              {log.request_source}
-                            </Badge>
-                          </TableCell>
-                        )}
-                        {visibleColumns.has('client_ip') && (
-                          <TableCell className="font-mono text-xs">
-                            {log.client_ip || '-'}
-                          </TableCell>
-                        )}
-                        {visibleColumns.has('response_time_ms') && (
-                          <TableCell className="text-xs">
-                            {log.response_time_ms
-                              ? `${log.response_time_ms}ms`
-                              : '-'}
-                          </TableCell>
-                        )}
-                        {visibleColumns.has('device_type') && (
-                          <TableCell className="capitalize text-xs">
-                            {log.device_type || '-'}
-                          </TableCell>
-                        )}
-                        {visibleColumns.has('browser') && (
-                          <TableCell className="text-xs">
-                            {log.browser || '-'}
-                          </TableCell>
-                        )}
-                        {visibleColumns.has('is_bot') && (
-                          <TableCell>
-                            {log.is_bot && (
-                              <Badge variant="secondary">Bot</Badge>
-                            )}
-                          </TableCell>
-                        )}
-                        {visibleColumns.has('bot_name') && (
-                          <TableCell className="text-xs">
-                            {log.bot_name || '-'}
-                          </TableCell>
-                        )}
-                        {visibleColumns.has('cache_status') && (
-                          <TableCell>
-                            {log.cache_status && (
-                              <Badge variant="outline">
-                                {log.cache_status}
-                              </Badge>
-                            )}
-                          </TableCell>
-                        )}
-                        {visibleColumns.has('upstream_host') && (
-                          <TableCell className="font-mono text-xs max-w-[150px] truncate">
-                            {log.upstream_host || '-'}
-                          </TableCell>
-                        )}
-                      </TableRow>
-                    ))}
+                    {data.logs.map((log: ProxyLogResponse) => {
+                      const isExpanded = expandedRows.has(log.id)
+                      const visibleCount = columns.filter((col) =>
+                        visibleColumns.has(col.key)
+                      ).length
+
+                      return (
+                        <ProxyLogTableRow
+                          key={log.id}
+                          log={log}
+                          isExpanded={isExpanded}
+                          visibleColumns={visibleColumns}
+                          visibleCount={visibleCount}
+                          onToggle={() => {
+                            if (onRowClick) {
+                              onRowClick(log)
+                            } else {
+                              toggleRow(log.id)
+                            }
+                          }}
+                          getStatusBadgeVariant={getStatusBadgeVariant}
+                          getRoutingStatusBadge={getRoutingStatusBadge}
+                        />
+                      )
+                    })}
                   </TableBody>
                 </Table>
               </div>
@@ -1073,4 +1144,287 @@ export function ProxyLogsDataTable({
       </Card>
     </div>
   )
+}
+
+// --- Expandable row component ---
+
+interface ProxyLogTableRowProps {
+  log: ProxyLogResponse
+  isExpanded: boolean
+  visibleColumns: Set<ColumnKey>
+  visibleCount: number
+  onToggle: () => void
+  getStatusBadgeVariant: (code: number) => string
+  getRoutingStatusBadge: (status: string) => React.ReactNode
+}
+
+function ProxyLogTableRow({
+  log,
+  isExpanded,
+  visibleColumns,
+  visibleCount,
+  onToggle,
+  getStatusBadgeVariant,
+  getRoutingStatusBadge,
+}: ProxyLogTableRowProps) {
+  return (
+    <>
+      <TableRow
+        className="cursor-pointer hover:bg-muted/50"
+        onClick={onToggle}
+      >
+        <TableCell className="w-8 px-2">
+          <ChevronExpand
+            className={`h-4 w-4 text-muted-foreground transition-transform duration-200 ${
+              isExpanded ? 'rotate-90' : ''
+            }`}
+          />
+        </TableCell>
+        {visibleColumns.has('timestamp') && (
+          <TableCell className="font-mono text-xs">
+            {format(new Date(log.timestamp), 'MMM dd, HH:mm:ss')}
+          </TableCell>
+        )}
+        {visibleColumns.has('method') && (
+          <TableCell>
+            <Badge variant="outline">{log.method}</Badge>
+          </TableCell>
+        )}
+        {visibleColumns.has('host') && (
+          <TableCell className="font-mono text-xs max-w-[200px] truncate">
+            {log.host}
+          </TableCell>
+        )}
+        {visibleColumns.has('path') && (
+          <TableCell className="font-mono text-xs max-w-[300px] truncate">
+            {log.path}
+          </TableCell>
+        )}
+        {visibleColumns.has('status_code') && (
+          <TableCell>
+            <Badge variant={getStatusBadgeVariant(log.status_code) as any}>
+              {log.status_code}
+            </Badge>
+          </TableCell>
+        )}
+        {visibleColumns.has('routing_status') && (
+          <TableCell>{getRoutingStatusBadge(log.routing_status)}</TableCell>
+        )}
+        {visibleColumns.has('request_source') && (
+          <TableCell>
+            <Badge variant="secondary" className="capitalize">
+              {log.request_source}
+            </Badge>
+          </TableCell>
+        )}
+        {visibleColumns.has('client_ip') && (
+          <TableCell className="font-mono text-xs">
+            {log.client_ip || '-'}
+          </TableCell>
+        )}
+        {visibleColumns.has('response_time_ms') && (
+          <TableCell className="text-xs">
+            {log.response_time_ms ? `${log.response_time_ms}ms` : '-'}
+          </TableCell>
+        )}
+        {visibleColumns.has('device_type') && (
+          <TableCell className="capitalize text-xs">
+            {log.device_type || '-'}
+          </TableCell>
+        )}
+        {visibleColumns.has('browser') && (
+          <TableCell className="text-xs">{log.browser || '-'}</TableCell>
+        )}
+        {visibleColumns.has('is_bot') && (
+          <TableCell>
+            {log.is_bot && <Badge variant="secondary">Bot</Badge>}
+          </TableCell>
+        )}
+        {visibleColumns.has('bot_name') && (
+          <TableCell className="text-xs">{log.bot_name || '-'}</TableCell>
+        )}
+        {visibleColumns.has('cache_status') && (
+          <TableCell>
+            {log.cache_status && (
+              <Badge variant="outline">{log.cache_status}</Badge>
+            )}
+          </TableCell>
+        )}
+        {visibleColumns.has('upstream_host') && (
+          <TableCell className="font-mono text-xs max-w-[150px] truncate">
+            {log.upstream_host || '-'}
+          </TableCell>
+        )}
+      </TableRow>
+      {isExpanded && (
+        <TableRow className="bg-muted/30 hover:bg-muted/30">
+          <TableCell colSpan={visibleCount + 1} className="p-0">
+            <ProxyLogInlineDetail log={log} />
+          </TableCell>
+        </TableRow>
+      )}
+    </>
+  )
+}
+
+// --- Inline detail panel ---
+
+function DetailField({
+  label,
+  value,
+  mono,
+  copyable,
+}: {
+  label: string
+  value: string | number | null | undefined
+  mono?: boolean
+  copyable?: boolean
+}) {
+  if (value === null || value === undefined || value === '') return null
+  const display = String(value)
+  return (
+    <div className="space-y-0.5">
+      <p className="text-xs text-muted-foreground">{label}</p>
+      <div className="flex items-center gap-1.5">
+        <p className={`text-sm ${mono ? 'font-mono' : ''}`}>{display}</p>
+        {copyable && (
+          <CopyButton
+            value={display}
+            minimal
+            className="h-5 w-5 p-0 opacity-0 group-hover/detail:opacity-100 transition-opacity"
+          />
+        )}
+      </div>
+    </div>
+  )
+}
+
+function ProxyLogInlineDetail({ log }: { log: ProxyLogResponse }) {
+  const fullUrl = `${log.host}${log.path}${log.query_string ? `?${log.query_string}` : ''}`
+
+  return (
+    <div className="group/detail px-6 py-4 space-y-4">
+      {/* Request line */}
+      <div className="flex items-center gap-3">
+        <Badge variant="outline" className="font-mono">
+          {log.method}
+        </Badge>
+        <div className="flex-1 min-w-0">
+          <div className="bg-muted rounded-md px-3 py-1.5 font-mono text-xs break-all flex items-center gap-2">
+            <span className="flex-1">{fullUrl}</span>
+            <CopyButton
+              value={fullUrl}
+              minimal
+              className="h-5 w-5 p-0 shrink-0"
+            />
+          </div>
+        </div>
+        <Badge variant={getStatusVariant(log.status_code) as any}>
+          {log.status_code}
+        </Badge>
+      </div>
+
+      <Separator />
+
+      {/* Details grid */}
+      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-x-6 gap-y-3">
+        <DetailField
+          label="Timestamp"
+          value={format(new Date(log.timestamp), 'PPpp')}
+        />
+        <DetailField
+          label="Response Time"
+          value={log.response_time_ms ? `${log.response_time_ms}ms` : null}
+        />
+        <DetailField
+          label="Request Size"
+          value={formatBytes(log.request_size_bytes)}
+        />
+        <DetailField
+          label="Response Size"
+          value={formatBytes(log.response_size_bytes)}
+        />
+        <DetailField label="Source" value={log.request_source} />
+        <DetailField label="Routing" value={log.routing_status} />
+
+        <DetailField label="Client IP" value={log.client_ip} mono copyable />
+        <DetailField label="Device" value={log.device_type} />
+        <DetailField
+          label="Browser"
+          value={
+            log.browser
+              ? `${log.browser}${log.browser_version ? ` ${log.browser_version}` : ''}`
+              : null
+          }
+        />
+        <DetailField label="OS" value={log.operating_system} />
+        {log.is_bot && (
+          <DetailField
+            label="Bot"
+            value={log.bot_name || 'Detected as bot'}
+          />
+        )}
+        <DetailField label="Referrer" value={log.referrer} mono />
+
+        <DetailField label="Project ID" value={log.project_id} />
+        <DetailField label="Environment ID" value={log.environment_id} />
+        <DetailField label="Deployment ID" value={log.deployment_id} />
+        <DetailField label="Container" value={log.container_id} mono />
+        <DetailField label="Upstream" value={log.upstream_host} mono />
+        <DetailField label="Cache" value={log.cache_status} />
+      </div>
+
+      {/* Request ID */}
+      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+        <span>Request ID:</span>
+        <code className="font-mono">{log.request_id}</code>
+        <CopyButton
+          value={log.request_id}
+          minimal
+          className="h-4 w-4 p-0"
+        />
+      </div>
+
+      {/* User Agent */}
+      {log.user_agent && (
+        <div className="space-y-1">
+          <p className="text-xs text-muted-foreground">User Agent</p>
+          <div className="bg-muted rounded-md px-3 py-1.5 font-mono text-xs break-all flex items-center gap-2">
+            <span className="flex-1">{log.user_agent}</span>
+            <CopyButton
+              value={log.user_agent}
+              minimal
+              className="h-5 w-5 p-0 shrink-0"
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Error */}
+      {log.error_message && (
+        <div className="bg-destructive/10 border border-destructive/20 rounded-md px-3 py-2">
+          <p className="text-xs font-medium text-destructive mb-1">Error</p>
+          <p className="font-mono text-xs">{log.error_message}</p>
+        </div>
+      )}
+
+      {/* Link to full detail page */}
+      <div className="flex justify-end">
+        <Link
+          to={`/proxy-logs/${log.id}`}
+          className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+          onClick={(e) => e.stopPropagation()}
+        >
+          View full details
+          <ExternalLink className="h-3 w-3" />
+        </Link>
+      </div>
+    </div>
+  )
+}
+
+function getStatusVariant(statusCode: number) {
+  if (statusCode >= 200 && statusCode < 300) return 'default'
+  if (statusCode >= 300 && statusCode < 400) return 'secondary'
+  return 'destructive'
 }

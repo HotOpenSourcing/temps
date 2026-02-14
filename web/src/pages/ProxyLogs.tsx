@@ -1,12 +1,9 @@
 import { useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { ProxyLogsDataTable } from '@/components/proxy-logs/ProxyLogsDataTable'
-import { ProxyLogResponse } from '@/api/client/types.gen'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { usePageTitle } from '@/hooks/usePageTitle'
 
 export default function ProxyLogs() {
-  const navigate = useNavigate()
   const { setBreadcrumbs } = useBreadcrumbs()
 
   useEffect(() => {
@@ -14,11 +11,6 @@ export default function ProxyLogs() {
   }, [setBreadcrumbs])
 
   usePageTitle('Proxy Logs')
-
-  const handleRowClick = (log: ProxyLogResponse) => {
-    // Navigate to the proxy log detail page
-    navigate(`/proxy-logs/${log.id}`)
-  }
 
   return (
     <div className="container max-w-7xl mx-auto py-8">
@@ -29,7 +21,7 @@ export default function ProxyLogs() {
             Advanced proxy request logs with comprehensive filtering and sorting
           </p>
         </div>
-        <ProxyLogsDataTable onRowClick={handleRowClick} />
+        <ProxyLogsDataTable />
       </div>
     </div>
   )

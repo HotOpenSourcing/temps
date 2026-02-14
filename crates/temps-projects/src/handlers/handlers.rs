@@ -440,7 +440,10 @@ pub async fn delete_project(
     // Get project details before deletion
     let project = state.project_service.get_project(id).await?;
 
-    state.project_service.delete_project(id).await?;
+    state
+        .project_service
+        .delete_project(id, &project.name)
+        .await?;
 
     // Create audit event
     let audit_context = AuditContext {

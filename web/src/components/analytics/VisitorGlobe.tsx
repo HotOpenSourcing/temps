@@ -31,7 +31,7 @@ import {
   FileText,
   Calendar as CalendarIcon,
 } from 'lucide-react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { format, subDays } from 'date-fns'
 import type { DateRange } from 'react-day-picker'
 import { cn } from '@/lib/utils'
@@ -153,13 +153,13 @@ function VisitorPopoverContent({
   projectSlug,
   isLive,
 }: VisitorPopoverProps) {
-  const navigate = useNavigate()
   const flag = countryCodeToFlag(visitor.country_code)
   const location = [visitor.city, visitor.country].filter(Boolean).join(', ')
   const timeAgo = getTimeAgo(new Date(visitor.last_seen))
   const { initials, colorClass, textClass } = getVisitorAvatar(visitor)
   const browser = getBrowserName(visitor.user_agent)
   const os = getOSName(visitor.user_agent)
+  const journeyUrl = `/projects/${projectSlug}/analytics/visitors/${visitor.id}`
 
   return (
     <div className="w-64 space-y-3">
@@ -209,18 +209,12 @@ function VisitorPopoverContent({
         </div>
       </div>
 
-      {/* Action */}
-      <Button
-        size="sm"
-        className="w-full"
-        onClick={() =>
-          navigate(
-            `/projects/${projectSlug}/analytics/visitors/${visitor.id}`
-          )
-        }
-      >
-        <ExternalLink className="h-3.5 w-3.5 mr-1.5" />
-        View Visitor Journey
+      {/* Action — Link instead of navigate to preserve globe state */}
+      <Button size="sm" className="w-full" asChild>
+        <Link to={journeyUrl}>
+          <ExternalLink className="h-3.5 w-3.5 mr-1.5" />
+          View Visitor Journey
+        </Link>
       </Button>
     </div>
   )
@@ -341,7 +335,6 @@ interface RecentVisitorItemProps {
 }
 
 function RecentVisitorItem({ visitor, projectSlug }: RecentVisitorItemProps) {
-  const navigate = useNavigate()
   const flag = countryCodeToFlag(visitor.country_code)
   const location = [visitor.city, visitor.country].filter(Boolean).join(', ')
   const timeAgo = getTimeAgo(new Date(visitor.last_seen))
@@ -349,16 +342,12 @@ function RecentVisitorItem({ visitor, projectSlug }: RecentVisitorItemProps) {
   const browser = getBrowserName(visitor.user_agent)
   const os = getOSName(visitor.user_agent)
   const deviceInfo = [browser, os].filter(Boolean).join(' / ')
+  const journeyUrl = `/projects/${projectSlug}/analytics/visitors/${visitor.id}`
 
   return (
-    <button
-      type="button"
-      className="flex items-start gap-3 text-sm p-2 -mx-2 rounded-md cursor-pointer hover:bg-accent/50 transition-colors w-full text-left"
-      onClick={() =>
-        navigate(
-          `/projects/${projectSlug}/analytics/visitors/${visitor.id}`
-        )
-      }
+    <Link
+      to={journeyUrl}
+      className="flex items-start gap-3 text-sm p-2 -mx-2 rounded-md cursor-pointer hover:bg-accent/50 transition-colors w-full text-left no-underline"
     >
       <Avatar className="h-8 w-8 flex-shrink-0 mt-0.5">
         <AvatarFallback
@@ -387,7 +376,7 @@ function RecentVisitorItem({ visitor, projectSlug }: RecentVisitorItemProps) {
         </div>
       </div>
       <ExternalLink className="h-3 w-3 text-muted-foreground flex-shrink-0 mt-1" />
-    </button>
+    </Link>
   )
 }
 

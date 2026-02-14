@@ -1,12 +1,10 @@
-import { ProjectResponse } from '@/api/client'
-import { getPageHourlySessionsOptions } from '@/api/client/@tanstack/react-query.gen'
+import { PagePathSparkline, ProjectResponse } from '@/api/client'
 import {
   ChartConfig,
   ChartContainer,
   ChartTooltip,
   ChartTooltipContent,
 } from '@/components/ui/chart'
-import { useQuery } from '@tanstack/react-query'
 import { Clock, ExternalLink, TrendingUp, Users } from 'lucide-react'
 import { useMemo } from 'react'
 import { Link } from 'react-router-dom'
@@ -17,9 +15,7 @@ interface PageListItemProps {
   sessions: number
   avgTime: number
   project: ProjectResponse
-  startDate: Date | undefined
-  endDate: Date | undefined
-  environment: number | undefined
+  sparkline?: PagePathSparkline
 }
 
 const chartConfig = {
@@ -34,37 +30,19 @@ export function PageListItem({
   sessions,
   avgTime,
   project,
-  startDate,
-  endDate,
-  environment,
+  sparkline,
 }: PageListItemProps) {
-  // Fetch hourly stats for this specific page
-  const { data: hourlyData, isLoading: hourlyLoading } = useQuery({
-    ...getPageHourlySessionsOptions({
-      query: {
-        project_id: project.id,
-        bucket_interval: '24h',
-        environment_id: environment,
-        page_path: pagePath,
-        start_time: startDate ? startDate.toISOString() : '',
-        end_time: endDate ? endDate.toISOString() : '',
-      },
-    }),
-    enabled: !!startDate && !!endDate,
-  })
-
   const chartData = useMemo(() => {
-    if (!hourlyData?.hourly_data) return []
+    if (!sparkline?.points || sparkline.points.length === 0) return []
 
-    // Convert hourly data to chart format
-    return hourlyData.hourly_data.map((hourData) => ({
-      time: new Date(hourData.timestamp).toLocaleTimeString('en-US', {
+    return sparkline.points.map((point) => ({
+      time: new Date(point.timestamp).toLocaleTimeString('en-US', {
         hour: '2-digit',
         minute: '2-digit',
       }),
-      sessions: hourData.session_count,
+      sessions: point.session_count,
     }))
-  }, [hourlyData])
+  }, [sparkline])
 
   return (
     <div className="group relative flex items-center gap-4 p-4 hover:bg-muted/50 transition-colors border-b last:border-b-0">
@@ -94,9 +72,7 @@ export function PageListItem({
 
       {/* Mini Chart */}
       <div className="w-24 h-10">
-        {hourlyLoading ? (
-          <div className="w-full h-full bg-muted animate-pulse rounded" />
-        ) : chartData.length > 0 ? (
+        {chartData.length > 0 ? (
           <ChartContainer config={chartConfig} className="h-full w-full">
             <AreaChart
               data={chartData}

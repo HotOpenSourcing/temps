@@ -1,12 +1,13 @@
 //! Database connection management
 
-use sea_orm::{ConnectOptions, Database, DatabaseConnection};
+use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, Statement};
 use std::sync::Arc;
 use std::time::Duration;
 use temps_core::{ServiceError, ServiceResult};
 use temps_migrations::{Migrator, MigratorTrait};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
+use tracing::debug;
 
 pub type DbConnection = DatabaseConnection;
 
@@ -153,7 +154,68 @@ pub async fn establish_connection(database_url: &str) -> ServiceResult<Arc<DbCon
         }
     }
 
+    // Post-migration: backfill continuous aggregates that require CALL outside a transaction.
+    // This is idempotent — refreshing an already-populated aggregate just updates it.
+    run_post_migration_backfill(&db).await?;
+
     Ok(Arc::new(db))
+}
+
+/// Run post-migration backfill for continuous aggregates.
+///
+/// `CALL refresh_continuous_aggregate()` cannot run inside a transaction block,
+/// but Sea-ORM migrations run inside transactions. This function runs the backfill
+/// after the migration transaction has been committed.
+///
+/// This is idempotent — refreshing an already-populated aggregate is a no-op for
+/// unchanged data, so it's safe to call on every startup.
+async fn run_post_migration_backfill(db: &DatabaseConnection) -> ServiceResult<()> {
+    // Check if the events_hourly continuous aggregate exists before attempting backfill
+    let check_sql = r#"
+        SELECT EXISTS (
+            SELECT 1 FROM timescaledb_information.continuous_aggregates
+            WHERE view_name = 'events_hourly'
+        ) as exists
+    "#;
+
+    let row = db
+        .query_one(Statement::from_string(
+            sea_orm::DatabaseBackend::Postgres,
+            check_sql,
+        ))
+        .await
+        .map_err(|e| {
+            ServiceError::Database(format!(
+                "Failed to check for events_hourly aggregate: {}",
+                e
+            ))
+        })?;
+
+    if let Some(row) = row {
+        let exists: bool = row.try_get("", "exists").unwrap_or(false);
+        if exists {
+            debug!("Backfilling events_hourly continuous aggregate");
+            let backfill_sql =
+                "CALL refresh_continuous_aggregate('events_hourly', NULL, NOW() - INTERVAL '1 hour')";
+            if let Err(e) = db
+                .execute(Statement::from_string(
+                    sea_orm::DatabaseBackend::Postgres,
+                    backfill_sql,
+                ))
+                .await
+            {
+                // Log but don't fail startup — the refresh policy will catch up
+                tracing::warn!(
+                    "Failed to backfill events_hourly aggregate (refresh policy will catch up): {}",
+                    e
+                );
+            } else {
+                debug!("events_hourly continuous aggregate backfill complete");
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

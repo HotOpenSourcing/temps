@@ -10971,6 +10971,7 @@ dependencies = [
  "sea-orm",
  "serde",
  "serde_json",
+ "sha2",
  "tar",
  "temps-analytics",
  "temps-analytics-events",
@@ -11095,6 +11096,7 @@ dependencies = [
  "temps-migrations",
  "testcontainers",
  "tokio",
+ "tracing",
  "uuid",
 ]
 

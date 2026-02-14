@@ -12,12 +12,67 @@ import { ProjectCardSkeleton } from '@/components/skeletons/ProjectCardSkeleton'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
+import { useDashboardAnalytics } from '@/hooks/useDashboardAnalytics'
 import { usePageTitle } from '@/hooks/usePageTitle'
 import { useQuery } from '@tanstack/react-query'
 import { subDays } from 'date-fns'
-import { DollarSign, Eye, FolderGit2, Plus, Users } from 'lucide-react'
+import {
+  DollarSign,
+  Eye,
+  FolderGit2,
+  Minus,
+  Plus,
+  TrendingDown,
+  TrendingUp,
+  Users,
+} from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
+
+function formatTrendChange(trendPercentage: number | null | undefined): {
+  change: string
+  changeDisplay: {
+    icon: React.ReactNode
+    className: string
+    isPositive?: boolean
+  }
+} | null {
+  if (trendPercentage == null) return null
+
+  const rounded = Math.round(trendPercentage)
+
+  if (rounded === 0) {
+    return {
+      change: '0% vs prev. period',
+      changeDisplay: {
+        icon: <Minus className="mr-1 h-3 w-3" />,
+        className: 'text-xs text-muted-foreground flex items-center mt-1',
+      },
+    }
+  }
+
+  if (rounded > 0) {
+    return {
+      change: `+${rounded}% vs prev. period`,
+      changeDisplay: {
+        icon: <TrendingUp className="mr-1 h-3 w-3" />,
+        className:
+          'text-xs text-emerald-600 dark:text-emerald-400 flex items-center mt-1',
+        isPositive: true,
+      },
+    }
+  }
+
+  return {
+    change: `${rounded}% vs prev. period`,
+    changeDisplay: {
+      icon: <TrendingDown className="mr-1 h-3 w-3" />,
+      className:
+        'text-xs text-red-600 dark:text-red-400 flex items-center mt-1',
+      isPositive: false,
+    },
+  }
+}
 
 const ITEMS_PER_PAGE = 8
 
@@ -48,6 +103,19 @@ export function Dashboard() {
       endDate: new Date().toISOString(),
     }
   }, [])
+
+  // Batch fetch analytics for all visible projects in a single request
+  const projectIds = useMemo(
+    () => projectsData?.projects?.map((p: { id: number }) => p.id) ?? [],
+    [projectsData?.projects]
+  )
+
+  const dashboardAnalytics = useDashboardAnalytics(
+    projectIds,
+    startDate,
+    endDate
+  )
+
   // Fetch general stats
   const generalStatsQuery = useQuery({
     ...getGeneralStatsOptions({
@@ -58,7 +126,16 @@ export function Dashboard() {
     }),
     enabled: hasProjects,
   })
-  // Fix: gitProvidersData is an array, not an object with providers property
+
+  // Extract trend data from general stats (new fields from backend)
+  const statsData = generalStatsQuery.data as
+    | (typeof generalStatsQuery.data & {
+        visitors_trend_percentage?: number | null
+        page_views_trend_percentage?: number | null
+      })
+    | undefined
+  const visitorsTrend = formatTrendChange(statsData?.visitors_trend_percentage)
+  const pageViewsTrend = formatTrendChange(statsData?.page_views_trend_percentage)
 
   // Show loading skeleton while initial data is being fetched
   if (isLoading) {
@@ -144,7 +221,8 @@ export function Dashboard() {
               generalStatsQuery.data?.total_unique_visitors?.toLocaleString() ||
               0
             }
-            change=""
+            change={visitorsTrend?.change ?? 'vs prev. period'}
+            changeDisplay={visitorsTrend?.changeDisplay}
             icon={<Users className="h-5 w-5" />}
           />
         )}
@@ -165,7 +243,8 @@ export function Dashboard() {
             value={
               generalStatsQuery.data?.total_page_views?.toLocaleString() || 0
             }
-            change=""
+            change={pageViewsTrend?.change ?? 'vs prev. period'}
+            changeDisplay={pageViewsTrend?.changeDisplay}
             icon={<Eye className="h-5 w-5" />}
           />
         )}
@@ -222,7 +301,17 @@ export function Dashboard() {
           <>
             <div className="grid gap-6 md:grid-cols-2">
               {projectsData?.projects.map((project: any) => (
-                <ProjectCard key={project.id} project={project} />
+                <ProjectCard
+                  key={project.id}
+                  project={project}
+                  analytics={
+                    dashboardAnalytics.data?.projects?.[
+                      String(project.id)
+                    ]
+                  }
+                  analyticsLoading={dashboardAnalytics.isLoading}
+                  analyticsError={dashboardAnalytics.isError}
+                />
               ))}
             </div>
 

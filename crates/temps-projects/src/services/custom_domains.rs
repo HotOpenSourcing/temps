@@ -40,12 +40,14 @@ impl CustomDomainService {
     fn normalize_redirect_url(redirect_url: &str) -> String {
         let trimmed = redirect_url.trim();
 
-        // If the URL already has a scheme, return as-is
-        if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        // If the URL already has a scheme, return as-is.
+        // This preserves invalid schemes (ftp://, file://, etc.) so that
+        // validate_external_url can reject them.
+        if trimmed.contains("://") {
             return trimmed.to_string();
         }
 
-        // Add https:// scheme by default
+        // Add https:// scheme by default for bare domains like "example.com"
         format!("https://{}", trimmed)
     }
 

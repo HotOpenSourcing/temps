@@ -163,6 +163,16 @@ pub trait Analytics: Send + Sync {
         limit: Option<i32>,
     ) -> Result<crate::types::responses::ActiveVisitorsResponse, AnalyticsError>;
 
+    /// Get sparkline data for multiple page paths in a single query
+    async fn get_page_paths_sparklines(
+        &self,
+        project_id: i32,
+        page_paths: &[String],
+        start_date: UtcDateTime,
+        end_date: UtcDateTime,
+        environment_id: Option<i32>,
+    ) -> Result<crate::types::responses::PagePathsSparklineResponse, AnalyticsError>;
+
     /// Get page hourly sessions
     async fn get_page_hourly_sessions(
         &self,

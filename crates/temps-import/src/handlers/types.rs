@@ -3,7 +3,8 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use temps_import_types::{
-    ImportPlan, ImportSelector, ImportSource, ValidationReport, WorkloadDescriptor, WorkloadId,
+    ImportCredentials, ImportPlan, ImportSelector, ImportSource, StepResult, ValidationReport,
+    WorkloadDescriptor, WorkloadId,
 };
 use utoipa::ToSchema;
 
@@ -37,6 +38,14 @@ pub struct ImportSourceCapabilities {
     pub supports_health_checks: bool,
     pub supports_resource_limits: bool,
     pub supports_build: bool,
+    /// Supports service migration (databases, caches, etc.)
+    pub supports_services: bool,
+    /// Supports custom domain migration
+    pub supports_domains: bool,
+    /// Supports full project-level snapshots
+    pub supports_project_snapshot: bool,
+    /// Whether this source requires API credentials (token, base URL)
+    pub requires_credentials: bool,
 }
 
 /// Request to discover workloads
@@ -44,6 +53,9 @@ pub struct ImportSourceCapabilities {
 pub struct DiscoverRequest {
     /// Source to discover from
     pub source: ImportSource,
+    /// Platform credentials (required for cloud platforms like Vercel, Railway)
+    #[serde(default)]
+    pub credentials: ImportCredentials,
     /// Optional selector to filter workloads
     #[serde(default)]
     pub selector: ImportSelector,
@@ -63,6 +75,9 @@ pub struct CreatePlanRequest {
     pub source: ImportSource,
     /// Workload ID to import
     pub workload_id: WorkloadId,
+    /// Platform credentials (required for cloud platforms like Vercel, Railway)
+    #[serde(default)]
+    pub credentials: ImportCredentials,
     /// Optional repository ID to associate with the import
     /// If provided, preset will be detected from the repository
     pub repository_id: Option<i32>,
@@ -114,6 +129,8 @@ pub struct ExecuteImportResponse {
     pub environment_id: Option<i32>,
     /// Created deployment ID (if completed)
     pub deployment_id: Option<i32>,
+    /// Per-step results (in execution order)
+    pub step_results: Vec<StepResult>,
 }
 
 /// Import execution status

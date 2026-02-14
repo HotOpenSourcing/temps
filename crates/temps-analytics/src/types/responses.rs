@@ -391,6 +391,23 @@ pub struct PageHourlySessionsResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct PagePathSparklinePoint {
+    pub timestamp: String,
+    pub session_count: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct PagePathSparkline {
+    pub page_path: String,
+    pub points: Vec<PagePathSparklinePoint>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct PagePathsSparklineResponse {
+    pub sparklines: Vec<PagePathSparkline>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct PageSessionComparison {
     pub page_path: String,
     #[schema(value_type = String)]
@@ -441,6 +458,14 @@ pub struct GeneralStatsResponse {
     pub total_projects: i64,
     pub avg_bounce_rate: f64,
     pub avg_engagement_rate: f64,
+    /// Previous period unique visitors (same duration, shifted back)
+    pub previous_unique_visitors: Option<i64>,
+    /// Previous period page views
+    pub previous_page_views: Option<i64>,
+    /// Percentage change in unique visitors vs previous period
+    pub visitors_trend_percentage: Option<f64>,
+    /// Percentage change in page views vs previous period
+    pub page_views_trend_percentage: Option<f64>,
     pub project_breakdown: Vec<ProjectStatsBreakdown>,
 }
 

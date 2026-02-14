@@ -24,6 +24,8 @@ mod m20260103_000002_add_utm_fields_to_sessions;
 mod m20260121_000001_add_remote_builds_support;
 mod m20260122_000001_increase_checksum_length;
 mod m20260213_000001_create_source_maps;
+mod m20260214_000001_create_events_hourly_aggregate;
+mod m20260214_000002_add_analytics_performance_indexes;
 
 pub struct Migrator;
 
@@ -55,6 +57,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260121_000001_add_remote_builds_support::Migration),
             Box::new(m20260122_000001_increase_checksum_length::Migration),
             Box::new(m20260213_000001_create_source_maps::Migration),
+            Box::new(m20260214_000001_create_events_hourly_aggregate::Migration),
+            Box::new(m20260214_000002_add_analytics_performance_indexes::Migration),
         ]
     }
 }

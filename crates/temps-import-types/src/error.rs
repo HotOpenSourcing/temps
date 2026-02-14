@@ -40,6 +40,16 @@ pub enum ImportError {
     #[error("Execution failed: {0}")]
     ExecutionFailed(String),
 
+    /// A specific migration step failed
+    #[error("Step '{step_name}' failed: {message}")]
+    StepFailed {
+        step_name: String,
+        step_index: usize,
+        message: String,
+        /// Whether partial results were committed before this failure
+        partial_commit: bool,
+    },
+
     /// Unsupported feature for this source
     #[error("Unsupported feature: {0}")]
     UnsupportedFeature(String),
@@ -55,6 +65,22 @@ pub enum ImportError {
     /// Authentication/authorization error
     #[error("Authentication error: {0}")]
     AuthenticationError(String),
+
+    /// Credential validation error
+    #[error("Invalid credentials: {0}")]
+    InvalidCredentials(String),
+
+    /// Rate limit exceeded on source platform
+    #[error("Rate limit exceeded: {0}")]
+    RateLimitExceeded(String),
+
+    /// Service migration error (database, cache, etc.)
+    #[error("Service migration error: {0}")]
+    ServiceMigrationError(String),
+
+    /// Domain migration error
+    #[error("Domain migration error: {0}")]
+    DomainMigrationError(String),
 
     /// Generic internal error
     #[error("Internal error: {0}")]

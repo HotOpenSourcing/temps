@@ -42,6 +42,7 @@ pub struct AppState {
         get_active_visitors,
         get_live_visitors_list,
         get_page_hourly_sessions,
+        get_page_paths_sparklines,
         get_visitor_by_id,
         get_visitor_by_guid,
         get_general_stats,
@@ -108,6 +109,10 @@ pub struct AppState {
         PageSessionStatsQuery,
         PagePathsQuery,
         PageHourlySessionsQuery,
+        PagePathsSparklineQuery,
+        PagePathsSparklineResponse,
+        PagePathSparkline,
+        PagePathSparklinePoint,
         VisitorWithGeolocation,
         EventBreakdown,
         GeneralStatsQuery,
@@ -186,6 +191,10 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         .route(
             "/analytics/page-hourly-sessions",
             get(get_page_hourly_sessions),
+        )
+        .route(
+            "/analytics/page-paths-sparklines",
+            get(get_page_paths_sparklines),
         )
         .route("/analytics/visitors/id/{id}", get(get_visitor_by_id))
         .route(
@@ -1049,6 +1058,78 @@ pub async fn get_live_visitors_list(
             error!("Analytics error: {:?}", e);
             Err(handle_analytics_error(e))
         }
+    }
+}
+
+/// Query parameters for batch page paths sparkline endpoint
+#[derive(Debug, Deserialize, ToSchema, Clone)]
+pub struct PagePathsSparklineQuery {
+    pub project_id: i32,
+    pub environment_id: Option<i32>,
+    pub start_time: DateTime,
+    pub end_time: DateTime,
+    /// Comma-separated list of page paths
+    pub page_paths: String,
+}
+
+#[utoipa::path(
+    tag = "Analytics",
+    get,
+    path = "/analytics/page-paths-sparklines",
+    params(
+        ("project_id" = i32, Query, description = "Project ID"),
+        ("environment_id" = Option<i32>, Query, description = "Environment ID (optional)"),
+        ("start_time" = String, Query, description = "Start time in ISO 8601 format"),
+        ("end_time" = String, Query, description = "End time in ISO 8601 format"),
+        ("page_paths" = String, Query, description = "Comma-separated list of page paths"),
+    ),
+    responses(
+        (status = 200, description = "Sparkline data for all requested page paths", body = PagePathsSparklineResponse),
+        (status = 400, description = "Invalid parameters"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn get_page_paths_sparklines(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    Query(query): Query<PagePathsSparklineQuery>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, AnalyticsRead);
+
+    let start_time: UtcDateTime = query.start_time.into();
+    let end_time: UtcDateTime = query.end_time.into();
+
+    let page_paths: Vec<String> = query
+        .page_paths
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if page_paths.is_empty() {
+        return Ok(Json(PagePathsSparklineResponse { sparklines: vec![] }));
+    }
+
+    if page_paths.len() > 100 {
+        return Err(bad_request()
+            .detail("Too many page paths, maximum is 100")
+            .build());
+    }
+
+    match app_state
+        .analytics_service
+        .get_page_paths_sparklines(
+            query.project_id,
+            &page_paths,
+            start_time,
+            end_time,
+            query.environment_id,
+        )
+        .await
+    {
+        Ok(res) => Ok(Json(res)),
+        Err(e) => Err(handle_analytics_error(e)),
     }
 }
 

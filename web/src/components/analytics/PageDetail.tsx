@@ -154,8 +154,12 @@ export function PageDetail({
           {[...Array(6)].map((_, i) => (
             <Card key={`stat-skeleton-${i}`}>
               <CardContent className="pt-4 pb-4">
-                <Skeleton className="h-4 w-20 mb-2" />
-                <Skeleton className="h-6 w-12" />
+                {/* Matches StatCard: icon + label row, then value */}
+                <div className="flex items-center gap-2 mb-1">
+                  <Skeleton className="h-4 w-4 rounded" />
+                  <Skeleton className="h-3 w-16" />
+                </div>
+                <Skeleton className="h-7 w-14" />
               </CardContent>
             </Card>
           ))}
@@ -198,6 +202,36 @@ export function PageDetail({
       ) : null}
 
       {/* Top referrers and countries side by side */}
+      {detailLoading && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          {[0, 1].map((i) => (
+            <Card key={`ref-skeleton-${i}`}>
+              <CardHeader className="pb-3">
+                <Skeleton className="h-4 w-24" />
+              </CardHeader>
+              <CardContent className="pt-0">
+                <div className="space-y-2">
+                  {[...Array(4)].map((_, j) => (
+                    <div
+                      key={`ref-row-${i}-${j}`}
+                      className="flex items-center justify-between"
+                    >
+                      <Skeleton
+                        className="h-3"
+                        style={{ width: `${60 + (j % 3) * 25}px` }}
+                      />
+                      <div className="flex items-center gap-2">
+                        <Skeleton className="h-3 w-8" />
+                        <Skeleton className="h-5 w-12 rounded-full" />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
       {detailData && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           {/* Top Referrers */}
@@ -291,19 +325,59 @@ export function PageDetail({
         </CardHeader>
         <CardContent className="p-0">
           {visitorsLoading && !visitorsData ? (
-            <div className="p-8 space-y-4">
-              {[...Array(5)].map((_, i) => (
-                <div
-                  key={`visitor-skeleton-${i}`}
-                  className="flex items-center gap-4"
-                >
-                  <Skeleton className="h-4 w-16" />
-                  <Skeleton className="h-4 w-32" />
-                  <Skeleton className="h-4 w-20" />
-                  <Skeleton className="h-4 w-24" />
-                </div>
-              ))}
-            </div>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Visitor</TableHead>
+                  <TableHead>Viewed</TableHead>
+                  <TableHead>Time on Page</TableHead>
+                  <TableHead>Browser / OS</TableHead>
+                  <TableHead>Location</TableHead>
+                  <TableHead>Flow</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {[...Array(5)].map((_, i) => (
+                  <TableRow key={`visitor-skeleton-${i}`}>
+                    <TableCell>
+                      <div className="flex items-center gap-1.5">
+                        <Skeleton className="h-3 w-3 rounded-full" />
+                        <Skeleton className="h-4 w-16" />
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <Skeleton className="h-4 w-20" />
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-1">
+                        <Skeleton className="h-3 w-3 rounded-full" />
+                        <Skeleton className="h-4 w-10" />
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <Skeleton
+                        className="h-4"
+                        style={{ width: `${80 + (i % 3) * 20}px` }}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      <Skeleton
+                        className="h-4"
+                        style={{ width: `${60 + (i % 2) * 30}px` }}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-1.5">
+                        <Skeleton className="h-5 w-14 rounded-full" />
+                        {i % 2 === 0 && (
+                          <Skeleton className="h-5 w-12 rounded-full" />
+                        )}
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
           ) : !visitorsData?.sessions ||
             visitorsData.sessions.length === 0 ? (
             <div className="p-8 text-center">

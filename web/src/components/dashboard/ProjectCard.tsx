@@ -1,10 +1,5 @@
 import { ProjectResponse } from '@/api/client'
-// import { getHourlyVisitorStatsOptions } from '@/api/client/@tanstack/react-query.gen'
-import {
-  getHourlyVisitsOptions,
-  getLastDeploymentOptions,
-  getUniqueCountsOptions,
-} from '@/api/client/@tanstack/react-query.gen'
+import { getLastDeploymentOptions } from '@/api/client/@tanstack/react-query.gen'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent } from '@/components/ui/card'
@@ -12,67 +7,71 @@ import { KbdBadge } from '@/components/ui/kbd-badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ReloadableImage } from '@/components/utils/ReloadableImage'
 import { TimeAgo } from '@/components/utils/TimeAgo'
+import type { ProjectDashboardAnalytics } from '@/hooks/useDashboardAnalytics'
 import { useQuery } from '@tanstack/react-query'
-import { subDays } from 'date-fns'
-import { AlertCircle } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { AlertCircle, TrendingDown, TrendingUp, Minus } from 'lucide-react'
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { VisitorSparkline } from './VisitorSparkline'
+
+function formatTrend(trendPercentage: number | null | undefined): {
+  label: string
+  icon: React.ReactNode
+  className: string
+} | null {
+  if (trendPercentage == null) return null
+
+  const rounded = Math.round(trendPercentage)
+
+  if (rounded === 0) {
+    return {
+      label: '0%',
+      icon: <Minus className="h-3 w-3" />,
+      className: 'text-muted-foreground',
+    }
+  }
+
+  if (rounded > 0) {
+    return {
+      label: `+${rounded}%`,
+      icon: <TrendingUp className="h-3 w-3" />,
+      className: 'text-emerald-600 dark:text-emerald-400',
+    }
+  }
+
+  return {
+    label: `${rounded}%`,
+    icon: <TrendingDown className="h-3 w-3" />,
+    className: 'text-red-600 dark:text-red-400',
+  }
+}
 
 interface ProjectCardProps {
   project: ProjectResponse
   shortcutNumber?: number
+  /** Pre-fetched analytics data from the batch endpoint */
+  analytics?: ProjectDashboardAnalytics
+  /** Whether the batch analytics query is still loading */
+  analyticsLoading?: boolean
+  /** Whether the batch analytics query errored */
+  analyticsError?: boolean
 }
 
-export function ProjectCard({ project, shortcutNumber }: ProjectCardProps) {
+export function ProjectCard({
+  project,
+  shortcutNumber,
+  analytics,
+  analyticsLoading = false,
+  analyticsError = false,
+}: ProjectCardProps) {
   // State for hover effect
   const [isHovering, setIsHovering] = useState(false)
 
-  // Memoize dates to prevent unnecessary re-renders
-  const { startDate, endDate } = useMemo(
-    () => ({
-      startDate: subDays(new Date(), 1),
-      endDate: new Date(),
-    }),
-    []
-  )
+  const totalVisitors = analytics?.unique_visitors ?? 0
+  const hourlyData = analytics?.hourly_visits ?? []
+  const trend = formatTrend(analytics?.trend_percentage)
 
-  // IMPORTANT: Keep hooks in the same order as original to avoid React errors
-  const hourlyVisitorsQuery = useQuery({
-    ...getHourlyVisitsOptions({
-      path: {
-        project_id: project.id,
-      },
-      query: {
-        aggregation_level: 'visitors',
-        start_date: startDate.toISOString(),
-        end_date: endDate.toISOString(),
-      },
-    }),
-    staleTime: 1000 * 60 * 5, // 5 minutes - prevents constant refetching
-    refetchInterval: 1000 * 60, // Refetch every minute for fresh data
-  })
-
-  // Get unique visitor count (not sum of hourly counts which includes duplicates)
-  const uniqueVisitorsQuery = useQuery({
-    ...getUniqueCountsOptions({
-      path: { project_id: project.id },
-      query: {
-        start_date: startDate.toISOString(),
-        end_date: endDate.toISOString(),
-        metric: 'visitors',
-      },
-    }),
-    staleTime: 1000 * 60 * 5, // 5 minutes
-    refetchInterval: 1000 * 60, // Refetch every minute
-  })
-
-  const totalVisitors = useMemo(
-    () => uniqueVisitorsQuery.data?.count || 0,
-    [uniqueVisitorsQuery.data]
-  )
-
-  // Fetch last deployment to get screenshot (added after existing hooks)
+  // Fetch last deployment to get screenshot
   const { data: lastDeployment } = useQuery({
     ...getLastDeploymentOptions({
       path: {
@@ -135,7 +134,7 @@ export function ProjectCard({ project, shortcutNumber }: ProjectCardProps) {
           </div>
 
           {/* Analytics Section */}
-          {hourlyVisitorsQuery.isLoading || uniqueVisitorsQuery.isLoading ? (
+          {analyticsLoading ? (
             <>
               <div className="mt-3 flex items-baseline gap-2">
                 <Skeleton className="h-8 w-16" />
@@ -148,7 +147,7 @@ export function ProjectCard({ project, shortcutNumber }: ProjectCardProps) {
                 <Skeleton className="h-full w-full" />
               </div>
             </>
-          ) : hourlyVisitorsQuery.isError || uniqueVisitorsQuery.isError ? (
+          ) : analyticsError ? (
             <div className="mt-3 flex items-center gap-2 text-sm text-muted-foreground">
               <AlertCircle className="h-4 w-4" />
               <span>Unable to load analytics</span>
@@ -156,25 +155,23 @@ export function ProjectCard({ project, shortcutNumber }: ProjectCardProps) {
           ) : (
             <>
               <div className="mt-3 flex items-baseline gap-2">
-                <div className="text-2xl font-bold">{totalVisitors || 0}</div>
-                {/* {hourlyVisitorsQuery.data?.total_change !== undefined && (
-									<div className={cn('flex items-center gap-1', trendDisplay.className)}>
-										{trendDisplay.icon}
-										<span>{Math.abs(hourlyVisitorsQuery.data.total_change)}%</span>
-									</div>
-								)} */}
+                <div className="text-2xl font-bold">{totalVisitors}</div>
+                {trend && (
+                  <span className={`inline-flex items-center gap-0.5 text-xs font-medium ${trend.className}`}>
+                    {trend.icon}
+                    {trend.label}
+                  </span>
+                )}
                 <span className="text-sm text-muted-foreground">
                   visitors in last 24h
                 </span>
               </div>
 
               <VisitorSparkline
-                data={
-                  hourlyVisitorsQuery.data?.map((e) => ({
-                    hour: e.date,
-                    count: e.count,
-                  })) || []
-                }
+                data={hourlyData.map((e) => ({
+                  hour: e.date,
+                  count: e.count,
+                }))}
                 className="mt-2 w-full"
                 height={60}
                 isHovering={isHovering}
