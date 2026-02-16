@@ -20,6 +20,16 @@
 
 ---
 
+<p align="center">
+  <img src="temps-demo.gif" alt="Temps — from bare server to deployed in under 3 minutes" width="800" />
+  <br />
+  <em>From bare server to fully deployed — in under 3 minutes (166s).</em>
+</p>
+
+```bash
+curl -fsSL https://temps.sh/deploy.sh | sh
+```
+
 ![Temps Dashboard](assets/screenshots/dashboard.png)
 
 Stop paying for 5 different SaaS tools. Temps replaces your deployment platform, analytics, error tracking, session replay, and uptime monitoring -- all self-hosted, all in one binary.
@@ -28,113 +38,86 @@ Stop paying for 5 different SaaS tools. Temps replaces your deployment platform,
 
 ## Features
 
-### Deploy anything
+<table>
+<tr>
+<td width="50%">
 
-Push to Git. Temps builds and deploys. Framework auto-detection handles the rest -- Next.js, Vite, Go, Python, Rust, Java, .NET, NestJS, or any custom Dockerfile. Every push creates a deployment with build logs, rollback support, and zero-downtime updates.
+**Git Push to Deploy**
+Push to Git, Temps builds and deploys. Auto-detects frameworks, creates preview URLs, and handles zero-downtime rollouts.
 
 ![Deployments](assets/screenshots/deployments.png)
 
-### Built-in observability
+</td>
+<td width="50%">
 
-Web analytics with funnels and visitor tracking. Session replay powered by rrweb. Error tracking with a Sentry-compatible SDK. Speed insights. Uptime monitoring. All of it ships inside Temps -- no external services, no extra billing, no data leaving your infrastructure.
+**Built-in Analytics & Session Replay**
+Web analytics with funnels, visitor tracking, and session replay (rrweb). Sentry-compatible error tracking. No external services.
 
 ![Analytics](assets/screenshots/analytics.png)
 
-### Production infrastructure
+</td>
+</tr>
+<tr>
+<td width="50%">
 
-Temps runs on Cloudflare's Pingora reverse proxy -- the same technology that handles trillions of requests at Cloudflare. Automatic TLS certificates via Let's Encrypt (HTTP-01 and DNS-01 challenges), custom domains, and load balancing are built in and configured through the UI.
+**Pingora-Powered Proxy**
+Runs on Cloudflare's Pingora engine. Auto TLS via Let's Encrypt (HTTP-01 & DNS-01), custom domains, and full request logging.
 
-![Domain Management](assets/screenshots/domains.png)
+![Domains](assets/screenshots/domains.png)
 
-### Managed services
+</td>
+<td width="50%">
 
-Provision PostgreSQL, Redis, S3-compatible storage (MinIO), and MongoDB alongside your applications. Temps manages the lifecycle -- creation, backups, connection strings, and teardown -- so your apps and their data live in the same place.
+**Managed Services**
+Provision Postgres, Redis, S3 (MinIO), and MongoDB alongside your apps. Temps handles creation, backups, and teardown.
 
-### Full request visibility
+![Monitoring](assets/screenshots/monitoring-detail.png)
 
-Every HTTP request that flows through the proxy is logged with method, path, status code, response time, upstream target, and routing metadata. Filter, search, and drill into traffic patterns without bolting on a separate logging stack.
+</td>
+</tr>
+<tr>
+<td width="50%">
+
+**Request Logs & Proxy Visibility**
+Every HTTP request logged with method, path, status, response time, and routing metadata. Filter and search without extra tooling.
 
 ![Proxy Logs](assets/screenshots/proxy-logs.png)
 
-### Monitoring and alerts
+</td>
+<td width="50%">
 
-Configure monitors for deployment failures, build errors, runtime crashes, domain and certificate expiry, and backup health. Get notified through your preferred channels before problems reach your users.
+**Monitoring & Alerts**
+Monitors for deploy failures, runtime crashes, certificate expiry, and backup health. Get notified before problems reach users.
 
-![Monitoring](assets/screenshots/monitoring-detail.png)
+![Project Overview](assets/screenshots/project-overview.png)
+
+</td>
+</tr>
+</table>
+
+### Works with your stack
+
+<p align="center">
+<a href="https://nextjs.org"><img src="https://img.shields.io/badge/Next.js-000?logo=nextdotjs&logoColor=fff&style=for-the-badge" alt="Next.js" /></a>
+<a href="https://vitejs.dev"><img src="https://img.shields.io/badge/Vite-646CFF?logo=vite&logoColor=fff&style=for-the-badge" alt="Vite" /></a>
+<a href="https://go.dev"><img src="https://img.shields.io/badge/Go-00ADD8?logo=go&logoColor=fff&style=for-the-badge" alt="Go" /></a>
+<a href="https://python.org"><img src="https://img.shields.io/badge/Python-3776AB?logo=python&logoColor=fff&style=for-the-badge" alt="Python" /></a>
+<a href="https://rust-lang.org"><img src="https://img.shields.io/badge/Rust-000?logo=rust&logoColor=fff&style=for-the-badge" alt="Rust" /></a>
+<a href="https://java.com"><img src="https://img.shields.io/badge/Java-ED8B00?logo=openjdk&logoColor=fff&style=for-the-badge" alt="Java" /></a>
+<a href="https://dotnet.microsoft.com"><img src="https://img.shields.io/badge/.NET-512BD4?logo=dotnet&logoColor=fff&style=for-the-badge" alt=".NET" /></a>
+<a href="https://nestjs.com"><img src="https://img.shields.io/badge/NestJS-E0234E?logo=nestjs&logoColor=fff&style=for-the-badge" alt="NestJS" /></a>
+<a href="https://docker.com"><img src="https://img.shields.io/badge/Dockerfile-2496ED?logo=docker&logoColor=fff&style=for-the-badge" alt="Docker" /></a>
+</p>
+
+<p align="center"><em>Any language, any framework. Auto-detected or bring your own Dockerfile.</em></p>
 
 ---
 
 ## Quick Start
 
 ```bash
-# Install
 curl -fsSL https://temps.sh/deploy.sh | sh
-
-# Setup (interactive -- configures database, admin user, TLS, DNS)
-temps setup
-
-# Start
-temps serve
 ```
-
-<details>
-<summary>Or use Docker Compose</summary>
-
-```yaml
-version: "3.8"
-
-services:
-  postgres:
-    image: timescale/timescaledb:latest-pg18
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: temps
-      POSTGRES_DB: temps
-    volumes:
-      - temps-postgres:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  redis:
-    image: redis:7-alpine
-    volumes:
-      - temps-redis:/data
-
-  temps:
-    image: ghcr.io/gotempsh/temps:latest
-    ports:
-      - "80:80"
-      - "443:443"
-      - "8081:8081"
-    environment:
-      TEMPS_DATABASE_URL: postgresql://postgres:temps@postgres:5432/temps
-      TEMPS_ADDRESS: 0.0.0.0:80
-      TEMPS_TLS_ADDRESS: 0.0.0.0:443
-      TEMPS_CONSOLE_ADDRESS: 0.0.0.0:8081
-      REDIS_URL: redis://redis:6379
-    volumes:
-      - temps-data:/app/data
-      - /var/run/docker.sock:/var/run/docker.sock
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-volumes:
-  temps-postgres:
-  temps-redis:
-  temps-data:
-```
-
-```bash
-docker-compose up -d
-```
-
-</details>
-
-For detailed setup options, see the [Installation Guide](https://temps.sh/docs/installation).
 
 ---
 
@@ -153,6 +136,27 @@ For detailed setup options, see the [Installation Guide](https://temps.sh/docs/i
 
 ---
 
+## Temps vs. Alternatives
+
+| Feature | Temps | Coolify | CapRover | Dokku | Railway | Vercel |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|
+| Self-hosted | Yes | Yes | Yes | Yes | No | No |
+| Single binary install | Yes | No | No | No | -- | -- |
+| Git push deploy | Yes | Yes | Yes | Yes | Yes | Yes |
+| Web analytics | Yes | No | No | No | No | No |
+| Session replay | Yes | No | No | No | No | No |
+| Error tracking (Sentry-compatible) | Yes | No | No | No | No | No |
+| Uptime monitoring | Yes | No | No | No | No | No |
+| Managed Postgres/Redis/S3 | Yes | Yes | Partial | Plugin | Yes | Add-on |
+| Pingora proxy (Cloudflare-grade) | Yes | No | No | No | No | No |
+| Auto TLS (HTTP-01 + DNS-01) | Yes | Yes | Yes | Plugin | Yes | Yes |
+| Request-level logging | Yes | No | No | No | Partial | Partial |
+| Preview deployments | Yes | Yes | No | No | Yes | Yes |
+| Built with Rust | Yes | No | No | No | No | No |
+| Free & open source | Yes | Yes | Yes | Yes | No | No |
+
+---
+
 ## Tech Stack
 
 - **Backend:** Rust, Axum, Sea-ORM, Pingora (Cloudflare's proxy engine), Bollard (Docker API)
@@ -166,10 +170,59 @@ For detailed setup options, see the [Installation Guide](https://temps.sh/docs/i
 
 | Package | Description |
 |---|---|
-| [`@temps-sdk/react-analytics`](https://www.npmjs.com/package/@temps-sdk/react-analytics) | React analytics, session replay, error tracking |
-| [`@temps-sdk/kv`](https://www.npmjs.com/package/@temps-sdk/kv) | Key-value store |
-| [`@temps-sdk/blob`](https://www.npmjs.com/package/@temps-sdk/blob) | Blob storage |
-| [`@temps-sdk/node-sdk`](https://www.npmjs.com/package/@temps-sdk/node-sdk) | Blob storage |
+| [`@temps-sdk/node-sdk`](https://www.npmjs.com/package/@temps-sdk/node-sdk) | Platform API client + Sentry-compatible error tracking |
+| [`@temps-sdk/react-analytics`](https://www.npmjs.com/package/@temps-sdk/react-analytics) | React analytics, session replay, Web Vitals, engagement tracking |
+| [`@temps-sdk/kv`](https://www.npmjs.com/package/@temps-sdk/kv) | Serverless key-value store |
+| [`@temps-sdk/blob`](https://www.npmjs.com/package/@temps-sdk/blob) | File storage (S3-compatible) |
+| [`@temps-sdk/cli`](https://www.npmjs.com/package/@temps-sdk/cli) | Command-line interface |
+| [`@temps-sdk/mcp`](https://www.npmjs.com/package/@temps-sdk/mcp) | Model Context Protocol server for AI agents |
+
+<details>
+<summary><strong>Quick examples</strong></summary>
+
+**Analytics** -- wrap your React app, everything else is automatic:
+
+```tsx
+import { TempsAnalyticsProvider } from '@temps-sdk/react-analytics';
+
+export default function App({ children }) {
+  return <TempsAnalyticsProvider>{children}</TempsAnalyticsProvider>;
+}
+```
+
+**Error tracking** -- Sentry-compatible, drop-in replacement:
+
+```typescript
+import { ErrorTracking } from '@temps-sdk/node-sdk';
+
+ErrorTracking.init({ dsn: 'https://key@your-instance.temps.dev/1' });
+
+try {
+  riskyOperation();
+} catch (error) {
+  ErrorTracking.captureException(error);
+}
+```
+
+**KV store** -- Redis-like API, zero config:
+
+```typescript
+import { kv } from '@temps-sdk/kv';
+
+await kv.set('user:123', { name: 'Alice', plan: 'pro' }, { ex: 3600 });
+const user = await kv.get('user:123');
+```
+
+**Blob storage** -- upload and serve files:
+
+```typescript
+import { blob } from '@temps-sdk/blob';
+
+const { url } = await blob.put('avatars/user-123.png', fileBuffer);
+const files = await blob.list({ prefix: 'avatars/' });
+```
+
+</details>
 
 ---
 

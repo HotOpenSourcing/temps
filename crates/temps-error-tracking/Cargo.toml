@@ -50,7 +50,7 @@ sourcemap = "9"
 # Additional dependencies for Sentry integration
 flate2 = "1.0"  # For gzip decompression
 debugid = { version = "0.8", features = ["serde"] }
-time = { version = "0.3", features = ["parsing", "formatting", "macros", "serde"] }
+time = { version = "0.3.47", features = ["parsing", "formatting", "macros", "serde"] }
 
 [dev-dependencies]
 temps-migrations = { path = "../temps-migrations" }

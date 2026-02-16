@@ -595,8 +595,10 @@ impl BackupService {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create exec: {}", e))?;
 
-        // Start exec and collect output
-        let mut output_data = Vec::new();
+        // Stream pg_dump output directly to gzip-compressed temp file.
+        // Previous implementation buffered the entire dump in memory which
+        // caused OOM kills (exit code 137) on large databases.
+        let mut encoder = GzEncoder::new(temp_file, Compression::default());
         let mut stderr_data = Vec::new();
 
         if let StartExecResults::Attached { mut output, .. } =
@@ -605,13 +607,13 @@ impl BackupService {
             while let Some(chunk) = FuturesStreamExt::next(&mut output).await {
                 match chunk {
                     Ok(bollard::container::LogOutput::StdOut { message }) => {
-                        output_data.extend_from_slice(&message);
+                        std::io::Write::write_all(&mut encoder, &message)?;
                     }
                     Ok(bollard::container::LogOutput::StdErr { message }) => {
                         stderr_data.extend_from_slice(&message);
                     }
                     Ok(bollard::container::LogOutput::Console { message }) => {
-                        output_data.extend_from_slice(&message);
+                        std::io::Write::write_all(&mut encoder, &message)?;
                     }
                     Err(e) => {
                         // Clean up container before returning error
@@ -678,11 +680,7 @@ impl BackupService {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to remove container: {}", e))?;
 
-        info!("Compressing PostgreSQL database backup");
-
-        // Compress the backup data using gzip
-        let mut encoder = GzEncoder::new(temp_file, Compression::default());
-        std::io::Write::write_all(&mut encoder, &output_data)?;
+        // Finalize gzip stream
         encoder.finish()?;
 
         info!("PostgreSQL backup completed successfully");

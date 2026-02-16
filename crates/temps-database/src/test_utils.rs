@@ -277,25 +277,20 @@ impl TestDatabase {
         Self::maybe_drop_shared_container(needs_counter_decrement).await;
     }
 
-    /// Decrement the active instances counter and drop the shared container
-    /// if this was the last instance.
+    /// Decrement the active instances counter.
+    ///
+    /// The shared container is intentionally **not** dropped when the counter
+    /// reaches zero. With `#[serial_test::serial]` (or any pattern where tests
+    /// run one at a time), each test's `Drop` would destroy the container and
+    /// the next test would have to spin up a brand-new one (5+ seconds each
+    /// time). Instead we let the container live for the entire test process;
+    /// testcontainers' own cleanup and the OS will tear it down when the
+    /// process exits.
     async fn maybe_drop_shared_container(needs_counter_decrement: bool) {
         if needs_counter_decrement {
             if let Some(counter) = ACTIVE_INSTANCES.get() {
                 let mut count = counter.lock().await;
                 *count = count.saturating_sub(1);
-
-                if *count == 0 {
-                    if let Some(container_holder) = TEST_CONTAINER.get() {
-                        let mut container_opt = container_holder.lock().await;
-                        if let Some(container) = container_opt.take() {
-                            drop(container);
-                            eprintln!(
-                                "Dropped shared test database container (all tests completed)"
-                            );
-                        }
-                    }
-                }
             }
         }
     }
@@ -357,13 +352,21 @@ impl TestDatabase {
 
         // Get or create shared container
         let container = Self::get_or_create_container().await?;
-        let container_lock = container.lock().await;
+        let mut container_lock = container.lock().await;
 
-        // Extract base_url from the Option<SharedContainer>
-        let base_url = if let Some(ref shared_container) = *container_lock {
-            shared_container.database_url.clone()
-        } else {
-            return Err(anyhow::anyhow!("Shared container was dropped"));
+        // Extract base_url from the Option<SharedContainer>, re-creating the
+        // container if a previous test's Drop already took it. This handles the
+        // case where serial tests each create and drop a TestDatabase: the first
+        // test's cleanup sets the Option to None, and the next test needs a fresh
+        // container.
+        let base_url = match *container_lock {
+            Some(ref shared_container) => shared_container.database_url.clone(),
+            None => {
+                let new_container = SharedContainer::new().await?;
+                let url = new_container.database_url.clone();
+                *container_lock = Some(new_container);
+                url
+            }
         };
         drop(container_lock); // Release lock early
 
