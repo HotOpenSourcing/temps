@@ -13,7 +13,7 @@ use rand::Rng;
 use sea_orm::{ActiveModelTrait, EntityTrait, Set};
 use std::future::IntoFuture;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use temps_analytics::AnalyticsPlugin;
 use temps_analytics_events::EventsPlugin;
@@ -435,13 +435,13 @@ async fn serve_static_file(req: Request) -> Response {
 /// Validate GeoLite2-City database exists in multiple locations
 /// Checks: current directory → data directory → home directory
 /// No system dependencies - database file must be placed manually
-fn validate_geolite2_database(default_db_path: &PathBuf) -> anyhow::Result<()> {
+fn validate_geolite2_database(default_db_path: &Path) -> anyhow::Result<()> {
     // Check multiple locations in order of preference
     let search_paths = vec![
         // 1. Current working directory (most convenient for local development)
         PathBuf::from("./GeoLite2-City.mmdb"),
         // 2. Data directory (from config)
-        default_db_path.clone(),
+        default_db_path.to_path_buf(),
     ];
 
     // Try to find the database in any of the search paths

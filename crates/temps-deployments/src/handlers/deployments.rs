@@ -1077,7 +1077,7 @@ pub async fn get_deployment_job_logs(
 /// upgrade request.
 ///
 /// **API Client Authentication**: Include API key in Authorization header:
-/// ```
+/// ```text
 /// Authorization: Bearer tk_your_api_key_here
 /// ```
 #[utoipa::path(

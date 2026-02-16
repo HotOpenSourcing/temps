@@ -6,7 +6,7 @@ use clap::{Args, Subcommand};
 use colored::Colorize;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use temps_core::EncryptionService;
 use temps_database::establish_connection;
 use temps_entities::domains;
@@ -326,7 +326,7 @@ fn get_data_dir(data_dir: &Option<PathBuf>) -> anyhow::Result<PathBuf> {
     }
 }
 
-fn load_encryption_key(data_dir: &PathBuf) -> anyhow::Result<String> {
+fn load_encryption_key(data_dir: &Path) -> anyhow::Result<String> {
     let encryption_key_path = data_dir.join("encryption_key");
 
     if !encryption_key_path.exists() {

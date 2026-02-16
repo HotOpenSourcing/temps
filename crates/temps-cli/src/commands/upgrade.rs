@@ -42,7 +42,7 @@ pub struct GitHubRelease {
 }
 
 #[derive(Deserialize, Debug)]
-struct GitHubAsset {
+pub struct GitHubAsset {
     name: String,
     browser_download_url: String,
     size: u64,

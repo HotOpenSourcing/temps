@@ -1625,8 +1625,8 @@ mod tests {
             std::collections::HashMap::new();
         // Redis might only need port and optional password
 
-        assert!(credentials.get("port").is_none());
-        assert!(credentials.get("password").is_none());
+        assert!(!credentials.contains_key("port"));
+        assert!(!credentials.contains_key("password"));
     }
 
     #[test]

@@ -55,7 +55,11 @@ mod docker_utils {
             }
 
             // Create container
-            let container_name = format!("temps-test-minio-{}", chrono::Utc::now().timestamp());
+            let container_name = format!(
+                "temps-test-minio-{}-{}",
+                chrono::Utc::now().timestamp(),
+                rand::random::<u32>()
+            );
             let minio_config = bollard::models::ContainerCreateBody {
                 image: Some("minio/minio:latest".to_string()),
                 cmd: Some(vec!["server".to_string(), "/data".to_string()]),

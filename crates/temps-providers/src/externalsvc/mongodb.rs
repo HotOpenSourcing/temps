@@ -1592,10 +1592,10 @@ mod tests {
             std::collections::HashMap::new();
         // MongoDB requires username, password, port, database
 
-        assert!(credentials.get("username").is_none());
-        assert!(credentials.get("password").is_none());
-        assert!(credentials.get("port").is_none());
-        assert!(credentials.get("database").is_none());
+        assert!(!credentials.contains_key("username"));
+        assert!(!credentials.contains_key("password"));
+        assert!(!credentials.contains_key("port"));
+        assert!(!credentials.contains_key("database"));
     }
 
     #[test]

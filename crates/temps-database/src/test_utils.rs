@@ -147,61 +147,38 @@ impl Drop for TestDatabase {
         //
         // Previous approach used tokio::spawn which was fire-and-forget — spawned
         // tasks would race against runtime shutdown, leaving orphaned schemas.
-        let db = Arc::clone(&self.db);
         let schema = self.schema_name.take();
         let database_url = self.database_url.clone();
 
         let cleanup = move || {
-            let rt_result = tokio::runtime::Handle::try_current();
-            let handle = match rt_result {
-                Ok(h) => h,
-                Err(_) => {
-                    if let Some(ref s) = schema {
-                        eprintln!(
-                            "Warning: Cannot clean up test schema {} (no tokio runtime)",
-                            s
-                        );
-                    }
-                    return;
-                }
-            };
-
-            // Try block_in_place first (multi-threaded runtime).
-            // If it panics (current-thread runtime), fall back to a dedicated thread.
-            let block_in_place_result =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    tokio::task::block_in_place(|| {
-                        handle.block_on(Self::run_cleanup(&db, &schema, needs_counter_decrement));
+            // Always use a dedicated thread for cleanup. This approach works on both
+            // multi-threaded and single-threaded (current_thread) tokio runtimes without
+            // panicking. The previous approach used block_in_place which panics on
+            // current_thread runtime, and even though catch_unwind caught the panic,
+            // the default panic hook would print scary messages to stderr that could
+            // confuse CI systems and test runners.
+            let schema2 = schema.clone();
+            let cleanup_thread = std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build();
+                if let Ok(rt) = rt {
+                    rt.block_on(async {
+                        Self::run_cleanup_with_fresh_connection(
+                            &database_url,
+                            &schema2,
+                            needs_counter_decrement,
+                        )
+                        .await;
                     });
-                }));
-
-            if block_in_place_result.is_err() {
-                // Single-threaded runtime: spawn a dedicated thread with a fresh
-                // connection. We can't reuse the SeaORM pool because it was created
-                // on the original runtime and its connections won't work here.
-                let schema2 = schema.clone();
-                let cleanup_thread = std::thread::spawn(move || {
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build();
-                    if let Ok(rt) = rt {
-                        rt.block_on(async {
-                            Self::run_cleanup_with_fresh_connection(
-                                &database_url,
-                                &schema2,
-                                needs_counter_decrement,
-                            )
-                            .await;
-                        });
-                    } else if let Some(ref s) = schema2 {
-                        eprintln!(
-                            "Warning: Cannot clean up test schema {} (failed to create runtime)",
-                            s
-                        );
-                    }
-                });
-                let _ = cleanup_thread.join();
-            }
+                } else if let Some(ref s) = schema2 {
+                    eprintln!(
+                        "Warning: Cannot clean up test schema {} (failed to create runtime)",
+                        s
+                    );
+                }
+            });
+            let _ = cleanup_thread.join();
         };
 
         // Wrap in catch_unwind so panics in Drop don't abort the process

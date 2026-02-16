@@ -46,7 +46,7 @@ enum Commands {
     Proxy(ProxyCommand),
     /// Initial setup: create admin user, configure DNS/Git providers, and domain
     #[command(alias = "init")]
-    Setup(SetupCommand),
+    Setup(Box<SetupCommand>),
     /// Reset admin user password
     ResetAdminPassword(ResetPasswordCommand),
     /// Create an API key with a specified role

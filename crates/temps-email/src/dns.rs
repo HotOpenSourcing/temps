@@ -200,10 +200,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_dns_verifier_creation() {
-        let verifier = DnsVerifier::new();
+        let _verifier = DnsVerifier::new();
         // Just verify it can be created without panicking
-        assert!(true);
-        drop(verifier);
     }
 
     #[tokio::test]

@@ -1011,6 +1011,7 @@ mod integration_tests {
 
     use wiremock::MockServer;
 
+    #[allow(dead_code)]
     async fn create_mock_provider(_mock_server: &MockServer) -> Route53Provider {
         let creds = Route53Credentials {
             access_key_id: "AKIATESTKEY".to_string(),

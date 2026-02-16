@@ -2766,27 +2766,13 @@ mod tests {
             "Initial docker_image should be postgres:18"
         );
 
-        // Step 2: Update docker_image parameter to postgres:18-alpine (same major version, different variant)
+        // Step 2: Update docker_image parameter to postgres:18-alpine (same major version, different variant).
+        // Only include updateable parameters - readonly params (database, username, password, host)
+        // are rejected by validate_for_update().
         let mut update_params = HashMap::new();
-        update_params.insert(
-            "database".to_string(),
-            JsonValue::String("testdb".to_string()),
-        );
-        update_params.insert(
-            "username".to_string(),
-            JsonValue::String("testuser".to_string()),
-        );
-        update_params.insert(
-            "password".to_string(),
-            JsonValue::String("testpass".to_string()),
-        );
         update_params.insert(
             "port".to_string(),
             JsonValue::String(random_unused_port.to_string()),
-        );
-        update_params.insert(
-            "host".to_string(),
-            JsonValue::String("localhost".to_string()),
         );
         update_params.insert("max_connections".to_string(), JsonValue::Number(100.into()));
 
@@ -2796,10 +2782,20 @@ mod tests {
             docker_image: Some("postgres:18-alpine".to_string()),
         };
 
-        // Update the service - same major version so data is compatible
-        let _ = manager.update_service(service_id, update_request).await;
+        // Update the service - same major version so data is compatible.
+        // Container reinitialization may fail in CI (e.g., image pull timeout), so we
+        // tolerate errors from container recreation while still verifying the DB was updated.
+        let update_result = manager.update_service(service_id, update_request).await;
+        if let Err(ref e) = update_result {
+            eprintln!(
+                "Note: update_service returned error (container reinit may have failed): {}",
+                e
+            );
+        }
 
-        // Verify the docker_image parameter has been updated in the configuration
+        // Verify the docker_image parameter has been updated in the database.
+        // The parameter update happens before container reinitialization in update_service(),
+        // so even if container recreation fails, the config should be persisted.
         let updated_details = manager.get_service_details(service_id).await.unwrap();
         let updated_params = updated_details.current_parameters.unwrap();
         assert_eq!(

@@ -2562,10 +2562,10 @@ mod tests {
         // Missing all required fields
 
         // These should all be None
-        assert!(credentials.get("username").is_none());
-        assert!(credentials.get("password").is_none());
-        assert!(credentials.get("port").is_none());
-        assert!(credentials.get("database").is_none());
+        assert!(!credentials.contains_key("username"));
+        assert!(!credentials.contains_key("password"));
+        assert!(!credentials.contains_key("port"));
+        assert!(!credentials.contains_key("database"));
     }
 
     #[test]

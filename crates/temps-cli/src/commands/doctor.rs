@@ -1,7 +1,7 @@
 use clap::Args;
 use colored::Colorize;
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
@@ -227,7 +227,7 @@ impl DoctorCommand {
 
     // ── Data directory checks ───────────────────────────────────────
 
-    fn check_data_dir(&self, data_dir: &PathBuf, report: &mut DiagnosticReport) {
+    fn check_data_dir(&self, data_dir: &Path, report: &mut DiagnosticReport) {
         report.add("Path", CheckResult::Info(data_dir.display().to_string()));
 
         if !data_dir.exists() {
@@ -889,8 +889,8 @@ fn parse_pg_url(url: &str) -> Result<(String, u16), String> {
         if let Some(bracket_end) = host_port.find(']') {
             let host = &host_port[1..bracket_end];
             let port_part = &host_port[bracket_end + 1..];
-            let port = if port_part.starts_with(':') {
-                port_part[1..].parse::<u16>().unwrap_or(5432)
+            let port = if let Some(stripped) = port_part.strip_prefix(':') {
+                stripped.parse::<u16>().unwrap_or(5432)
             } else {
                 5432
             };

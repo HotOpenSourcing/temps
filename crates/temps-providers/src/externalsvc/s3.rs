@@ -1885,8 +1885,8 @@ mod tests {
             std::collections::HashMap::new();
         // S3 requires access_key and secret_key
 
-        assert!(credentials.get("access_key").is_none());
-        assert!(credentials.get("secret_key").is_none());
+        assert!(!credentials.contains_key("access_key"));
+        assert!(!credentials.contains_key("secret_key"));
     }
 
     #[test]
