@@ -14,6 +14,9 @@ dist/
 .vscode
 .claude
 .*-mcp
+.classpath
+.project
+.settings/
 target
 ai
 
@@ -22,3 +25,6 @@ ai
 *.key
 
 target_old
+
+*.mp4
+*.rec
