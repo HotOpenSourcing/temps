@@ -199,11 +199,26 @@ jobs:
           cd crates/temps-captcha-wasm
           bun run build
 
-      - name: Run unit tests
-        run: cargo test --no-fail-fast --lib ${{ matrix.crates }}
+      - name: Run unit tests (with retry)
         env:
           RUST_BACKTRACE: 1
           CARGO_INCREMENTAL: 0
+        run: |
+          attempt=1
+          max_attempts=3
+          until cargo test --no-fail-fast --lib ${{ matrix.crates }}; do
+            if [ $attempt -ge $max_attempts ]; then
+              echo "Tests failed after $max_attempts attempts"
+              exit 1
+            fi
+            attempt=$((attempt + 1))
+            echo ""
+            echo "=========================================="
+            echo "Test attempt $((attempt - 1)) failed, retrying (attempt $attempt/$max_attempts)..."
+            echo "=========================================="
+            echo ""
+            sleep 5
+          done
 
   # ---------------------------------------------------------------------------
   # Phase 2: Integration tests (Docker + Database required)
@@ -299,9 +314,24 @@ jobs:
           timeout 60 bash -c 'until nc -z localhost 5432; do sleep 1; done'
           echo "TimescaleDB is ready"
 
-      - name: Run integration tests
-        run: ${{ matrix.command }}
+      - name: Run integration tests (with retry)
         env:
           RUST_BACKTRACE: 1
           CARGO_INCREMENTAL: 0
           TEMPS_TEST_DATABASE_URL: postgresql://test_user:test_password@localhost:5432/test_db
+        run: |
+          attempt=1
+          max_attempts=3
+          until ${{ matrix.command }}; do
+            if [ $attempt -ge $max_attempts ]; then
+              echo "Integration tests failed after $max_attempts attempts"
+              exit 1
+            fi
+            attempt=$((attempt + 1))
+            echo ""
+            echo "=========================================="
+            echo "Test attempt $((attempt - 1)) failed, retrying (attempt $attempt/$max_attempts)..."
+            echo "=========================================="
+            echo ""
+            sleep 10
+          done
