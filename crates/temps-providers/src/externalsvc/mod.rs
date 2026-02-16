@@ -136,7 +136,7 @@ pub struct AvailableContainer {
     pub container_id: String,
     /// Container name
     pub container_name: String,
-    /// Docker image name (e.g., "postgres:17-alpine")
+    /// Docker image name (e.g., "postgres:18-alpine")
     pub image: String,
     /// Extracted version from image (e.g., "17")
     pub version: String,

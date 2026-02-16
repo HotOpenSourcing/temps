@@ -448,9 +448,10 @@ impl PostgresService {
     }
 
     async fn wait_for_container_health(&self, docker: &Docker, container_id: &str) -> Result<()> {
-        let mut delay = Duration::from_millis(100);
+        let mut delay = Duration::from_millis(500);
         let mut total_wait = Duration::from_secs(0);
-        let max_wait = Duration::from_secs(60);
+        let max_wait = Duration::from_secs(90);
+        let max_delay = Duration::from_secs(2);
 
         while total_wait < max_wait {
             let info = docker
@@ -477,12 +478,25 @@ impl PostgresService {
                     info!("Container {} is healthy", container_id);
                     return Ok(());
                 }
+
+                // If container exited or is dead, fail fast instead of waiting
+                if state.status == Some(bollard::models::ContainerStateStatusEnum::EXITED)
+                    || state.status == Some(bollard::models::ContainerStateStatusEnum::DEAD)
+                {
+                    let exit_code = state.exit_code.unwrap_or(-1);
+                    return Err(anyhow::anyhow!(
+                        "PostgreSQL container exited unexpectedly with code {}",
+                        exit_code
+                    ));
+                }
             } else {
                 info!("Container {} state is None", container_id);
             }
             sleep(delay).await;
             total_wait += delay;
-            delay = delay.mul_f32(1.5);
+            // Exponential backoff capped at max_delay to keep polling responsive
+            // during Docker's health check start_period (30s)
+            delay = std::cmp::min(delay.mul_f32(1.5), max_delay);
         }
 
         error!(
@@ -1671,7 +1685,7 @@ impl ExternalService for PostgresService {
 
     fn get_default_docker_image(&self) -> (String, String) {
         // Return (image_name, version)
-        ("postgres".to_string(), "17-alpine".to_string())
+        ("postgres".to_string(), "18-alpine".to_string())
     }
 
     async fn get_current_docker_image(&self) -> Result<(String, String)> {
@@ -1700,7 +1714,7 @@ impl ExternalService for PostgresService {
     }
 
     fn get_default_version(&self) -> String {
-        "17-alpine".to_string()
+        "18-alpine".to_string()
     }
 
     async fn get_current_version(&self) -> Result<String> {
@@ -1732,11 +1746,11 @@ impl ExternalService for PostgresService {
             anyhow::anyhow!("Could not determine image for container '{}'", container_id)
         })?;
 
-        // Extract version from image name (e.g., "postgres:18-alpine" -> "17")
+        // Extract version from image name (e.g., "postgres:18-alpine" -> "18")
         let version = if let Some(tag_pos) = image.rfind(':') {
             image[tag_pos + 1..].to_string()
         } else {
-            "17-alpine".to_string()
+            "18-alpine".to_string()
         };
 
         // Extract credentials from user input
@@ -1970,7 +1984,7 @@ mod tests {
 
         let (image_name, version) = service.get_default_docker_image();
         assert_eq!(image_name, "postgres", "Default image should be postgres");
-        assert_eq!(version, "17-alpine", "Default version should be 17-alpine");
+        assert_eq!(version, "18-alpine", "Default version should be 18-alpine");
     }
 
     #[tokio::test]
@@ -1978,7 +1992,7 @@ mod tests {
         let docker = Arc::new(Docker::connect_with_local_defaults().unwrap());
         let _service = PostgresService::new("test-upgrade".to_string(), docker);
 
-        // Create initial config with current PostgreSQL version
+        // Create initial config with previous PostgreSQL version
         let old_config = ServiceConfig {
             name: "test-postgres".to_string(),
             service_type: super::ServiceType::Postgres,
@@ -1991,7 +2005,7 @@ mod tests {
                 "password": "testpass123",
                 "max_connections": 100,
                 "ssl_mode": "disable",
-                "docker_image": "postgres:16-alpine"
+                "docker_image": "postgres:17-alpine"
             }),
         };
 
@@ -2026,7 +2040,7 @@ mod tests {
             .get("docker_image")
             .and_then(|v| v.as_str());
 
-        assert_eq!(old_image, Some("postgres:16-alpine"));
+        assert_eq!(old_image, Some("postgres:17-alpine"));
         assert_eq!(new_image, Some("postgres:18-alpine"));
     }
 
@@ -2126,7 +2140,7 @@ mod tests {
             password: Some("testpass".to_string()),
             max_connections: 100,
             ssl_mode: Some("disable".to_string()),
-            docker_image: Some("postgres:16-alpine".to_string()),
+            docker_image: Some("postgres:18-alpine".to_string()),
         };
 
         let downgrade_config = PostgresInputConfig {
@@ -2137,7 +2151,7 @@ mod tests {
             password: Some("testpass".to_string()),
             max_connections: 100,
             ssl_mode: Some("disable".to_string()),
-            docker_image: Some("postgres:15-alpine".to_string()),
+            docker_image: Some("postgres:17-alpine".to_string()),
         };
 
         let old_version =
@@ -2158,19 +2172,8 @@ mod tests {
     }
 
     #[test]
-    fn test_postgres_v16_to_v17_upgrade_config() {
-        // Test the configuration for upgrading from PostgreSQL 16 to 17
-        let v16_config = PostgresInputConfig {
-            host: "localhost".to_string(),
-            port: Some("5432".to_string()),
-            database: "mydb".to_string(),
-            username: "postgres".to_string(),
-            password: Some("mysecretpass".to_string()),
-            max_connections: 100,
-            ssl_mode: Some("disable".to_string()),
-            docker_image: Some("postgres:16-alpine".to_string()),
-        };
-
+    fn test_postgres_v17_to_v18_upgrade_config() {
+        // Test the configuration for upgrading from PostgreSQL 17 to 18
         let v17_config = PostgresInputConfig {
             host: "localhost".to_string(),
             port: Some("5432".to_string()),
@@ -2182,36 +2185,47 @@ mod tests {
             docker_image: Some("postgres:17-alpine".to_string()),
         };
 
+        let v18_config = PostgresInputConfig {
+            host: "localhost".to_string(),
+            port: Some("5432".to_string()),
+            database: "mydb".to_string(),
+            username: "postgres".to_string(),
+            password: Some("mysecretpass".to_string()),
+            max_connections: 100,
+            ssl_mode: Some("disable".to_string()),
+            docker_image: Some("postgres:18-alpine".to_string()),
+        };
+
         // Convert to runtime configs
-        let v16_runtime: PostgresConfig = v16_config.into();
         let v17_runtime: PostgresConfig = v17_config.into();
+        let v18_runtime: PostgresConfig = v18_config.into();
 
         // Verify both configs are valid
-        assert_eq!(v16_runtime.docker_image, "postgres:16-alpine");
         assert_eq!(v17_runtime.docker_image, "postgres:17-alpine");
+        assert_eq!(v18_runtime.docker_image, "postgres:18-alpine");
 
         // Verify other parameters are preserved
-        assert_eq!(v16_runtime.database, v17_runtime.database);
-        assert_eq!(v16_runtime.username, v17_runtime.username);
-        assert_eq!(v16_runtime.password, v17_runtime.password);
-        assert_eq!(v16_runtime.max_connections, v17_runtime.max_connections);
+        assert_eq!(v17_runtime.database, v18_runtime.database);
+        assert_eq!(v17_runtime.username, v18_runtime.username);
+        assert_eq!(v17_runtime.password, v18_runtime.password);
+        assert_eq!(v17_runtime.max_connections, v18_runtime.max_connections);
 
         // Extract versions
-        let v16_version = PostgresService::extract_postgres_version(&v16_runtime.docker_image)
-            .expect("Should extract v16");
         let v17_version = PostgresService::extract_postgres_version(&v17_runtime.docker_image)
             .expect("Should extract v17");
+        let v18_version = PostgresService::extract_postgres_version(&v18_runtime.docker_image)
+            .expect("Should extract v18");
 
         // Verify upgrade path is valid
-        assert_eq!(v16_version, 16);
         assert_eq!(v17_version, 17);
-        assert!(v17_version > v16_version, "v17 should be greater than v16");
+        assert_eq!(v18_version, 18);
+        assert!(v18_version > v17_version, "v18 should be greater than v17");
     }
 
     #[cfg(feature = "docker-tests")]
     #[tokio::test]
-    async fn test_postgres_v16_to_v17_actual_upgrade() {
-        // This test creates a real PostgreSQL 16 container, upgrades it to v17,
+    async fn test_postgres_v17_to_v18_actual_upgrade() {
+        // This test creates a real PostgreSQL 17 container, upgrades it to v18,
         // and verifies the upgrade by checking the version via SQL
         // Note: Requires Docker to be running
 
@@ -2230,24 +2244,6 @@ mod tests {
             chrono::Utc::now().timestamp_millis()
         );
 
-        // Create v16 service configuration
-        let v16_params = serde_json::json!({
-            "host": "localhost",
-            "port": port.to_string(),
-            "database": "postgres",
-            "username": "postgres",
-            "password": password,
-            "max_connections": 100,
-            "docker_image": "postgres:16-alpine",
-        });
-
-        let v16_config = ServiceConfig {
-            name: service_name.clone(),
-            service_type: super::ServiceType::Postgres,
-            version: Some("16".to_string()),
-            parameters: v16_params,
-        };
-
         // Create v17 service configuration
         let v17_params = serde_json::json!({
             "host": "localhost",
@@ -2256,7 +2252,7 @@ mod tests {
             "username": "postgres",
             "password": password,
             "max_connections": 100,
-            "docker_image": "postgres:18-alpine",
+            "docker_image": "postgres:17-alpine",
         });
 
         let v17_config = ServiceConfig {
@@ -2266,14 +2262,32 @@ mod tests {
             parameters: v17_params,
         };
 
-        // Initialize v16 service
-        let v16_service = PostgresService::new(service_name.clone(), docker.clone());
+        // Create v18 service configuration
+        let v18_params = serde_json::json!({
+            "host": "localhost",
+            "port": port.to_string(),
+            "database": "postgres",
+            "username": "postgres",
+            "password": password,
+            "max_connections": 100,
+            "docker_image": "postgres:18-alpine",
+        });
 
-        match v16_service.init(v16_config.clone()).await {
+        let v18_config = ServiceConfig {
+            name: service_name.clone(),
+            service_type: super::ServiceType::Postgres,
+            version: Some("18".to_string()),
+            parameters: v18_params,
+        };
+
+        // Initialize v17 service
+        let v17_service = PostgresService::new(service_name.clone(), docker.clone());
+
+        match v17_service.init(v17_config.clone()).await {
             Ok(_) => {}
             Err(e) => {
-                println!("Failed to initialize v16 service: {}. Skipping test (Docker may not be available)", e);
-                let _ = v16_service.remove().await;
+                println!("Failed to initialize v17 service: {}. Skipping test (Docker may not be available)", e);
+                let _ = v17_service.remove().await;
                 return;
             }
         }
@@ -2285,21 +2299,21 @@ mod tests {
         // Wait for PostgreSQL to be healthy
         let mut retries = 0;
         loop {
-            match v16_service.health_check().await {
+            match v17_service.health_check().await {
                 Ok(healthy) if healthy => break,
                 _ if retries < 60 => {
                     retries += 1;
                     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                 }
                 _ => {
-                    println!("PostgreSQL 16 failed to start after 60 retries (30 seconds)");
-                    let _ = v16_service.remove().await;
+                    println!("PostgreSQL 17 failed to start after 60 retries (30 seconds)");
+                    let _ = v17_service.remove().await;
                     return;
                 }
             }
         }
 
-        // Connect and verify v16 version
+        // Connect and verify v17 version
         let connection_string = format!(
             "postgresql://postgres:{}@127.0.0.1:{}/postgres",
             urlencoding::encode(password),
@@ -2321,98 +2335,6 @@ mod tests {
                 Err(e) if attempt < 9 => {
                     println!(
                         "Connection attempt {} failed: {}. Retrying...",
-                        attempt + 1,
-                        e
-                    );
-                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                }
-                Err(e) => {
-                    println!(
-                        "Failed to connect to v16 PostgreSQL after 10 attempts: {}. Skipping test",
-                        e
-                    );
-                    let _ = v16_service.remove().await;
-                    return;
-                }
-            }
-        }
-
-        let db_pool = db_pool.unwrap();
-
-        let version_v16: (String,) =
-            match sqlx::query_as("SELECT version()").fetch_one(&db_pool).await {
-                Ok(v) => v,
-                Err(e) => {
-                    println!("Failed to query version from v16: {}. Skipping test", e);
-                    db_pool.close().await;
-                    let _ = v16_service.remove().await;
-                    return;
-                }
-            };
-
-        println!("PostgreSQL 16 version: {}", version_v16.0);
-        assert!(
-            version_v16.0.contains("16"),
-            "Version should contain '16', got: {}",
-            version_v16.0
-        );
-
-        // Close connection pool before upgrade
-        db_pool.close().await;
-
-        // Perform the upgrade
-        match v16_service
-            .upgrade(v16_config.clone(), v17_config.clone())
-            .await
-        {
-            Ok(_) => {
-                println!("✅ pg_upgrade completed successfully");
-            }
-            Err(e) => {
-                // Cleanup before panicking
-                let _ = v16_service.remove().await;
-                panic!("Failed to upgrade PostgreSQL from v16 to v17: {}", e);
-            }
-        }
-
-        // Give the upgraded container time to start and initialize
-        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-
-        // Create v17 service to check health
-        let v17_service = PostgresService::new(service_name.clone(), docker.clone());
-
-        // Wait for v17 PostgreSQL to be healthy
-        retries = 0;
-        loop {
-            match v17_service.health_check().await {
-                Ok(healthy) if healthy => break,
-                _ if retries < 60 => {
-                    retries += 1;
-                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                }
-                _ => {
-                    println!("PostgreSQL 17 failed to start after 60 retries (30 seconds)");
-                    let _ = v17_service.remove().await;
-                    return;
-                }
-            }
-        }
-
-        // Connect and verify v17 version with retries
-        let mut db_pool = None;
-        for attempt in 0..10 {
-            match sqlx::postgres::PgPoolOptions::new()
-                .max_connections(5)
-                .connect(&connection_string)
-                .await
-            {
-                Ok(pool) => {
-                    db_pool = Some(pool);
-                    break;
-                }
-                Err(e) if attempt < 9 => {
-                    println!(
-                        "V17 connection attempt {} failed: {}. Retrying...",
                         attempt + 1,
                         e
                     );
@@ -2449,15 +2371,107 @@ mod tests {
             version_v17.0
         );
 
+        // Close connection pool before upgrade
+        db_pool.close().await;
+
+        // Perform the upgrade
+        match v17_service
+            .upgrade(v17_config.clone(), v18_config.clone())
+            .await
+        {
+            Ok(_) => {
+                println!("pg_upgrade completed successfully");
+            }
+            Err(e) => {
+                // Cleanup before panicking
+                let _ = v17_service.remove().await;
+                panic!("Failed to upgrade PostgreSQL from v17 to v18: {}", e);
+            }
+        }
+
+        // Give the upgraded container time to start and initialize
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+        // Create v18 service to check health
+        let v18_service = PostgresService::new(service_name.clone(), docker.clone());
+
+        // Wait for v18 PostgreSQL to be healthy
+        retries = 0;
+        loop {
+            match v18_service.health_check().await {
+                Ok(healthy) if healthy => break,
+                _ if retries < 60 => {
+                    retries += 1;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                }
+                _ => {
+                    println!("PostgreSQL 18 failed to start after 60 retries (30 seconds)");
+                    let _ = v18_service.remove().await;
+                    return;
+                }
+            }
+        }
+
+        // Connect and verify v18 version with retries
+        let mut db_pool = None;
+        for attempt in 0..10 {
+            match sqlx::postgres::PgPoolOptions::new()
+                .max_connections(5)
+                .connect(&connection_string)
+                .await
+            {
+                Ok(pool) => {
+                    db_pool = Some(pool);
+                    break;
+                }
+                Err(e) if attempt < 9 => {
+                    println!(
+                        "V18 connection attempt {} failed: {}. Retrying...",
+                        attempt + 1,
+                        e
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                }
+                Err(e) => {
+                    println!(
+                        "Failed to connect to v18 PostgreSQL after 10 attempts: {}. Skipping test",
+                        e
+                    );
+                    let _ = v18_service.remove().await;
+                    return;
+                }
+            }
+        }
+
+        let db_pool = db_pool.unwrap();
+
+        let version_v18: (String,) =
+            match sqlx::query_as("SELECT version()").fetch_one(&db_pool).await {
+                Ok(v) => v,
+                Err(e) => {
+                    println!("Failed to query version from v18: {}. Skipping test", e);
+                    db_pool.close().await;
+                    let _ = v18_service.remove().await;
+                    return;
+                }
+            };
+
+        println!("PostgreSQL 18 version: {}", version_v18.0);
+        assert!(
+            version_v18.0.contains("18"),
+            "Version should contain '18', got: {}",
+            version_v18.0
+        );
+
         // Verify upgrade was successful
-        println!("✅ PostgreSQL upgrade test passed!");
-        println!("  Before: {}", version_v16.0);
-        println!("  After:  {}", version_v17.0);
+        println!("PostgreSQL upgrade test passed!");
+        println!("  Before: {}", version_v17.0);
+        println!("  After:  {}", version_v18.0);
 
         // Cleanup
         db_pool.close().await;
-        let _ = v17_service.stop().await;
-        let _ = v17_service.remove().await;
+        let _ = v18_service.stop().await;
+        let _ = v18_service.remove().await;
     }
 
     #[test]
@@ -2634,13 +2648,13 @@ mod tests {
             "username": "postgres",
             "password": pg_password,
             "max_connections": 100,
-            "docker_image": "postgres:17-alpine",
+            "docker_image": "postgres:18-alpine",
         });
 
         let pg_config = ServiceConfig {
             name: service_name.clone(),
             service_type: ServiceType::Postgres,
-            version: Some("17".to_string()),
+            version: Some("18".to_string()),
             parameters: pg_params,
         };
 

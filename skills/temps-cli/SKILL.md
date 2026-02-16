@@ -501,10 +501,10 @@ bunx @temps-sdk/cli services start --id 1
 bunx @temps-sdk/cli services stop --id 1
 
 # Update
-bunx @temps-sdk/cli services update --id 1 -n postgres:17-alpine
+bunx @temps-sdk/cli services update --id 1 -n postgres:18-alpine
 
 # Upgrade version
-bunx @temps-sdk/cli services upgrade --id 1 -v postgres:17-alpine
+bunx @temps-sdk/cli services upgrade --id 1 -v postgres:18-alpine
 
 # Remove
 bunx @temps-sdk/cli services remove --id 1

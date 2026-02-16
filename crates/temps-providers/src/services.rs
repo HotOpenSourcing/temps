@@ -2181,13 +2181,13 @@ mod tests {
         params.insert("max_connections".to_string(), JsonValue::Number(100.into()));
         params.insert(
             "docker_image".to_string(),
-            JsonValue::String("postgres:16-alpine".to_string()),
+            JsonValue::String("postgres:18-alpine".to_string()),
         );
 
         let request = CreateExternalServiceRequest {
             name: service_name.clone(),
             service_type: ServiceType::Postgres,
-            version: Some("16".to_string()),
+            version: Some("18".to_string()),
             parameters: params,
         };
 
@@ -2201,7 +2201,7 @@ mod tests {
         let service = result.unwrap();
         assert_eq!(service.name, service_name);
         assert_eq!(service.service_type, ServiceType::Postgres);
-        assert_eq!(service.version, Some("16".to_string()));
+        assert_eq!(service.version, Some("18".to_string()));
         assert_eq!(service.status, "running");
 
         // Cleanup
@@ -2603,7 +2603,7 @@ mod tests {
         params.insert("max_connections".to_string(), JsonValue::Number(100.into()));
         params.insert(
             "docker_image".to_string(),
-            JsonValue::String("postgres:16-alpine".to_string()),
+            JsonValue::String("postgres:18-alpine".to_string()),
         );
 
         let request = CreateExternalServiceRequest {
@@ -2710,13 +2710,13 @@ mod tests {
     #[cfg(feature = "docker-tests")]
     #[tokio::test]
     async fn test_upgrade_postgres_image_parameter_update() {
-        // This test verifies that the docker_image parameter can be updated
-        // Note: Actual container startup may fail for major version upgrades (16->17)
-        // due to data format incompatibility, which requires pg_upgrade or dump/restore
+        // This test verifies that the docker_image parameter can be updated.
+        // Uses same-major-version update (18 -> 18-alpine) to avoid data format
+        // incompatibility issues that occur with cross-major-version upgrades.
         let (manager, _test_db) = setup_test_manager().await;
         let random_unused_port = get_unused_port();
 
-        // Step 1: Create a PostgreSQL service with postgres:16-alpine
+        // Step 1: Create a PostgreSQL service with postgres:18
         let mut params = HashMap::new();
         params.insert(
             "database".to_string(),
@@ -2741,20 +2741,20 @@ mod tests {
         params.insert("max_connections".to_string(), JsonValue::Number(100.into()));
         params.insert(
             "docker_image".to_string(),
-            JsonValue::String("postgres:16-alpine".to_string()),
+            JsonValue::String("postgres:18".to_string()),
         );
 
         let request = CreateExternalServiceRequest {
             name: "test-postgres-upgrade-params".to_string(),
             service_type: ServiceType::Postgres,
-            version: Some("16".to_string()),
+            version: Some("18".to_string()),
             parameters: params,
         };
 
         let service = manager
             .create_service(request)
             .await
-            .expect("Failed to create PostgreSQL 16 service");
+            .expect("Failed to create PostgreSQL 18 service");
         let service_id = service.id;
 
         // Verify initial service configuration
@@ -2762,11 +2762,11 @@ mod tests {
         let initial_params = initial_details.current_parameters.unwrap();
         assert_eq!(
             initial_params.get("docker_image").and_then(|v| v.as_str()),
-            Some("postgres:16-alpine"),
-            "Initial docker_image should be postgres:16-alpine"
+            Some("postgres:18"),
+            "Initial docker_image should be postgres:18"
         );
 
-        // Step 2: Update docker_image parameter to postgres:17-alpine
+        // Step 2: Update docker_image parameter to postgres:18-alpine (same major version, different variant)
         let mut update_params = HashMap::new();
         update_params.insert(
             "database".to_string(),
@@ -2793,12 +2793,10 @@ mod tests {
         let update_request = UpdateExternalServiceRequest {
             name: None,
             parameters: update_params,
-            docker_image: Some("postgres:17-alpine".to_string()),
+            docker_image: Some("postgres:18-alpine".to_string()),
         };
 
-        // Update the service - this will attempt to recreate the container
-        // Note: The update may succeed but the container may not become healthy
-        // due to PostgreSQL version incompatibility
+        // Update the service - same major version so data is compatible
         let _ = manager.update_service(service_id, update_request).await;
 
         // Verify the docker_image parameter has been updated in the configuration
@@ -2806,8 +2804,8 @@ mod tests {
         let updated_params = updated_details.current_parameters.unwrap();
         assert_eq!(
             updated_params.get("docker_image").and_then(|v| v.as_str()),
-            Some("postgres:17-alpine"),
-            "Docker image parameter should be updated to postgres:17-alpine"
+            Some("postgres:18-alpine"),
+            "Docker image parameter should be updated to postgres:18-alpine"
         );
 
         // Cleanup - force delete to remove even unhealthy containers
@@ -3157,11 +3155,16 @@ mod tests {
             "port".to_string(),
             JsonValue::String(random_unused_port.to_string()),
         );
+        // Explicitly set docker_image so the test is deterministic
+        params.insert(
+            "docker_image".to_string(),
+            JsonValue::String("postgres:18".to_string()),
+        );
 
         let request = CreateExternalServiceRequest {
             name: "test-postgres-image".to_string(),
             service_type: ServiceType::Postgres,
-            version: Some("16".to_string()),
+            version: Some("18".to_string()),
             parameters: params,
         };
 
@@ -3171,13 +3174,15 @@ mod tests {
             .expect("Failed to create service");
         let service_id = service.id;
 
-        // Update docker_image (updateable parameter) - don't include readonly parameters
-        let update_params = HashMap::new(); // Empty parameters - only updating docker_image
+        // Update docker_image to a compatible variant (same major version, different tag).
+        // Changing to a different major version (e.g., 18 -> 17) would fail because
+        // PostgreSQL data files are not backward-compatible across major versions.
+        let update_params = HashMap::new();
 
         let update_request = UpdateExternalServiceRequest {
             name: None,
             parameters: update_params,
-            docker_image: Some("postgres:16-alpine".to_string()),
+            docker_image: Some("postgres:18-alpine".to_string()),
         };
 
         let result = manager.update_service(service_id, update_request).await;
@@ -3188,7 +3193,7 @@ mod tests {
         let params = details.current_parameters.unwrap();
         assert_eq!(
             params.get("docker_image").and_then(|v| v.as_str()),
-            Some("postgres:16-alpine")
+            Some("postgres:18-alpine")
         );
 
         // Cleanup
