@@ -16,7 +16,7 @@ downcast-rs = "1.2"
 uuid = { version = "1.0", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
-bytes = "1.9"
+bytes = "1.11.1"
 futures = "0.3"
 
 [dev-dependencies]

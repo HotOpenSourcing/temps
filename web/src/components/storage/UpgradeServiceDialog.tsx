@@ -31,7 +31,7 @@ const upgradeFormSchema = z.object({
     .min(1, 'Docker image is required')
     .regex(
       /^[\w.\-/:]+$/,
-      'Invalid Docker image format. Example: postgres:17-alpine'
+      'Invalid Docker image format. Example: postgres:18-alpine'
     ),
 })
 
@@ -128,7 +128,7 @@ export function UpgradeServiceDialog({
                     <FormLabel>New Docker Image</FormLabel>
                     <FormControl>
                       <Input
-                        placeholder="postgres:17-alpine"
+                        placeholder="postgres:18-alpine"
                         {...field}
                         disabled={upgradeService.isPending}
                       />

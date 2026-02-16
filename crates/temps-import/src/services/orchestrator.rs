@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use temps_import_types::{
-    ImportPlan, ImportSelector, ImportSource, ValidationReport, WorkloadDescriptor, WorkloadId,
-    WorkloadImporter,
+    ImportCredentials, ImportPlan, ImportSelector, ImportSource, ValidationReport,
+    WorkloadDescriptor, WorkloadId, WorkloadImporter,
 };
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -32,6 +32,7 @@ struct ImportSession {
     git_provider_connection_id: Option<i32>,
     repo_owner: Option<String>,
     repo_name: Option<String>,
+    credentials: ImportCredentials,
     created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -119,6 +120,10 @@ impl ImportOrchestrator {
                     supports_health_checks: capabilities.supports_health_checks,
                     supports_resource_limits: capabilities.supports_resource_limits,
                     supports_build: capabilities.supports_build,
+                    supports_services: capabilities.supports_services,
+                    supports_domains: capabilities.supports_domains,
+                    supports_project_snapshot: capabilities.supports_project_snapshot,
+                    requires_credentials: source.requires_credentials(),
                 },
             });
         }
@@ -130,12 +135,13 @@ impl ImportOrchestrator {
     pub async fn discover(
         &self,
         source: ImportSource,
+        credentials: &ImportCredentials,
         selector: ImportSelector,
     ) -> ImportServiceResult<Vec<WorkloadDescriptor>> {
         debug!("Discovering workloads from source: {}", source);
 
         let importer = self.get_importer(source)?;
-        let workloads = importer.discover(selector).await?;
+        let workloads = importer.discover(credentials, selector).await?;
 
         info!("Discovered {} workloads from {}", workloads.len(), source);
         Ok(workloads)
@@ -147,6 +153,7 @@ impl ImportOrchestrator {
         user_id: i32,
         source: ImportSource,
         workload_id: WorkloadId,
+        credentials: &ImportCredentials,
         repository_id: Option<i32>,
     ) -> ImportServiceResult<CreatePlanResponse> {
         debug!(
@@ -157,7 +164,7 @@ impl ImportOrchestrator {
         let importer = self.get_importer(source)?;
 
         // Get detailed snapshot
-        let snapshot = importer.describe(&workload_id).await?;
+        let snapshot = importer.describe(credentials, &workload_id).await?;
 
         // Generate plan
         let mut plan = importer.generate_plan(snapshot.clone())?;
@@ -266,6 +273,7 @@ impl ImportOrchestrator {
             git_provider_connection_id,
             repo_owner,
             repo_name,
+            credentials: credentials.clone(),
             created_at: chrono::Utc::now(),
         };
 
@@ -348,6 +356,7 @@ impl ImportOrchestrator {
             git_provider_connection_id: session.git_provider_connection_id,
             repo_owner: session.repo_owner,
             repo_name: session.repo_name,
+            credentials: session.credentials,
             metadata: std::collections::HashMap::new(),
         };
 
@@ -372,6 +381,7 @@ impl ImportOrchestrator {
             project_id: outcome.project_id,
             environment_id: outcome.environment_id,
             deployment_id: outcome.deployment_id,
+            step_results: outcome.step_results,
         })
     }
 
@@ -447,7 +457,7 @@ mod tests {
         temps_import_types::ImportPlan {
             version: "1.0".to_string(),
             source: "docker".to_string(),
-            source_container_id: "abc123".to_string(),
+            source_id: "abc123".to_string(),
             project: ProjectConfiguration {
                 name: "test-project".to_string(),
                 slug: "test-project".to_string(),
@@ -486,6 +496,18 @@ mod tests {
                 entrypoint: None,
                 working_dir: None,
                 health_check: None,
+            },
+            services: vec![],
+            domains: vec![],
+            additional_deployments: vec![],
+            steps: vec![],
+            summary: temps_import_types::MigrationSummary {
+                headline: "Test import".to_string(),
+                overall_risk: temps_import_types::RiskLevel::Low,
+                resource_counts: temps_import_types::ResourceCounts::default(),
+                critical_warnings: vec![],
+                manual_actions_required: vec![],
+                unsupported_features: vec![],
             },
             metadata: PlanMetadata {
                 generated_at: chrono::Utc::now(),
@@ -588,6 +610,7 @@ mod tests {
             git_provider_connection_id,
             repo_owner: Some("test-owner".to_string()),
             repo_name: Some("test-repo".to_string()),
+            credentials: temps_import_types::ImportCredentials::none(),
             metadata: std::collections::HashMap::new(),
         };
 
@@ -612,6 +635,7 @@ mod tests {
             git_provider_connection_id: Some(42),
             repo_owner: Some("test-owner".to_string()),
             repo_name: Some("test-repo".to_string()),
+            credentials: ImportCredentials::none(),
             created_at: chrono::Utc::now(),
         };
 
@@ -878,6 +902,7 @@ mod tests {
 
         async fn discover(
             &self,
+            _credentials: &ImportCredentials,
             _selector: ImportSelector,
         ) -> temps_import_types::ImportResult<Vec<WorkloadDescriptor>> {
             Ok(vec![])
@@ -885,6 +910,7 @@ mod tests {
 
         async fn describe(
             &self,
+            _credentials: &ImportCredentials,
             _workload_id: &WorkloadId,
         ) -> temps_import_types::ImportResult<WorkloadSnapshot> {
             Err(temps_import_types::ImportError::Internal(
@@ -919,6 +945,7 @@ mod tests {
                 warnings: vec![],
                 errors: vec![],
                 created_resources: vec![],
+                step_results: vec![],
                 duration_seconds: 0.1,
             })
         }

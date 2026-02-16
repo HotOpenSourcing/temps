@@ -732,7 +732,7 @@ impl GitProviderManager {
         // Create a connection for this installation
         self.create_connection(
             provider.id,
-            0, // No specific user, it's org-level
+            0, // System user, it's org-level
             account_name,
             account_type,
             Some(access_token),
@@ -2496,44 +2496,43 @@ impl GitProviderManager {
             .api_url
             .as_deref()
             .unwrap_or("https://api.github.com");
-        let validation_endpoint = if provider.provider_type == "github" {
-            format!("{}/user", api_url)
-        } else if provider.provider_type == "gitlab" {
-            format!("{}/user", api_url)
-        } else {
-            // For other providers, use the provider service's validate_token
-            let provider_service = self.get_provider_service(connection.provider_id).await?;
-            match provider_service.validate_token(&new_access_token).await {
-                Ok(true) => {
-                    tracing::info!(
-                        "New access token validated successfully for connection {}",
-                        connection_id
-                    );
-                    // Continue to save the token
-                    return self
-                        .save_updated_connection_token(
-                            connection,
-                            new_access_token,
-                            new_refresh_token,
-                            connection_id,
-                            false, // Don't clear installation_id for non-GitHub/GitLab providers
-                        )
-                        .await;
+        let validation_endpoint =
+            if provider.provider_type == "github" || provider.provider_type == "gitlab" {
+                format!("{}/user", api_url)
+            } else {
+                // For other providers, use the provider service's validate_token
+                let provider_service = self.get_provider_service(connection.provider_id).await?;
+                match provider_service.validate_token(&new_access_token).await {
+                    Ok(true) => {
+                        tracing::info!(
+                            "New access token validated successfully for connection {}",
+                            connection_id
+                        );
+                        // Continue to save the token
+                        return self
+                            .save_updated_connection_token(
+                                connection,
+                                new_access_token,
+                                new_refresh_token,
+                                connection_id,
+                                false, // Don't clear installation_id for non-GitHub/GitLab providers
+                            )
+                            .await;
+                    }
+                    Ok(false) => {
+                        return Err(GitProviderManagerError::InvalidConfiguration(
+                            "The provided access token is invalid or has insufficient permissions"
+                                .to_string(),
+                        ));
+                    }
+                    Err(e) => {
+                        return Err(GitProviderManagerError::InvalidConfiguration(format!(
+                            "Failed to validate the provided access token: {}",
+                            e
+                        )));
+                    }
                 }
-                Ok(false) => {
-                    return Err(GitProviderManagerError::InvalidConfiguration(
-                        "The provided access token is invalid or has insufficient permissions"
-                            .to_string(),
-                    ));
-                }
-                Err(e) => {
-                    return Err(GitProviderManagerError::InvalidConfiguration(format!(
-                        "Failed to validate the provided access token: {}",
-                        e
-                    )));
-                }
-            }
-        };
+            };
 
         let response = client
             .get(&validation_endpoint)
@@ -3569,6 +3568,7 @@ impl GitProviderManager {
     /// # Returns
     /// * `Ok(Repository)` - The created repository with the pushed template code
     /// * `Err(GitProviderManagerError)` - If any step fails
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_repository_and_push_template(
         &self,
         connection_id: i32,

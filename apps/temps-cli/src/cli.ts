@@ -41,6 +41,7 @@ import { registerIncidentsCommands } from './commands/incidents/index.js'
 import { registerEmailsCommands } from './commands/emails/index.js'
 import { registerLoadBalancerCommands } from './commands/load-balancer/index.js'
 import { registerImportsCommands } from './commands/imports/index.js'
+import { registerMigrateCommands } from './commands/migrate/index.js'
 import { registerTemplatesCommands } from './commands/templates/index.js'
 import { registerPlatformCommands } from './commands/platform/index.js'
 import { registerPresetsCommands } from './commands/presets/index.js'
@@ -127,6 +128,7 @@ export function createProgram(): Command {
   registerEmailsCommands(program)
   registerLoadBalancerCommands(program)
   registerImportsCommands(program)
+  registerMigrateCommands(program)
   registerTemplatesCommands(program)
   registerPlatformCommands(program)
   registerPresetsCommands(program)

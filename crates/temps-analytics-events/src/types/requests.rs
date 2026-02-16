@@ -286,3 +286,14 @@ pub struct AggregatedBucketsQuery {
 fn default_bucket_size() -> String {
     "1 hour".to_string()
 }
+
+/// Query parameters for batch dashboard analytics
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct DashboardProjectsAnalyticsQuery {
+    /// Comma-separated list of project IDs
+    pub project_ids: String,
+    /// Start date for the query range
+    pub start_date: DateTime,
+    /// End date for the query range
+    pub end_date: DateTime,
+}

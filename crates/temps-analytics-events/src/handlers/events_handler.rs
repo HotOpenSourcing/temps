@@ -774,9 +774,82 @@ pub async fn get_aggregated_buckets(
     Ok(Json(result))
 }
 
+/// Get dashboard analytics for multiple projects in a single batch request
+///
+/// Returns unique visitor counts and hourly sparkline data for all requested projects
+/// using only 2 SQL queries instead of 2×N per-project queries.
+#[utoipa::path(
+    get,
+    path = "/dashboard/projects-analytics",
+    params(
+        ("project_ids" = String, Query, description = "Comma-separated list of project IDs"),
+        ("start_date" = String, Query, description = "Start date for filtering"),
+        ("end_date" = String, Query, description = "End date for filtering"),
+    ),
+    responses(
+        (status = 200, description = "Successfully retrieved batch analytics", body = crate::types::DashboardProjectsAnalyticsResponse),
+        (status = 400, description = "Bad request"),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error")
+    ),
+    tag = "Events",
+    security(
+        ("bearer_auth" = [])
+    )
+)]
+pub async fn get_dashboard_projects_analytics(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<crate::types::DashboardProjectsAnalyticsQuery>,
+) -> Result<Json<crate::types::DashboardProjectsAnalyticsResponse>, Problem> {
+    permission_guard!(auth, AnalyticsRead);
+
+    let project_ids: Vec<i32> = query
+        .project_ids
+        .split(',')
+        .filter_map(|s| s.trim().parse::<i32>().ok())
+        .collect();
+
+    if project_ids.is_empty() {
+        return Err(ErrorBuilder::new(StatusCode::BAD_REQUEST)
+            .title("Invalid project IDs")
+            .detail("project_ids must contain at least one valid integer")
+            .build());
+    }
+
+    if project_ids.len() > 100 {
+        return Err(ErrorBuilder::new(StatusCode::BAD_REQUEST)
+            .title("Too many project IDs")
+            .detail("Maximum 100 project IDs per request")
+            .build());
+    }
+
+    let result = state
+        .events_service
+        .get_dashboard_projects_analytics(
+            &project_ids,
+            query.start_date.into(),
+            query.end_date.into(),
+        )
+        .await
+        .map_err(|e| {
+            error!("Failed to get dashboard projects analytics: {}", e);
+            ErrorBuilder::new(StatusCode::INTERNAL_SERVER_ERROR)
+                .title("Failed to get dashboard analytics")
+                .detail(format!("Error: {}", e))
+                .build()
+        })?;
+
+    Ok(Json(result))
+}
+
 /// Configure routes for events
 pub fn configure_routes() -> Router<Arc<AppState>> {
     Router::new()
+        .route(
+            "/dashboard/projects-analytics",
+            get(get_dashboard_projects_analytics),
+        )
         .route("/projects/{project_id}/events", get(get_events_count))
         .route(
             "/projects/{project_id}/events/breakdown",
@@ -833,6 +906,7 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         record_event_metrics,
         get_session_events,
         has_analytics_events,
+        get_dashboard_projects_analytics,
     ),
     components(
         schemas(
@@ -861,6 +935,9 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
             SessionEventsQuery,
             HasEventsResponse,
             HasEventsQuery,
+            crate::types::DashboardProjectsAnalyticsQuery,
+            crate::types::DashboardProjectsAnalyticsResponse,
+            crate::types::ProjectDashboardAnalytics,
         )
     ),
     tags(

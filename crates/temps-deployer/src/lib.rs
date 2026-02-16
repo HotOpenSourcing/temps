@@ -118,6 +118,8 @@ pub struct ImageInfo {
     pub tags: Vec<String>,
     /// Creation timestamp
     pub created: Option<String>,
+    /// Working directory (WORKDIR from Dockerfile)
+    pub working_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,6 +133,53 @@ pub struct DeployRequest {
     pub restart_policy: RestartPolicy,
     pub log_path: PathBuf,
     pub command: Option<Vec<String>>,
+    /// Docker log rotation config (max-size, max-file). If None, uses Docker daemon defaults.
+    pub log_config: Option<ContainerLogConfig>,
+}
+
+/// Docker container log rotation configuration
+/// Applied via Docker's `--log-opt` to prevent unbounded log growth
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContainerLogConfig {
+    /// Maximum size of each log file (e.g., "50m", "100m", "1g")
+    pub max_size: String,
+    /// Maximum number of rotated log files to keep
+    pub max_file: u32,
+}
+
+impl ContainerLogConfig {
+    /// Default log config for application containers (50MB x 3 = 150MB max)
+    pub fn app_default() -> Self {
+        Self {
+            max_size: "50m".to_string(),
+            max_file: 3,
+        }
+    }
+
+    /// Default log config for external service containers (20MB x 3 = 60MB max)
+    pub fn service_default() -> Self {
+        Self {
+            max_size: "20m".to_string(),
+            max_file: 3,
+        }
+    }
+
+    /// Create from settings values
+    pub fn new(max_size: String, max_file: u32) -> Self {
+        Self { max_size, max_file }
+    }
+
+    /// Convert to Bollard's HostConfigLogConfig
+    pub fn to_bollard_log_config(&self) -> bollard::models::HostConfigLogConfig {
+        let mut config = HashMap::new();
+        config.insert("max-size".to_string(), self.max_size.clone());
+        config.insert("max-file".to_string(), self.max_file.to_string());
+
+        bollard::models::HostConfigLogConfig {
+            typ: Some("json-file".to_string()),
+            config: Some(config),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -153,10 +202,11 @@ pub struct ResourceLimits {
     pub disk_limit_mb: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub enum RestartPolicy {
     Never,
     Always,
+    #[default]
     OnFailure,
     UnlessStopped,
 }
@@ -446,12 +496,6 @@ impl Default for ResourceLimits {
     }
 }
 
-impl Default for RestartPolicy {
-    fn default() -> Self {
-        Self::OnFailure
-    }
-}
-
 impl std::fmt::Display for Protocol {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -541,6 +585,7 @@ mod tests {
             restart_policy: RestartPolicy::Always,
             log_path,
             command: Some(vec!["node".to_string(), "server.js".to_string()]),
+            log_config: Some(ContainerLogConfig::app_default()),
         };
 
         assert_eq!(request.image_name, "test-image:latest");
@@ -842,6 +887,7 @@ CMD ["echo", "Hello from container"]
             restart_policy: RestartPolicy::Always,
             log_path: temp_dir.path().join("deploy.log"),
             command: None, // No custom command, use default from image
+            log_config: Some(ContainerLogConfig::app_default()),
         };
 
         assert_eq!(request.environment_vars.len(), 3);

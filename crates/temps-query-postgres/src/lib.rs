@@ -1,6 +1,6 @@
 //! PostgreSQL driver for temps-query
 //!
-//! Implements DataSource, Introspect, Queryable, and SqlFeature traits for PostgreSQL.
+//! Implements DataSource, Introspect, and Queryable traits for PostgreSQL.
 
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -8,7 +8,7 @@ use std::sync::Arc;
 use temps_query::{
     Capability, ContainerCapabilities, ContainerInfo, ContainerPath, ContainerType, DataError,
     DataRow, DataSource, DatasetSchema, EntityCountHint, EntityInfo, FieldDef, FieldType,
-    Introspect, QueryOptions, QueryResult, QueryStats, Queryable, Result, SqlFeature,
+    Introspect, QueryOptions, QueryResult, QueryStats, Queryable, Result,
 };
 use tokio::sync::RwLock;
 use tokio_postgres::{Client, NoTls, Row};
@@ -61,6 +61,119 @@ impl PostgresSource {
         })
     }
 
+    /// Strip SQL string literals to avoid false positives when scanning for dangerous patterns.
+    /// Replaces content inside single-quoted strings with empty strings.
+    fn strip_sql_string_literals(sql: &str) -> String {
+        let mut result = String::with_capacity(sql.len());
+        let mut in_string = false;
+        let mut chars = sql.chars().peekable();
+
+        while let Some(c) = chars.next() {
+            if in_string {
+                if c == '\'' {
+                    // Check for escaped quote ('')
+                    if chars.peek() == Some(&'\'') {
+                        chars.next(); // skip the escaped quote
+                    } else {
+                        in_string = false;
+                        result.push('\'');
+                    }
+                }
+                // Skip characters inside string literals
+            } else if c == '\'' {
+                in_string = true;
+                result.push('\'');
+            } else {
+                result.push(c);
+            }
+        }
+
+        result
+    }
+
+    /// Validate that a sort_by field name is a safe SQL identifier.
+    /// Only allows alphanumeric characters, underscores, and optionally
+    /// double-quoted identifiers.
+    fn validate_sort_field(sort_by: &str) -> Result<()> {
+        let trimmed = sort_by.trim();
+        if trimmed.is_empty() {
+            return Err(DataError::InvalidQuery(
+                "Sort field cannot be empty".to_string(),
+            ));
+        }
+
+        // Allow double-quoted identifiers
+        if trimmed.starts_with('"') && trimmed.ends_with('"') {
+            let inner = &trimmed[1..trimmed.len() - 1];
+            if inner.contains('"') {
+                return Err(DataError::InvalidQuery(
+                    "Sort field identifier contains invalid characters".to_string(),
+                ));
+            }
+            return Ok(());
+        }
+
+        // Allow only valid unquoted SQL identifiers: [a-zA-Z_][a-zA-Z0-9_]*
+        // Also allow schema.column format
+        for part in trimmed.split('.') {
+            if part.is_empty() {
+                return Err(DataError::InvalidQuery(
+                    "Sort field contains empty path segment".to_string(),
+                ));
+            }
+            if !part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                return Err(DataError::InvalidQuery(format!(
+                    "Sort field '{}' contains invalid characters. Only alphanumeric characters, underscores, and dots are allowed",
+                    sort_by
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validate SQL input for dangerous operations.
+    /// Used to sanitize user-provided WHERE clauses in the data browser.
+    fn validate_sql(&self, sql: &str) -> Result<()> {
+        let sql_lower = sql.trim().to_lowercase();
+
+        // Prevent dangerous DDL/DML operations
+        let dangerous_patterns = [
+            "drop ",
+            "truncate ",
+            "alter ",
+            "create ",
+            "grant ",
+            "revoke ",
+            "copy ",
+            "pg_read_file",
+            "pg_write_file",
+            "pg_ls_dir",
+            "lo_import",
+            "lo_export",
+        ];
+
+        for pattern in &dangerous_patterns {
+            if sql_lower.contains(pattern) {
+                return Err(DataError::InvalidQuery(format!(
+                    "SQL operation '{}' is not allowed in the data browser",
+                    pattern.trim()
+                )));
+            }
+        }
+
+        // Prevent multi-statement execution via semicolons
+        // Strip string literals first to avoid false positives on semicolons inside strings
+        let without_strings = Self::strip_sql_string_literals(&sql_lower);
+        if without_strings.contains(';') {
+            return Err(DataError::InvalidQuery(
+                "Multiple SQL statements are not allowed".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Map PostgreSQL type to FieldType
     fn map_pg_type(pg_type: &str) -> FieldType {
         match pg_type {
@@ -107,7 +220,7 @@ impl PostgresSource {
                 .try_get::<_, Option<bool>>(idx)
                 .ok()
                 .flatten()
-                .map(|v| serde_json::Value::Bool(v))
+                .map(serde_json::Value::Bool)
                 .unwrap_or(serde_json::Value::Null),
 
             "int2" | "int4" => row
@@ -129,22 +242,22 @@ impl PostgresSource {
                 .ok()
                 .flatten()
                 .and_then(|v| serde_json::Number::from_f64(v as f64))
-                .map(|n| serde_json::Value::Number(n))
+                .map(serde_json::Value::Number)
                 .unwrap_or(serde_json::Value::Null),
 
             "float8" => row
                 .try_get::<_, Option<f64>>(idx)
                 .ok()
                 .flatten()
-                .and_then(|v| serde_json::Number::from_f64(v))
-                .map(|n| serde_json::Value::Number(n))
+                .and_then(serde_json::Number::from_f64)
+                .map(serde_json::Value::Number)
                 .unwrap_or(serde_json::Value::Null),
 
             "varchar" | "text" | "char" | "bpchar" => row
                 .try_get::<_, Option<String>>(idx)
                 .ok()
                 .flatten()
-                .map(|v| serde_json::Value::String(v))
+                .map(serde_json::Value::String)
                 .unwrap_or(serde_json::Value::Null),
 
             "timestamp" | "timestamptz" => row
@@ -172,7 +285,7 @@ impl PostgresSource {
                 row.try_get::<_, Option<String>>(idx)
                     .ok()
                     .flatten()
-                    .map(|v| serde_json::Value::String(v))
+                    .map(serde_json::Value::String)
                     .unwrap_or(serde_json::Value::Null)
             }
         };
@@ -750,6 +863,8 @@ impl Queryable for PostgresSource {
         // Add WHERE clause if filters provided
         if let Some(filter_json) = filters {
             if let Some(where_clause) = filter_json.get("where").and_then(|v| v.as_str()) {
+                // Validate WHERE clause for dangerous operations
+                self.validate_sql(where_clause)?;
                 sql.push_str(" WHERE ");
                 sql.push_str(where_clause);
             }
@@ -757,7 +872,11 @@ impl Queryable for PostgresSource {
 
         // Add ORDER BY
         if let Some(sort_by) = &options.sort_by {
-            let sort_order = options.sort_order.as_deref().unwrap_or("asc");
+            Self::validate_sort_field(sort_by)?;
+            let sort_order = match options.sort_order.as_deref() {
+                Some("desc") | Some("DESC") => "DESC",
+                _ => "ASC",
+            };
             sql.push_str(&format!(" ORDER BY {} {}", sort_by, sort_order));
         }
 
@@ -775,7 +894,7 @@ impl Queryable for PostgresSource {
             // Extract detailed error message from PostgreSQL error
             let error_msg = if let Some(db_error) = e.as_db_error() {
                 // Build detailed error message from PostgreSQL error fields
-                let mut msg = format!("{}", db_error.message());
+                let mut msg = db_error.message().to_string();
 
                 if let Some(detail) = db_error.detail() {
                     msg.push_str(&format!("\nDetail: {}", detail));
@@ -850,6 +969,8 @@ impl Queryable for PostgresSource {
         // Add WHERE clause if filters provided
         if let Some(filter_json) = filters {
             if let Some(where_clause) = filter_json.get("where").and_then(|v| v.as_str()) {
+                // Validate WHERE clause for dangerous operations
+                self.validate_sql(where_clause)?;
                 sql.push_str(" WHERE ");
                 sql.push_str(where_clause);
             }
@@ -889,134 +1010,6 @@ impl Queryable for PostgresSource {
 
         let count: i64 = row.get(0);
         Ok(count > 0)
-    }
-}
-
-#[async_trait]
-impl SqlFeature for PostgresSource {
-    async fn execute_sql(
-        &self,
-        sql: &str,
-        _params: Option<Vec<serde_json::Value>>,
-    ) -> Result<QueryResult> {
-        let client = self.client.read().await;
-
-        let start = std::time::Instant::now();
-
-        debug!("Executing raw SQL: {}", sql);
-
-        let rows = client.query(sql, &[]).await.map_err(|e| {
-            error!("PostgreSQL SQL execution failed: {}", e);
-            error!("Failed SQL: {}", sql);
-
-            // Extract detailed error message from PostgreSQL error
-            let error_msg = if let Some(db_error) = e.as_db_error() {
-                // Build detailed error message from PostgreSQL error fields
-                let mut msg = format!("{}", db_error.message());
-
-                if let Some(detail) = db_error.detail() {
-                    msg.push_str(&format!("\nDetail: {}", detail));
-                }
-
-                if let Some(hint) = db_error.hint() {
-                    msg.push_str(&format!("\nHint: {}", hint));
-                }
-
-                if let Some(position) = db_error.position() {
-                    msg.push_str(&format!("\nPosition: {:?}", position));
-                }
-
-                if let Some(column) = db_error.column() {
-                    msg.push_str(&format!("\nColumn: {}", column));
-                }
-
-                msg
-            } else {
-                // Non-database error (connection error, etc.)
-                format!("{}", e)
-            };
-
-            DataError::QueryFailed(format!("{}\n\nQuery: {}", error_msg, sql))
-        })?;
-
-        // Convert rows to DataRow
-        let data_rows: Result<Vec<DataRow>> = rows.iter().map(Self::row_to_datarow).collect();
-        let data_rows = data_rows?;
-
-        // Build schema from result columns
-        let fields = if let Some(first_row) = rows.first() {
-            first_row
-                .columns()
-                .iter()
-                .map(|col| FieldDef {
-                    name: col.name().to_string(),
-                    field_type: Self::map_pg_type(col.type_().name()),
-                    nullable: true,
-                    description: None,
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-
-        let schema = DatasetSchema {
-            fields,
-            partitions: None,
-            primary_key: None,
-        };
-
-        let execution_ms = start.elapsed().as_millis() as u64;
-        let row_count = data_rows.len();
-
-        debug!("SQL returned {} rows in {}ms", row_count, execution_ms);
-
-        Ok(QueryResult {
-            schema,
-            rows: data_rows,
-            stats: QueryStats {
-                row_count,
-                total_rows: None,
-                execution_ms,
-                has_more: false,
-                next_cursor: None,
-            },
-        })
-    }
-
-    async fn explain(&self, sql: &str) -> Result<String> {
-        let client = self.client.read().await;
-
-        let explain_sql = format!("EXPLAIN {}", sql);
-
-        let rows = client
-            .query(&explain_sql, &[])
-            .await
-            .map_err(|e| DataError::QueryFailed(format!("EXPLAIN failed: {}", e)))?;
-
-        let plan = rows
-            .iter()
-            .map(|row| row.get::<_, String>(0))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        Ok(plan)
-    }
-
-    fn validate_sql(&self, sql: &str) -> Result<()> {
-        // Basic SQL validation
-        let sql_lower = sql.trim().to_lowercase();
-
-        // Prevent dangerous operations
-        if sql_lower.contains("drop table")
-            || sql_lower.contains("drop database")
-            || sql_lower.contains("truncate")
-        {
-            return Err(DataError::InvalidQuery(
-                "Dangerous SQL operations are not allowed".to_string(),
-            ));
-        }
-
-        Ok(())
     }
 }
 

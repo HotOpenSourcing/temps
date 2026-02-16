@@ -3,7 +3,7 @@ version: '3.9'
 services:
   # PostgreSQL Database (with TimescaleDB extension)
   postgres:
-    image: timescale/timescaledb:latest-pg17
+    image: timescale/timescaledb-ha:pg18
     container_name: temps-postgres
     restart: always
     environment:

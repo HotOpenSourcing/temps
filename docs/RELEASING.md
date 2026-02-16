@@ -80,10 +80,10 @@ After release, verify the binary works:
 
 ```bash
 # Download
-curl -LO https://github.com/YOUR_ORG/temps/releases/download/v1.0.0/temps-linux-amd64
+curl -LO https://github.com/gotempsh/temps/releases/download/v1.0.0/temps-linux-amd64
 
 # Verify checksum
-curl -LO https://github.com/YOUR_ORG/temps/releases/download/v1.0.0/temps-linux-amd64.sha256
+curl -LO https://github.com/gotempsh/temps/releases/download/v1.0.0/temps-linux-amd64.sha256
 sha256sum -c temps-linux-amd64.sha256
 
 # Make executable

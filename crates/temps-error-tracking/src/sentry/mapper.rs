@@ -289,12 +289,19 @@ pub fn convert_stacktrace_to_json(
                 annotated_frame.value().map(|frame| {
                     let mut obj = serde_json::Map::new();
 
-                    // Filename is NativeImagePath, convert using Debug format as fallback
+                    // Filename is NativeImagePath - use as_str() to get inner string
                     if let Some(filename) = frame.filename.value() {
-                        let filename_str = format!("{:?}", filename);
                         obj.insert(
                             "filename".to_string(),
-                            serde_json::Value::String(filename_str),
+                            serde_json::Value::String(filename.as_str().to_string()),
+                        );
+                    }
+
+                    // abs_path is the full URL/path (critical for server-side source map matching)
+                    if let Some(abs_path) = frame.abs_path.value() {
+                        obj.insert(
+                            "abs_path".to_string(),
+                            serde_json::Value::String(abs_path.as_str().to_string()),
                         );
                     }
                     if let Some(function) = frame.function.as_str() {

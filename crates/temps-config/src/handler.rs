@@ -1,6 +1,6 @@
 use crate::ConfigService;
 use axum::{
-    extract::State,
+    extract::{Extension, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, put},
@@ -11,13 +11,40 @@ use std::sync::Arc;
 use temps_auth::{permission_guard, RequireAuth};
 use temps_core::error_builder::ErrorBuilder;
 use temps_core::{
-    problemdetails::Problem, AppSettings, DiskSpaceAlertSettings, LetsEncryptSettings,
-    RateLimitSettings, ScreenshotSettings, SecurityHeadersSettings,
+    problemdetails::Problem, AppSettings, AuditContext, AuditLogger, AuditOperation,
+    ContainerLogSettings, DiskSpaceAlertSettings, LetsEncryptSettings, RateLimitSettings,
+    RequestMetadata, ScreenshotSettings, SecurityHeadersSettings,
 };
+use tracing::error;
 use utoipa::{OpenApi, ToSchema};
 
 pub struct SettingsState {
     pub config_service: Arc<ConfigService>,
+    pub audit_service: Arc<dyn AuditLogger>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct SettingsUpdatedAudit {
+    context: AuditContext,
+}
+
+impl AuditOperation for SettingsUpdatedAudit {
+    fn operation_type(&self) -> String {
+        "SETTINGS_UPDATED".to_string()
+    }
+    fn user_id(&self) -> i32 {
+        self.context.user_id
+    }
+    fn ip_address(&self) -> Option<String> {
+        self.context.ip_address.clone()
+    }
+    fn user_agent(&self) -> &str {
+        &self.context.user_agent
+    }
+    fn serialize(&self) -> anyhow::Result<String> {
+        serde_json::to_string(self)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize audit operation {}", e))
+    }
 }
 
 /// Response for successful settings update
@@ -51,6 +78,9 @@ pub struct AppSettingsResponse {
 
     // Monitoring settings
     pub disk_space_alert: DiskSpaceAlertSettings,
+
+    // Docker container log rotation settings
+    pub container_logs: ContainerLogSettings,
 }
 
 /// DNS provider settings with masked sensitive fields
@@ -101,6 +131,7 @@ impl From<AppSettings> for AppSettingsResponse {
                 ca_certificate: settings.docker_registry.ca_certificate,
             },
             disk_space_alert: settings.disk_space_alert,
+            container_logs: settings.container_logs,
         }
     }
 }
@@ -111,6 +142,7 @@ impl From<AppSettings> for AppSettingsResponse {
     components(schemas(
         AppSettings,
         AppSettingsResponse,
+        ContainerLogSettings,
         DnsProviderSettingsMasked,
         DockerRegistrySettingsMasked,
         SettingsUpdateResponse
@@ -186,6 +218,7 @@ async fn get_settings(
 async fn update_settings(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<SettingsState>>,
+    Extension(metadata): Extension<RequestMetadata>,
     Json(mut settings): Json<AppSettings>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, SettingsWrite);
@@ -228,12 +261,25 @@ async fn update_settings(
     }
 
     match app_state.config_service.update_settings(settings).await {
-        Ok(_) => Ok((
-            StatusCode::OK,
-            Json(SettingsUpdateResponse {
-                message: "Settings updated successfully".to_string(),
-            }),
-        )),
+        Ok(_) => {
+            let audit = SettingsUpdatedAudit {
+                context: AuditContext {
+                    user_id: auth.user_id(),
+                    ip_address: Some(metadata.ip_address.clone()),
+                    user_agent: metadata.user_agent.clone(),
+                },
+            };
+            if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+                error!("Failed to create audit log: {}", e);
+            }
+
+            Ok((
+                StatusCode::OK,
+                Json(SettingsUpdateResponse {
+                    message: "Settings updated successfully".to_string(),
+                }),
+            ))
+        }
         Err(e) => {
             tracing::error!("Failed to update settings: {}", e);
             Err(ErrorBuilder::new(StatusCode::INTERNAL_SERVER_ERROR)

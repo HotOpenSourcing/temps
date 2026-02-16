@@ -3,7 +3,7 @@ import { ServiceTypeRoute } from '@/api/client/types.gen'
 /**
  * Extract service type from Docker image name
  * Examples:
- * - "postgres:17-alpine" → "postgres"
+ * - "postgres:18-alpine" → "postgres"
  * - "mongo:latest" → "mongodb"
  * - "redis:7" → "redis"
  * - "mysql:8" → "mysql"

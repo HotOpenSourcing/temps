@@ -39,6 +39,7 @@ mod aws_signing {
 
     type HmacSha256 = Hmac<Sha256>;
 
+    #[allow(clippy::too_many_arguments)]
     pub fn sign_request(
         method: &str,
         uri: &str,
@@ -1007,10 +1008,11 @@ mod tests {
 #[cfg(test)]
 mod integration_tests {
     use super::*;
-    use wiremock::matchers::{method, path, path_regex};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    async fn create_mock_provider(mock_server: &MockServer) -> Route53Provider {
+    use wiremock::MockServer;
+
+    #[allow(dead_code)]
+    async fn create_mock_provider(_mock_server: &MockServer) -> Route53Provider {
         let creds = Route53Credentials {
             access_key_id: "AKIATESTKEY".to_string(),
             secret_access_key: "testsecretkey".to_string(),

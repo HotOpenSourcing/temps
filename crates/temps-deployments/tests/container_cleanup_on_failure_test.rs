@@ -247,6 +247,7 @@ async fn test_container_cleanup_on_deployment_failure() {
         .port(3000)
         .replicas(1)
         .environment_variables(env_vars)
+        .health_check_timeout_secs(15) // Short timeout for test -- container will never be healthy
         .build(container_deployer.clone())
         .expect("Should create deploy job");
 
@@ -344,11 +345,7 @@ async fn test_container_cleanup_on_deployment_failure() {
             });
 
             if let Some(container) = failing_container {
-                let status = container
-                    .status
-                    .as_ref()
-                    .map(|s| s.as_str())
-                    .unwrap_or("unknown");
+                let status = container.status.as_deref().unwrap_or("unknown");
                 let state = container
                     .state
                     .as_ref()

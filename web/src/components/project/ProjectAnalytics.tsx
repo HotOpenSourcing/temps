@@ -12,6 +12,10 @@ import {
   PagesChart,
   ReferrersChart,
 } from '@/components/analytics/overview'
+import { VisitorGlobePage } from '@/components/analytics/VisitorGlobe'
+import { LiveGlobePage } from '@/components/analytics/LiveGlobe'
+import { PageFlow } from '@/components/analytics/PageFlow'
+import { PageDetail } from '@/components/analytics/PageDetail'
 import { Pages } from '@/components/analytics/Pages'
 import { SessionReplays } from '@/components/analytics/SessionReplays'
 import { FunnelDetail } from '@/components/funnel/FunnelDetail'
@@ -67,13 +71,20 @@ import {
   Calendar as CalendarIcon,
   Code2,
   FileCode,
+  Globe,
   Info,
   RefreshCw,
   Terminal,
 } from 'lucide-react'
 import * as React from 'react'
 import { DateRange } from 'react-day-picker'
-import { Route, Routes, useLocation, useNavigate } from 'react-router-dom'
+import {
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+  useSearchParams,
+} from 'react-router-dom'
 
 import { Badge } from '@/components/ui/badge'
 import { useAuth } from '@/contexts/AuthContext'
@@ -447,6 +458,9 @@ interface PagesTabProps {
 }
 
 function PagesTab({ project }: PagesTabProps) {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const selectedPagePath = searchParams.get('path')
+
   const [dateFilter, setDateFilter] = React.useState<AnalyticsDateFilter>({
     quickFilter: '24hours',
     dateRange: undefined,
@@ -523,6 +537,10 @@ function PagesTab({ project }: PagesTabProps) {
     setTimeout(() => setIsRefreshing(false), 1000)
   }, [queryClient])
 
+  const handleBackToList = React.useCallback(() => {
+    setSearchParams({})
+  }, [setSearchParams])
+
   return (
     <div className="space-y-6">
       {/* Date Filter and Environment Selector */}
@@ -545,13 +563,24 @@ function PagesTab({ project }: PagesTabProps) {
         isRefreshing={isRefreshing}
       />
 
-      {/* Pages Component */}
-      <Pages
-        project={project}
-        startDate={startDate}
-        endDate={endDate}
-        environment={selectedEnvironment}
-      />
+      {/* Show PageDetail when a path is selected, otherwise show Pages list */}
+      {selectedPagePath ? (
+        <PageDetail
+          project={project}
+          pagePath={selectedPagePath}
+          startDate={startDate}
+          endDate={endDate}
+          environment={selectedEnvironment}
+          onBack={handleBackToList}
+        />
+      ) : (
+        <Pages
+          project={project}
+          startDate={startDate}
+          endDate={endDate}
+          environment={selectedEnvironment}
+        />
+      )}
     </div>
   )
 }
@@ -670,6 +699,119 @@ function SessionReplaysTab({ project }: SessionReplaysTabProps) {
   )
 }
 
+// Journey Tab Component
+interface JourneyTabProps {
+  project: ProjectResponse
+}
+
+function JourneyTab({ project }: JourneyTabProps) {
+  const [dateFilter, setDateFilter] = React.useState<AnalyticsDateFilter>({
+    quickFilter: '7days',
+    dateRange: undefined,
+  })
+  const [selectedEnvironment, setSelectedEnvironment] = React.useState<
+    number | undefined
+  >(undefined)
+  const [isRefreshing, setIsRefreshing] = React.useState(false)
+  const queryClient = useQueryClient()
+
+  const getDateRange = React.useCallback(() => {
+    const now = new Date()
+    if (dateFilter.quickFilter === 'custom' && dateFilter.dateRange) {
+      return {
+        startDate: dateFilter.dateRange.from,
+        endDate: dateFilter.dateRange.to,
+      }
+    }
+
+    switch (dateFilter.quickFilter) {
+      case 'today':
+        return {
+          startDate: new Date(now.setHours(0, 0, 0, 0)),
+          endDate: new Date(now.setHours(23, 59, 59, 999)),
+        }
+      case 'yesterday': {
+        const yesterday = new Date(now)
+        yesterday.setDate(yesterday.getDate() - 1)
+        return {
+          startDate: new Date(yesterday.setHours(0, 0, 0, 0)),
+          endDate: new Date(yesterday.setHours(23, 59, 59, 999)),
+        }
+      }
+      case '24hours': {
+        const twentyFourHoursAgo = new Date(now)
+        twentyFourHoursAgo.setHours(twentyFourHoursAgo.getHours() - 24)
+        return {
+          startDate: twentyFourHoursAgo,
+          endDate: now,
+        }
+      }
+      case '7days':
+        return {
+          startDate: subDays(now, 7),
+          endDate: now,
+        }
+      case '30days':
+        return {
+          startDate: subDays(now, 30),
+          endDate: now,
+        }
+      default:
+        return {
+          startDate: subDays(now, 7),
+          endDate: now,
+        }
+    }
+  }, [dateFilter])
+
+  const { startDate, endDate } = getDateRange()
+
+  const handleRefresh = React.useCallback(() => {
+    setIsRefreshing(true)
+    queryClient.invalidateQueries({
+      predicate: (query) => {
+        const key = query.queryKey[0] as string
+        return !!(
+          key &&
+          typeof key === 'string' &&
+          key.includes('getPageFlow')
+        )
+      },
+    })
+    setTimeout(() => setIsRefreshing(false), 1000)
+  }, [queryClient])
+
+  return (
+    <div className="space-y-6">
+      <AnalyticsFilters
+        project={project}
+        activeFilter={dateFilter.quickFilter}
+        dateRange={dateFilter.dateRange}
+        selectedEnvironment={selectedEnvironment}
+        onFilterChange={(filter) =>
+          setDateFilter((prev) => ({ ...prev, quickFilter: filter }))
+        }
+        onDateRangeChange={(range) =>
+          setDateFilter((prev) => ({
+            quickFilter: range ? 'custom' : prev.quickFilter,
+            dateRange: range,
+          }))
+        }
+        onEnvironmentChange={setSelectedEnvironment}
+        onRefresh={handleRefresh}
+        isRefreshing={isRefreshing}
+      />
+
+      <PageFlow
+        project={project}
+        startDate={startDate}
+        endDate={endDate}
+        environment={selectedEnvironment}
+      />
+    </div>
+  )
+}
+
 interface ProjectAnalyticsProps {
   project: ProjectResponse
 }
@@ -695,6 +837,15 @@ export function ProjectAnalytics({ project }: ProjectAnalyticsProps) {
       <Route path="pages" element={<PagesTab project={project} />} />
       <Route path="replays" element={<SessionReplaysTab project={project} />} />
       <Route path="setup" element={<AnalyticsSetup project={project} />} />
+      <Route
+        path="live"
+        element={<LiveGlobePage project={project} />}
+      />
+      <Route
+        path="globe"
+        element={<VisitorGlobePage project={project} />}
+      />
+      <Route path="journey" element={<JourneyTab project={project} />} />
     </Routes>
   )
 }
@@ -882,6 +1033,30 @@ function ProjectAnalyticsOverview({ project }: ProjectAnalyticsOverviewProps) {
             endDate={endDate}
             environment={selectedEnvironment}
           />
+          {/* Globe link */}
+          <Card
+            className="cursor-pointer hover:bg-accent/50 transition-colors"
+            onClick={() =>
+              navigate(`/projects/${project.slug}/analytics/globe`)
+            }
+          >
+            <CardContent className="flex items-center justify-between py-4">
+              <div className="flex items-center gap-3">
+                <Globe className="h-5 w-5 text-muted-foreground" />
+                <div>
+                  <p className="font-medium text-sm">Visitor Globe</p>
+                  <p className="text-xs text-muted-foreground">
+                    See where your visitors are coming from on an interactive 3D
+                    globe
+                  </p>
+                </div>
+              </div>
+              <Button variant="outline" size="sm">
+                View Globe
+              </Button>
+            </CardContent>
+          </Card>
+
           {/* Analytics Charts */}
           <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-2">
             <PagesChart

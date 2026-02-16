@@ -74,7 +74,7 @@ async fn discover_workloads(
 
     let workloads = state
         .import_orchestrator
-        .discover(request.source, request.selector)
+        .discover(request.source, &request.credentials, request.selector)
         .await?;
 
     Ok(Json(types::DiscoverResponse { workloads }))
@@ -107,6 +107,7 @@ async fn create_plan(
             auth.user_id(),
             request.source,
             request.workload_id,
+            &request.credentials,
             request.repository_id,
         )
         .await?;
@@ -190,6 +191,7 @@ async fn get_import_status(
     ),
     components(schemas(
         types::ImportSourceInfo,
+        types::ImportSourceCapabilities,
         types::DiscoverRequest,
         types::DiscoverResponse,
         types::CreatePlanRequest,

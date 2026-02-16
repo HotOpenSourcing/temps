@@ -116,16 +116,14 @@ pub fn solve_challenge(
         nonce += 1;
 
         // Report progress every 10000 attempts (balance between callback overhead and UI responsiveness)
-        if nonce % 10000 == 0 {
+        if nonce.is_multiple_of(10000) {
             let hash_hex = hash_to_hex(&hash);
             let args = js_sys::Array::new();
             args.push(&JsValue::from(nonce as f64));
             args.push(&JsValue::from(hash_hex));
 
             // Call the JavaScript progress callback
-            if let Err(e) = callback.apply(&this, &args) {
-                return Err(e);
-            }
+            callback.apply(&this, &args)?;
         }
 
         // Safety limit to prevent infinite loops on misconfigured difficulty

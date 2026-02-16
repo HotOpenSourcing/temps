@@ -801,3 +801,42 @@ pub struct ListPresetsResponse {
     pub presets: Vec<PresetResponse>,
     pub total: usize,
 }
+
+/// Request body for generating a Dockerfile from a preset
+#[derive(Deserialize, ToSchema)]
+pub struct GenerateDockerfileRequest {
+    /// Package manager used by the project (npm, yarn, pnpm, bun)
+    /// If not provided, defaults to npm
+    #[schema(example = "npm")]
+    pub package_manager: Option<String>,
+    /// Custom install command (overrides preset default)
+    #[schema(example = "npm ci")]
+    pub install_command: Option<String>,
+    /// Custom build command (overrides preset default)
+    #[schema(example = "npm run build")]
+    pub build_command: Option<String>,
+    /// Output directory for static builds
+    #[schema(example = "dist")]
+    pub output_dir: Option<String>,
+    /// Project name/slug used for container naming
+    #[schema(example = "my-app")]
+    pub project_name: Option<String>,
+    /// Whether to use BuildKit cache mounts for faster builds
+    #[serde(default = "default_true")]
+    pub use_buildkit: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Response containing a generated Dockerfile and build arguments
+#[derive(Serialize, ToSchema)]
+pub struct GenerateDockerfileResponse {
+    /// The generated Dockerfile content
+    pub dockerfile: String,
+    /// Build arguments to pass to `docker build --build-arg KEY=VALUE`
+    pub build_args: std::collections::HashMap<String, String>,
+    /// The preset slug used for generation
+    pub preset: String,
+}

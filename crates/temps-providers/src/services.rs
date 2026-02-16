@@ -8,8 +8,8 @@ use anyhow::Result;
 use bollard::Docker;
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set,
-    TransactionTrait,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
+    QueryOrder, Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -148,7 +148,7 @@ pub struct ImportExternalServiceRequest {
 pub struct UpdateExternalServiceRequest {
     pub name: Option<String>,
     pub parameters: HashMap<String, serde_json::Value>,
-    /// Docker image to use for the service (e.g., "postgres:17-alpine", "timescale/timescaledb-ha:pg17")
+    /// Docker image to use for the service (e.g., "postgres:18-alpine", "timescale/timescaledb-ha:pg18")
     /// When provided, the service container will be recreated with the new image
     pub docker_image: Option<String>,
 }
@@ -434,8 +434,7 @@ impl ExternalServiceManager {
             }
         })?;
 
-        let _service_instance =
-            self.create_service_instance(service.name.clone(), service_type.clone());
+        let _service_instance = self.create_service_instance(service.name.clone(), service_type);
         let parameters = self.get_service_parameters(service_id).await?;
 
         let config = ServiceConfig {
@@ -456,6 +455,25 @@ impl ExternalServiceManager {
         let services = external_services::Entity::find()
             .order_by_desc(external_services::Column::CreatedAt)
             .all(self.db.as_ref())
+            .await?;
+
+        let mut result = Vec::new();
+        for service in services {
+            result.push(self.get_service_info(service.id).await?);
+        }
+
+        Ok(result)
+    }
+
+    pub async fn list_services_paginated(
+        &self,
+        page: u64,
+        page_size: u64,
+    ) -> Result<Vec<ExternalServiceInfo>, ExternalServiceError> {
+        let services = external_services::Entity::find()
+            .order_by_desc(external_services::Column::CreatedAt)
+            .paginate(self.db.as_ref(), page_size)
+            .fetch_page(page - 1)
             .await?;
 
         let mut result = Vec::new();
@@ -1146,8 +1164,7 @@ impl ExternalServiceManager {
         }
 
         // Create service instance
-        let service_instance =
-            self.create_service_instance(service.name.clone(), service_type.clone());
+        let service_instance = self.create_service_instance(service.name.clone(), service_type);
         let parameters = self.get_service_parameters(service_id_val).await?;
         let service_config = ServiceConfig {
             name: service.name.clone(),
@@ -1303,6 +1320,47 @@ impl ExternalServiceManager {
         Ok(project_services_list)
     }
 
+    pub async fn list_service_projects_paginated(
+        &self,
+        service_id_val: i32,
+        page: u64,
+        page_size: u64,
+    ) -> Result<Vec<ProjectServiceInfo>, ExternalServiceError> {
+        // Verify service exists and get service info
+        let service_info = self.get_service_info(service_id_val).await?;
+
+        // Get paginated project links for this service
+        let links = project_services::Entity::find()
+            .filter(project_services::Column::ServiceId.eq(service_id_val))
+            .order_by_desc(project_services::Column::Id)
+            .paginate(self.db.as_ref(), page_size)
+            .fetch_page(page - 1)
+            .await?;
+
+        // Convert to ProjectServiceInfo with project metadata
+        let mut project_services_list = Vec::new();
+        for link in links {
+            let project = projects::Entity::find_by_id(link.project_id)
+                .one(self.db.as_ref())
+                .await?
+                .ok_or(ExternalServiceError::ProjectNotFound {
+                    id: link.project_id,
+                })?;
+
+            project_services_list.push(ProjectServiceInfo {
+                id: link.id,
+                project: ProjectInfo {
+                    id: project.id,
+                    slug: project.slug,
+                    created_at: project.created_at.to_rfc3339(),
+                },
+                service: service_info.clone(),
+            });
+        }
+
+        Ok(project_services_list)
+    }
+
     pub async fn list_project_services(
         &self,
         project_id_val: i32,
@@ -1317,6 +1375,44 @@ impl ExternalServiceManager {
         let links = project_services::Entity::find()
             .filter(project_services::Column::ProjectId.eq(project_id_val))
             .all(self.db.as_ref())
+            .await?;
+
+        // Convert to ProjectServiceInfo with service details
+        let mut project_services_list = Vec::new();
+        for link in links {
+            let service_info = self.get_service_info(link.service_id).await?;
+            project_services_list.push(ProjectServiceInfo {
+                id: link.id,
+                project: ProjectInfo {
+                    id: project.id,
+                    slug: project.slug.clone(),
+                    created_at: project.created_at.to_rfc3339(),
+                },
+                service: service_info,
+            });
+        }
+
+        Ok(project_services_list)
+    }
+
+    pub async fn list_project_services_paginated(
+        &self,
+        project_id_val: i32,
+        page: u64,
+        page_size: u64,
+    ) -> Result<Vec<ProjectServiceInfo>, ExternalServiceError> {
+        // Verify project exists and fetch its metadata
+        let project = projects::Entity::find_by_id(project_id_val)
+            .one(self.db.as_ref())
+            .await?
+            .ok_or(ExternalServiceError::ProjectNotFound { id: project_id_val })?;
+
+        // Get paginated service links for this project
+        let links = project_services::Entity::find()
+            .filter(project_services::Column::ProjectId.eq(project_id_val))
+            .order_by_desc(project_services::Column::Id)
+            .paginate(self.db.as_ref(), page_size)
+            .fetch_page(page - 1)
             .await?;
 
         // Convert to ProjectServiceInfo with service details
@@ -1497,8 +1593,7 @@ impl ExternalServiceManager {
 
         let parameters = self.get_service_parameters(service_id).await?;
         let params_str = Self::params_to_strings(&parameters);
-        let service_instance =
-            self.create_service_instance(service.name.clone(), service_type.clone());
+        let service_instance = self.create_service_instance(service.name.clone(), service_type);
 
         let mut all_vars = HashMap::new();
 
@@ -1564,7 +1659,7 @@ impl ExternalServiceManager {
 
                 let service_config = ServiceConfig {
                     name: service.name.clone(),
-                    service_type: service_type.clone(),
+                    service_type,
                     version: service.version,
                     parameters: serde_json::to_value(&parameters).map_err(|e| {
                         ExternalServiceError::InternalError {
@@ -1818,7 +1913,7 @@ impl ExternalServiceManager {
                 .collect::<Vec<u16>>();
 
             available.push(AvailableContainer {
-                container_id: container_id,
+                container_id,
                 container_name: container_name_raw
                     .strip_prefix('/')
                     .unwrap_or(&container_name_raw)
@@ -2021,13 +2116,21 @@ impl ExternalServiceManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "docker-tests")]
     use bollard::Docker;
+    #[cfg(feature = "docker-tests")]
     use serde_json::Value as JsonValue;
+    #[cfg(feature = "docker-tests")]
     use std::collections::HashMap;
+    #[cfg(feature = "docker-tests")]
     use std::net::TcpListener;
+    #[cfg(feature = "docker-tests")]
     use temps_core::EncryptionService;
+    #[cfg(feature = "docker-tests")]
     use temps_database::test_utils::TestDatabase;
 
+    #[cfg(feature = "docker-tests")]
     fn get_unused_port() -> u16 {
         TcpListener::bind("127.0.0.1:0")
             .expect("Failed to bind to address")
@@ -2035,6 +2138,7 @@ mod tests {
             .unwrap()
             .port()
     }
+    #[cfg(feature = "docker-tests")]
     async fn setup_test_manager() -> (ExternalServiceManager, TestDatabase) {
         let test_db = TestDatabase::with_migrations().await.unwrap();
         let db = test_db.db.clone();
@@ -2047,6 +2151,7 @@ mod tests {
         (manager, test_db)
     }
 
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     async fn test_create_postgres_service() {
         let (manager, _test_db) = setup_test_manager().await;
@@ -2076,13 +2181,13 @@ mod tests {
         params.insert("max_connections".to_string(), JsonValue::Number(100.into()));
         params.insert(
             "docker_image".to_string(),
-            JsonValue::String("postgres:16-alpine".to_string()),
+            JsonValue::String("postgres:18-alpine".to_string()),
         );
 
         let request = CreateExternalServiceRequest {
             name: service_name.clone(),
             service_type: ServiceType::Postgres,
-            version: Some("16".to_string()),
+            version: Some("18".to_string()),
             parameters: params,
         };
 
@@ -2096,13 +2201,14 @@ mod tests {
         let service = result.unwrap();
         assert_eq!(service.name, service_name);
         assert_eq!(service.service_type, ServiceType::Postgres);
-        assert_eq!(service.version, Some("16".to_string()));
+        assert_eq!(service.version, Some("18".to_string()));
         assert_eq!(service.status, "running");
 
         // Cleanup
         let _ = manager.delete_service(service.id).await;
     }
 
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     async fn test_create_redis_service() {
         let (manager, _test_db) = setup_test_manager().await;
@@ -2130,6 +2236,7 @@ mod tests {
         let _ = manager.delete_service(service.id).await;
     }
 
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     async fn test_create_s3_service() {
         let (manager, _test_db) = setup_test_manager().await;
@@ -2161,6 +2268,7 @@ mod tests {
         let _ = manager.delete_service(service.id).await;
     }
 
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     #[ignore] // TODO: Implement service stop/start functionality
     async fn test_stop_and_start_service() {
@@ -2201,6 +2309,7 @@ mod tests {
         let _ = manager.delete_service(service_id).await;
     }
 
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     #[ignore] // TODO: Implement service deletion functionality
     async fn test_delete_service() {
@@ -2236,6 +2345,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     #[ignore] // TODO: Implement service parameter update functionality
     async fn test_update_service_parameters() {
@@ -2295,6 +2405,7 @@ mod tests {
         let _ = manager.delete_service(service_id).await;
     }
 
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     #[ignore] // TODO: Implement get service by name functionality
     async fn test_get_service_by_name() {
@@ -2326,6 +2437,7 @@ mod tests {
         let _ = manager.delete_service(service_id).await;
     }
 
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     #[ignore] // TODO: Implement get service by slug functionality
     async fn test_get_service_by_slug() {
@@ -2357,6 +2469,7 @@ mod tests {
         let _ = manager.delete_service(service_id).await;
     }
 
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     async fn test_list_services() {
         let (manager, _test_db) = setup_test_manager().await;
@@ -2401,6 +2514,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     #[ignore] // TODO: Implement get_service_environment_variables functionality
     async fn test_service_environment_variables() {
@@ -2459,6 +2573,7 @@ mod tests {
         let _ = manager.delete_service(service_id).await;
     }
 
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     async fn test_service_parameter_encryption() {
         let (manager, _test_db) = setup_test_manager().await;
@@ -2488,7 +2603,7 @@ mod tests {
         params.insert("max_connections".to_string(), JsonValue::Number(100.into()));
         params.insert(
             "docker_image".to_string(),
-            JsonValue::String("postgres:16-alpine".to_string()),
+            JsonValue::String("postgres:18-alpine".to_string()),
         );
 
         let request = CreateExternalServiceRequest {
@@ -2519,6 +2634,7 @@ mod tests {
         let _ = manager.delete_service(service_id).await;
     }
 
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     async fn test_invalid_service_type() {
         let (manager, _test_db) = setup_test_manager().await;
@@ -2532,6 +2648,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     #[ignore] // FIXME: Parameter validation not implemented - code auto-generates missing parameters (port, password)
     async fn test_validate_parameters_fails_with_missing_required() {
@@ -2590,15 +2707,16 @@ mod tests {
         assert!(!ExternalServiceManager::is_sensitive_variable("host"));
     }
 
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     async fn test_upgrade_postgres_image_parameter_update() {
-        // This test verifies that the docker_image parameter can be updated
-        // Note: Actual container startup may fail for major version upgrades (16->17)
-        // due to data format incompatibility, which requires pg_upgrade or dump/restore
+        // This test verifies that the docker_image parameter can be updated.
+        // Uses same-major-version update (18 -> 18-alpine) to avoid data format
+        // incompatibility issues that occur with cross-major-version upgrades.
         let (manager, _test_db) = setup_test_manager().await;
         let random_unused_port = get_unused_port();
 
-        // Step 1: Create a PostgreSQL service with postgres:16-alpine
+        // Step 1: Create a PostgreSQL service with postgres:18
         let mut params = HashMap::new();
         params.insert(
             "database".to_string(),
@@ -2623,20 +2741,20 @@ mod tests {
         params.insert("max_connections".to_string(), JsonValue::Number(100.into()));
         params.insert(
             "docker_image".to_string(),
-            JsonValue::String("postgres:16-alpine".to_string()),
+            JsonValue::String("postgres:18".to_string()),
         );
 
         let request = CreateExternalServiceRequest {
             name: "test-postgres-upgrade-params".to_string(),
             service_type: ServiceType::Postgres,
-            version: Some("16".to_string()),
+            version: Some("18".to_string()),
             parameters: params,
         };
 
         let service = manager
             .create_service(request)
             .await
-            .expect("Failed to create PostgreSQL 16 service");
+            .expect("Failed to create PostgreSQL 18 service");
         let service_id = service.id;
 
         // Verify initial service configuration
@@ -2644,58 +2762,53 @@ mod tests {
         let initial_params = initial_details.current_parameters.unwrap();
         assert_eq!(
             initial_params.get("docker_image").and_then(|v| v.as_str()),
-            Some("postgres:16-alpine"),
-            "Initial docker_image should be postgres:16-alpine"
+            Some("postgres:18"),
+            "Initial docker_image should be postgres:18"
         );
 
-        // Step 2: Update docker_image parameter to postgres:17-alpine
+        // Step 2: Update docker_image parameter to postgres:18-alpine (same major version, different variant).
+        // Only include updateable parameters - readonly params (database, username, password, host)
+        // are rejected by validate_for_update().
         let mut update_params = HashMap::new();
-        update_params.insert(
-            "database".to_string(),
-            JsonValue::String("testdb".to_string()),
-        );
-        update_params.insert(
-            "username".to_string(),
-            JsonValue::String("testuser".to_string()),
-        );
-        update_params.insert(
-            "password".to_string(),
-            JsonValue::String("testpass".to_string()),
-        );
         update_params.insert(
             "port".to_string(),
             JsonValue::String(random_unused_port.to_string()),
-        );
-        update_params.insert(
-            "host".to_string(),
-            JsonValue::String("localhost".to_string()),
         );
         update_params.insert("max_connections".to_string(), JsonValue::Number(100.into()));
 
         let update_request = UpdateExternalServiceRequest {
             name: None,
             parameters: update_params,
-            docker_image: Some("postgres:17-alpine".to_string()),
+            docker_image: Some("postgres:18-alpine".to_string()),
         };
 
-        // Update the service - this will attempt to recreate the container
-        // Note: The update may succeed but the container may not become healthy
-        // due to PostgreSQL version incompatibility
-        let _ = manager.update_service(service_id, update_request).await;
+        // Update the service - same major version so data is compatible.
+        // Container reinitialization may fail in CI (e.g., image pull timeout), so we
+        // tolerate errors from container recreation while still verifying the DB was updated.
+        let update_result = manager.update_service(service_id, update_request).await;
+        if let Err(ref e) = update_result {
+            eprintln!(
+                "Note: update_service returned error (container reinit may have failed): {}",
+                e
+            );
+        }
 
-        // Verify the docker_image parameter has been updated in the configuration
+        // Verify the docker_image parameter has been updated in the database.
+        // The parameter update happens before container reinitialization in update_service(),
+        // so even if container recreation fails, the config should be persisted.
         let updated_details = manager.get_service_details(service_id).await.unwrap();
         let updated_params = updated_details.current_parameters.unwrap();
         assert_eq!(
             updated_params.get("docker_image").and_then(|v| v.as_str()),
-            Some("postgres:17-alpine"),
-            "Docker image parameter should be updated to postgres:17-alpine"
+            Some("postgres:18-alpine"),
+            "Docker image parameter should be updated to postgres:18-alpine"
         );
 
         // Cleanup - force delete to remove even unhealthy containers
         let _ = manager.delete_service(service_id).await;
     }
 
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     async fn test_create_service_with_invalid_params_rolls_back() {
         let (manager, _test_db) = setup_test_manager().await;
@@ -2767,6 +2880,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     #[ignore] // TODO: Implement masked environment variables functionality
     async fn test_masked_environment_variables() {
@@ -2822,6 +2936,7 @@ mod tests {
         let _ = manager.delete_service(service_id).await;
     }
 
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     async fn test_cannot_update_postgres_username() {
         let (manager, _test_db) = setup_test_manager().await;
@@ -2896,6 +3011,7 @@ mod tests {
         let _ = manager.delete_service(service_id).await;
     }
 
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     async fn test_cannot_update_postgres_password() {
         let (manager, _test_db) = setup_test_manager().await;
@@ -2954,6 +3070,7 @@ mod tests {
         let _ = manager.delete_service(service_id).await;
     }
 
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     async fn test_cannot_update_postgres_database() {
         let (manager, _test_db) = setup_test_manager().await;
@@ -3012,6 +3129,7 @@ mod tests {
         let _ = manager.delete_service(service_id).await;
     }
 
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     async fn test_can_update_postgres_docker_image() {
         let (manager, _test_db) = setup_test_manager().await;
@@ -3033,11 +3151,16 @@ mod tests {
             "port".to_string(),
             JsonValue::String(random_unused_port.to_string()),
         );
+        // Explicitly set docker_image so the test is deterministic
+        params.insert(
+            "docker_image".to_string(),
+            JsonValue::String("postgres:18".to_string()),
+        );
 
         let request = CreateExternalServiceRequest {
             name: "test-postgres-image".to_string(),
             service_type: ServiceType::Postgres,
-            version: Some("16".to_string()),
+            version: Some("18".to_string()),
             parameters: params,
         };
 
@@ -3047,13 +3170,15 @@ mod tests {
             .expect("Failed to create service");
         let service_id = service.id;
 
-        // Update docker_image (updateable parameter) - don't include readonly parameters
-        let update_params = HashMap::new(); // Empty parameters - only updating docker_image
+        // Update docker_image to a compatible variant (same major version, different tag).
+        // Changing to a different major version (e.g., 18 -> 17) would fail because
+        // PostgreSQL data files are not backward-compatible across major versions.
+        let update_params = HashMap::new();
 
         let update_request = UpdateExternalServiceRequest {
             name: None,
             parameters: update_params,
-            docker_image: Some("postgres:16-alpine".to_string()),
+            docker_image: Some("postgres:18-alpine".to_string()),
         };
 
         let result = manager.update_service(service_id, update_request).await;
@@ -3064,13 +3189,14 @@ mod tests {
         let params = details.current_parameters.unwrap();
         assert_eq!(
             params.get("docker_image").and_then(|v| v.as_str()),
-            Some("postgres:16-alpine")
+            Some("postgres:18-alpine")
         );
 
         // Cleanup
         let _ = manager.delete_service(service_id).await;
     }
 
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     async fn test_cannot_update_redis_password() {
         let (manager, _test_db) = setup_test_manager().await;
@@ -3121,6 +3247,7 @@ mod tests {
         let _ = manager.delete_service(service_id).await;
     }
 
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     async fn test_prevent_duplicate_service_type_linking() {
         use temps_entities::preset::Preset;
@@ -3229,6 +3356,7 @@ mod tests {
         assert_eq!(links[0].service_id, service_pg1.id);
     }
 
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     async fn test_import_postgres_container_from_docker() {
         // Skip if Docker is not available
@@ -3258,6 +3386,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     async fn test_list_available_containers() {
         // Skip if Docker is not available
@@ -3457,6 +3586,7 @@ mod tests {
         assert_eq!(params["container_id"], "abc123");
     }
 
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     async fn test_postgres_v17_import_and_upgrade_to_v18() {
         // This test demonstrates the complete workflow:

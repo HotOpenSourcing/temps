@@ -1,5 +1,8 @@
-import { getPagePathsOptions } from '@/api/client/@tanstack/react-query.gen'
-import { ProjectResponse } from '@/api/client/types.gen'
+import {
+  getPagePathsOptions,
+  getPagePathsSparklinesOptions,
+} from '@/api/client/@tanstack/react-query.gen'
+import { PagePathSparkline, ProjectResponse } from '@/api/client/types.gen'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -13,7 +16,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { useQuery } from '@tanstack/react-query'
 import { format } from 'date-fns'
 import { FileText, RefreshCw } from 'lucide-react'
-import React from 'react'
+import React, { useMemo } from 'react'
 import { PageListItem } from './PageListItem'
 
 interface PagesProps {
@@ -44,6 +47,37 @@ export function Pages({
     }),
     enabled: !!startDate && !!endDate,
   })
+
+  // Build comma-separated page paths for batch sparkline query
+  const pagePathsCsv = useMemo(() => {
+    if (!data?.page_paths || data.page_paths.length === 0) return ''
+    return data.page_paths.map((p) => p.page_path).join(',')
+  }, [data?.page_paths])
+
+  // Fetch all sparklines in a single batch request
+  const { data: sparklineData } = useQuery({
+    ...getPagePathsSparklinesOptions({
+      query: {
+        project_id: project.id,
+        environment_id: environment,
+        page_paths: pagePathsCsv,
+        start_time: startDate ? startDate.toISOString() : '',
+        end_time: endDate ? endDate.toISOString() : '',
+      },
+    }),
+    enabled: !!startDate && !!endDate && pagePathsCsv.length > 0,
+  })
+
+  // Index sparklines by page_path for O(1) lookup
+  const sparklinesByPath = useMemo(() => {
+    const map = new Map<string, PagePathSparkline>()
+    if (sparklineData?.sparklines) {
+      for (const sparkline of sparklineData.sparklines) {
+        map.set(sparkline.page_path, sparkline)
+      }
+    }
+    return map
+  }, [sparklineData?.sparklines])
 
   const handleRefresh = React.useCallback(async () => {
     setIsRefreshing(true)
@@ -107,23 +141,29 @@ export function Pages({
       </CardHeader>
       <CardContent className="p-0">
         {isLoading ? (
-          <div className="p-8">
-            <div className="space-y-4">
-              {[...Array(5)].map((_, i) => (
-                <div
-                  key={i}
-                  className="flex items-center justify-between p-4 border rounded-lg"
-                >
-                  <div className="flex items-center gap-4 flex-1">
-                    <div className="space-y-2 flex-1">
-                      <Skeleton className="h-4 w-48" />
-                      <Skeleton className="h-3 w-32" />
-                    </div>
-                    <Skeleton className="h-8 w-24" />
+          <div className="divide-y">
+            {[...Array(5)].map((_, i) => (
+              <div
+                key={`page-skeleton-${i}`}
+                className="flex items-center gap-4 p-4"
+              >
+                {/* Page info skeleton — matches PageListItem layout */}
+                <div className="flex-1 min-w-0">
+                  <Skeleton
+                    className="h-4 mb-2"
+                    style={{ width: `${140 + (i % 3) * 40}px` }}
+                  />
+                  <div className="flex items-center gap-4">
+                    <Skeleton className="h-3 w-24" />
+                    <Skeleton className="h-3 w-16" />
                   </div>
                 </div>
-              ))}
-            </div>
+                {/* Mini chart skeleton */}
+                <Skeleton className="w-24 h-10 rounded" />
+                {/* Trend icon skeleton */}
+                <Skeleton className="h-4 w-4 rounded-full" />
+              </div>
+            ))}
           </div>
         ) : !data?.page_paths || data.page_paths.length === 0 ? (
           <div className="p-8">
@@ -146,9 +186,7 @@ export function Pages({
                 sessions={pageData.session_count || 0}
                 avgTime={pageData.avg_time_seconds || 0}
                 project={project}
-                startDate={startDate}
-                endDate={endDate}
-                environment={environment}
+                sparkline={sparklinesByPath.get(pageData.page_path)}
               />
             ))}
           </div>

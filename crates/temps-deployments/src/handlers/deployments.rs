@@ -1,11 +1,15 @@
 use std::sync::Arc;
 
+use super::audit::{
+    ContainerActionAudit, DeploymentCancelledAudit, DeploymentPausedAudit, DeploymentResumedAudit,
+    DeploymentRollbackAudit, DeploymentTeardownAudit, EnvironmentTeardownAudit,
+};
 use super::types::AppState;
 use axum::Router;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, Query, State,
+        Extension, Path, Query, State,
     },
     http::StatusCode,
     response::IntoResponse,
@@ -16,6 +20,7 @@ use futures::stream::{self, StreamExt};
 use futures::SinkExt;
 use temps_auth::permission_guard;
 use temps_auth::RequireAuth;
+use temps_core::{AuditContext, RequestMetadata};
 use tracing::{debug, error, info, warn};
 use utoipa::OpenApi;
 
@@ -350,6 +355,7 @@ pub async fn rollback_to_deployment(
     State(state): State<Arc<AppState>>,
     Path((project_id, deployment_id)): Path<(i32, i32)>,
     RequireAuth(auth): RequireAuth,
+    Extension(metadata): Extension<RequestMetadata>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, DeploymentsCreate);
 
@@ -357,6 +363,19 @@ pub async fn rollback_to_deployment(
         .deployment_service
         .rollback_to_deployment(project_id, deployment_id)
         .await?;
+
+    let audit = DeploymentRollbackAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        project_id,
+        deployment_id,
+    };
+    if let Err(e) = state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to create audit log: {}", e);
+    }
 
     Ok(Json(DeploymentResponse::from_service_deployment(
         deployment,
@@ -383,6 +402,7 @@ pub async fn pause_deployment(
     State(state): State<Arc<AppState>>,
     Path((project_id, deployment_id)): Path<(i32, i32)>,
     RequireAuth(auth): RequireAuth,
+    Extension(metadata): Extension<RequestMetadata>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, DeploymentsDelete);
     info!("Pausing deployment: {:?}", deployment_id);
@@ -391,6 +411,19 @@ pub async fn pause_deployment(
         .deployment_service
         .pause_deployment(project_id, deployment_id)
         .await?;
+
+    let audit = DeploymentPausedAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        project_id,
+        deployment_id,
+    };
+    if let Err(e) = state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to create audit log: {}", e);
+    }
 
     let response = DeploymentStateResponse {
         id: deployment_id,
@@ -420,6 +453,7 @@ pub async fn resume_deployment(
     State(state): State<Arc<AppState>>,
     Path((project_id, deployment_id)): Path<(i32, i32)>,
     RequireAuth(auth): RequireAuth,
+    Extension(metadata): Extension<RequestMetadata>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, DeploymentsCreate);
 
@@ -427,6 +461,19 @@ pub async fn resume_deployment(
         .deployment_service
         .resume_deployment(project_id, deployment_id)
         .await?;
+
+    let audit = DeploymentResumedAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        project_id,
+        deployment_id,
+    };
+    if let Err(e) = state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to create audit log: {}", e);
+    }
 
     let response = DeploymentStateResponse {
         id: deployment_id,
@@ -457,11 +504,12 @@ pub async fn cancel_deployment(
     State(state): State<Arc<AppState>>,
     Path((project_id, deployment_id)): Path<(i32, i32)>,
     RequireAuth(auth): RequireAuth,
+    Extension(metadata): Extension<RequestMetadata>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, DeploymentsDelete);
 
     info!(
-        "🛑 API request to cancel deployment {} for project {} from user",
+        "API request to cancel deployment {} for project {} from user",
         deployment_id, project_id
     );
 
@@ -470,8 +518,21 @@ pub async fn cancel_deployment(
         .cancel_deployment(project_id, deployment_id)
         .await?;
 
+    let audit = DeploymentCancelledAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        project_id,
+        deployment_id,
+    };
+    if let Err(e) = state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to create audit log: {}", e);
+    }
+
     info!(
-        "✅ Deployment {} cancellation request processed successfully",
+        "Deployment {} cancellation request processed successfully",
         deployment_id
     );
 
@@ -503,6 +564,7 @@ pub async fn teardown_deployment(
     State(state): State<Arc<AppState>>,
     Path((project_id, deployment_id)): Path<(i32, i32)>,
     RequireAuth(auth): RequireAuth,
+    Extension(metadata): Extension<RequestMetadata>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, DeploymentsDelete);
 
@@ -519,6 +581,19 @@ pub async fn teardown_deployment(
             error!("Error tearing down deployment: {:?}", e);
             Problem::from(e)
         })?;
+
+    let audit = DeploymentTeardownAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        project_id,
+        deployment_id,
+    };
+    if let Err(e) = state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to create audit log: {}", e);
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -543,6 +618,7 @@ pub async fn teardown_environment(
     State(state): State<Arc<AppState>>,
     Path((project_id, env_id)): Path<(i32, i32)>,
     RequireAuth(auth): RequireAuth,
+    Extension(metadata): Extension<RequestMetadata>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, DeploymentsDelete);
 
@@ -559,6 +635,19 @@ pub async fn teardown_environment(
             error!("Error tearing down environment: {:?}", e);
             Problem::from(e)
         })?;
+
+    let audit = EnvironmentTeardownAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        project_id,
+        environment_id: env_id,
+    };
+    if let Err(e) = state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to create audit log: {}", e);
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -988,7 +1077,7 @@ pub async fn get_deployment_job_logs(
 /// upgrade request.
 ///
 /// **API Client Authentication**: Include API key in Authorization header:
-/// ```
+/// ```text
 /// Authorization: Bearer tk_your_api_key_here
 /// ```
 #[utoipa::path(
@@ -1179,6 +1268,7 @@ pub async fn stop_container(
     State(state): State<Arc<AppState>>,
     Path((project_id, environment_id, container_id)): Path<(i32, i32, String)>,
     RequireAuth(auth): RequireAuth,
+    Extension(metadata): Extension<RequestMetadata>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, EnvironmentsWrite);
 
@@ -1186,6 +1276,21 @@ pub async fn stop_container(
         .deployment_service
         .stop_container(project_id, environment_id, container_id.clone())
         .await?;
+
+    let audit = ContainerActionAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        project_id,
+        environment_id,
+        container_id: container_id.clone(),
+        action: "stop".to_string(),
+    };
+    if let Err(e) = state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to create audit log: {}", e);
+    }
 
     let response = crate::handlers::types::ContainerActionResponse {
         container_id: container_id.clone(),
@@ -1218,6 +1323,7 @@ pub async fn start_container(
     State(state): State<Arc<AppState>>,
     Path((project_id, environment_id, container_id)): Path<(i32, i32, String)>,
     RequireAuth(auth): RequireAuth,
+    Extension(metadata): Extension<RequestMetadata>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, EnvironmentsWrite);
 
@@ -1225,6 +1331,21 @@ pub async fn start_container(
         .deployment_service
         .start_container(project_id, environment_id, container_id.clone())
         .await?;
+
+    let audit = ContainerActionAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        project_id,
+        environment_id,
+        container_id: container_id.clone(),
+        action: "start".to_string(),
+    };
+    if let Err(e) = state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to create audit log: {}", e);
+    }
 
     let response = crate::handlers::types::ContainerActionResponse {
         container_id: container_id.clone(),
@@ -1257,6 +1378,7 @@ pub async fn restart_container(
     State(state): State<Arc<AppState>>,
     Path((project_id, environment_id, container_id)): Path<(i32, i32, String)>,
     RequireAuth(auth): RequireAuth,
+    Extension(metadata): Extension<RequestMetadata>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, EnvironmentsWrite);
 
@@ -1264,6 +1386,21 @@ pub async fn restart_container(
         .deployment_service
         .restart_container(project_id, environment_id, container_id.clone())
         .await?;
+
+    let audit = ContainerActionAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        project_id,
+        environment_id,
+        container_id: container_id.clone(),
+        action: "restart".to_string(),
+    };
+    if let Err(e) = state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to create audit log: {}", e);
+    }
 
     let response = crate::handlers::types::ContainerActionResponse {
         container_id: container_id.clone(),
@@ -1369,14 +1506,10 @@ pub async fn stream_container_metrics(
     // Create an SSE stream that polls metrics at regular intervals
     let sse_stream = {
         let service = service.clone();
-        let p_id = p_id.clone();
-        let e_id = e_id.clone();
         let c_id = c_id.clone();
 
         stream::unfold(tokio::time::interval(interval), move |mut ticker| {
             let service = service.clone();
-            let p_id = p_id.clone();
-            let e_id = e_id.clone();
             let c_id = c_id.clone();
 
             async move {
@@ -1464,6 +1597,7 @@ pub async fn get_activity_graph(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use axum::Router;
     use futures::StreamExt;
     use std::sync::Arc;
@@ -1473,6 +1607,172 @@ mod tests {
     use temps_logs::{DockerLogService, LogService};
     use tokio::time::{timeout, Duration};
     use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
+
+    #[derive(Clone)]
+    struct MockAuditLogger;
+
+    #[async_trait]
+    impl temps_core::AuditLogger for MockAuditLogger {
+        async fn create_audit_log(
+            &self,
+            _operation: &dyn temps_core::AuditOperation,
+        ) -> Result<(), anyhow::Error> {
+            Ok(())
+        }
+    }
+
+    struct MockImageBuilder;
+
+    #[async_trait]
+    impl temps_deployer::ImageBuilder for MockImageBuilder {
+        async fn build_image(
+            &self,
+            _request: temps_deployer::BuildRequest,
+        ) -> Result<temps_deployer::BuildResult, temps_deployer::BuilderError> {
+            unimplemented!("mock")
+        }
+        async fn build_image_with_callback(
+            &self,
+            _request: temps_deployer::BuildRequestWithCallback,
+        ) -> Result<temps_deployer::BuildResult, temps_deployer::BuilderError> {
+            unimplemented!("mock")
+        }
+        async fn import_image(
+            &self,
+            _image_path: std::path::PathBuf,
+            _tag: &str,
+        ) -> Result<String, temps_deployer::BuilderError> {
+            unimplemented!("mock")
+        }
+        async fn extract_from_image(
+            &self,
+            _image_name: &str,
+            _source_path: &str,
+            _destination_path: &std::path::Path,
+        ) -> Result<(), temps_deployer::BuilderError> {
+            unimplemented!("mock")
+        }
+        async fn list_images(&self) -> Result<Vec<String>, temps_deployer::BuilderError> {
+            Ok(vec![])
+        }
+        async fn remove_image(
+            &self,
+            _image_name: &str,
+        ) -> Result<(), temps_deployer::BuilderError> {
+            Ok(())
+        }
+        async fn inspect_image(
+            &self,
+            _image_name: &str,
+        ) -> Result<temps_deployer::ImageInfo, temps_deployer::BuilderError> {
+            Ok(temps_deployer::ImageInfo {
+                id: "sha256:mock".to_string(),
+                architecture: "amd64".to_string(),
+                os: "linux".to_string(),
+                platform: "linux/amd64".to_string(),
+                size_bytes: 0,
+                tags: vec![],
+                created: None,
+                working_dir: None,
+            })
+        }
+        fn get_native_platform(&self) -> String {
+            "linux/amd64".to_string()
+        }
+    }
+
+    struct MockGitProviderManager;
+
+    #[async_trait]
+    impl temps_git::GitProviderManagerTrait for MockGitProviderManager {
+        async fn clone_repository(
+            &self,
+            _connection_id: i32,
+            _repo_owner: &str,
+            _repo_name: &str,
+            _target_dir: &std::path::Path,
+            _branch_or_ref: Option<&str>,
+        ) -> Result<(), temps_git::GitProviderManagerError> {
+            unimplemented!("mock")
+        }
+        async fn get_repository_info(
+            &self,
+            _connection_id: i32,
+            _repo_owner: &str,
+            _repo_name: &str,
+        ) -> Result<temps_git::RepositoryInfo, temps_git::GitProviderManagerError> {
+            unimplemented!("mock")
+        }
+        async fn download_archive(
+            &self,
+            _connection_id: i32,
+            _repo_owner: &str,
+            _repo_name: &str,
+            _branch_or_ref: &str,
+            _archive_path: &std::path::Path,
+        ) -> Result<(), temps_git::GitProviderManagerError> {
+            unimplemented!("mock")
+        }
+    }
+
+    struct MockStaticDeployer;
+
+    #[async_trait]
+    impl temps_deployer::static_deployer::StaticDeployer for MockStaticDeployer {
+        async fn deploy(
+            &self,
+            _request: temps_deployer::static_deployer::StaticDeployRequest,
+        ) -> Result<
+            temps_deployer::static_deployer::StaticDeployResult,
+            temps_deployer::static_deployer::StaticDeployError,
+        > {
+            unimplemented!("mock")
+        }
+        async fn get_deployment(
+            &self,
+            _project_slug: &str,
+            _environment_slug: &str,
+            _deployment_slug: &str,
+        ) -> Result<
+            temps_deployer::static_deployer::StaticDeploymentInfo,
+            temps_deployer::static_deployer::StaticDeployError,
+        > {
+            unimplemented!("mock")
+        }
+        async fn list_files(
+            &self,
+            _project_slug: &str,
+            _environment_slug: &str,
+            _deployment_slug: &str,
+        ) -> Result<
+            Vec<temps_deployer::static_deployer::FileInfo>,
+            temps_deployer::static_deployer::StaticDeployError,
+        > {
+            Ok(vec![])
+        }
+        async fn remove(
+            &self,
+            _project_slug: &str,
+            _environment_slug: &str,
+            _deployment_slug: &str,
+        ) -> Result<(), temps_deployer::static_deployer::StaticDeployError> {
+            Ok(())
+        }
+    }
+
+    struct MockCronConfigService;
+
+    #[async_trait]
+    impl crate::jobs::CronConfigService for MockCronConfigService {
+        async fn configure_crons(
+            &self,
+            _project_id: i32,
+            _environment_id: i32,
+            _cron_configs: Vec<crate::jobs::configure_crons::CronConfig>,
+        ) -> Result<(), crate::jobs::configure_crons::CronConfigError> {
+            Ok(())
+        }
+    }
 
     /// Helper to create a mock AuthContext for testing
     fn create_test_auth_context() -> temps_auth::AuthContext {
@@ -1497,6 +1797,21 @@ mod tests {
         temps_auth::AuthContext::new_session(user, temps_auth::Role::Admin)
     }
 
+    /// Helper to create a mock RequestMetadata for testing
+    fn create_test_request_metadata() -> RequestMetadata {
+        RequestMetadata {
+            ip_address: "127.0.0.1".to_string(),
+            user_agent: "test-agent".to_string(),
+            headers: axum::http::HeaderMap::new(),
+            visitor_id_cookie: None,
+            session_id_cookie: None,
+            base_url: "http://127.0.0.1".to_string(),
+            scheme: "http".to_string(),
+            host: "127.0.0.1".to_string(),
+            is_secure: false,
+        }
+    }
+
     #[tokio::test]
     #[ignore] // FIXME: Flaky test - real-time log streaming timing issues. Needs refactoring as integration test
     async fn test_websocket_handler_end_to_end_with_server() {
@@ -1514,62 +1829,7 @@ mod tests {
         let temp_dir = std::env::temp_dir().join(format!("test_ws_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).expect("Failed to create temp dir");
 
-        let log_service = Arc::new(LogService::new(temp_dir.clone()));
-
-        // Create Docker client for logs
-        let docker = Arc::new(
-            bollard::Docker::connect_with_local_defaults().expect("Failed to connect to Docker"),
-        );
-        let docker_log_service = Arc::new(DockerLogService::new(docker.clone()));
-
-        // Create a test ServerConfig
-        let server_config = Arc::new(
-            temps_config::ServerConfig::new(
-                "127.0.0.1:0".to_string(),
-                test_db.database_url.clone(),
-                None,
-                None,
-            )
-            .expect("Failed to create server config"),
-        );
-        let config_service = Arc::new(ConfigService::new(server_config, db.clone()));
-
-        // Create a broadcast queue service
-        let (job_sender, _job_receiver) = tokio::sync::broadcast::channel(100);
-        let queue_service: Arc<dyn temps_core::JobQueue> =
-            Arc::new(temps_queue::BroadcastQueueService::new(job_sender));
-
-        // Create a Docker runtime
-        let deployer: Arc<dyn temps_deployer::ContainerDeployer> = Arc::new(
-            temps_deployer::docker::DockerRuntime::new(docker, false, "temps-test".to_string()),
-        );
-
-        let deployment_service = Arc::new(crate::services::services::DeploymentService::new(
-            db.clone(),
-            log_service.clone(),
-            config_service,
-            queue_service.clone(),
-            docker_log_service,
-            deployer,
-        ));
-
-        let cron_service = Arc::new(
-            crate::services::database_cron_service::DatabaseCronConfigService::new(
-                db.clone(),
-                queue_service.clone(),
-            ),
-        );
-
-        let remote_deployment_service =
-            Arc::new(crate::services::RemoteDeploymentService::new(db.clone()));
-
-        let app_state = Arc::new(AppState {
-            deployment_service,
-            log_service,
-            cron_service,
-            external_deployment_manager: Arc::new(crate::services::ExternalDeploymentManager::new()),
-            remote_deployment_service,
-        });
+        let app_state = create_test_app_state_for_http(db.clone(), temp_dir.clone()).await;
 
         // Create test data in database
         // 1. Create a test project
@@ -1786,62 +2046,8 @@ mod tests {
         let temp_dir = std::env::temp_dir().join(format!("test_ws_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).expect("Failed to create temp dir");
 
-        let log_service = Arc::new(LogService::new(temp_dir.clone()));
-
-        // Create Docker client for logs
-        let docker = Arc::new(
-            bollard::Docker::connect_with_local_defaults().expect("Failed to connect to Docker"),
-        );
-        let docker_log_service = Arc::new(DockerLogService::new(docker.clone()));
-
-        // Create ServerConfig
-        let server_config = Arc::new(
-            temps_config::ServerConfig::new(
-                "127.0.0.1:0".to_string(),
-                test_db.database_url.clone(),
-                None,
-                None,
-            )
-            .expect("Failed to create server config"),
-        );
-        let config_service = Arc::new(ConfigService::new(server_config, db.clone()));
-
-        // Create queue service
-        let (job_sender, _job_receiver) = tokio::sync::broadcast::channel(100);
-        let queue_service: Arc<dyn temps_core::JobQueue> =
-            Arc::new(temps_queue::BroadcastQueueService::new(job_sender));
-
-        // Create deployer
-        let deployer: Arc<dyn temps_deployer::ContainerDeployer> = Arc::new(
-            temps_deployer::docker::DockerRuntime::new(docker, false, "temps-test".to_string()),
-        );
-
-        let deployment_service = Arc::new(crate::services::services::DeploymentService::new(
-            db.clone(),
-            log_service.clone(),
-            config_service,
-            queue_service.clone(),
-            docker_log_service,
-            deployer,
-        ));
-
-        let cron_service = Arc::new(
-            crate::services::database_cron_service::DatabaseCronConfigService::new(
-                db.clone(),
-                queue_service.clone(),
-            ),
-        );
-
-        let remote_deployment_service =
-            Arc::new(crate::services::RemoteDeploymentService::new(db.clone()));
-
-        let app_state = Arc::new(AppState {
-            deployment_service,
-            log_service: log_service.clone(),
-            cron_service,
-            external_deployment_manager: Arc::new(crate::services::ExternalDeploymentManager::new()),
-            remote_deployment_service,
-        });
+        let app_state = create_test_app_state_for_http(db.clone(), temp_dir.clone()).await;
+        let log_service = app_state.log_service.clone();
 
         // Create test data
         let project = projects::ActiveModel {
@@ -2057,62 +2263,8 @@ mod tests {
         let temp_dir = std::env::temp_dir().join(format!("test_ws_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).expect("Failed to create temp dir");
 
-        let log_service = Arc::new(LogService::new(temp_dir.clone()));
-
-        // Create Docker client
-        let docker = Arc::new(
-            bollard::Docker::connect_with_local_defaults().expect("Failed to connect to Docker"),
-        );
-        let docker_log_service = Arc::new(DockerLogService::new(docker.clone()));
-
-        // Create ServerConfig
-        let server_config = Arc::new(
-            temps_config::ServerConfig::new(
-                "127.0.0.1:0".to_string(),
-                test_db.database_url.clone(),
-                None,
-                None,
-            )
-            .expect("Failed to create server config"),
-        );
-        let config_service = Arc::new(ConfigService::new(server_config, db.clone()));
-
-        // Create queue service
-        let (job_sender, _job_receiver) = tokio::sync::broadcast::channel(100);
-        let queue_service: Arc<dyn temps_core::JobQueue> =
-            Arc::new(temps_queue::BroadcastQueueService::new(job_sender));
-
-        // Create deployer
-        let deployer: Arc<dyn temps_deployer::ContainerDeployer> = Arc::new(
-            temps_deployer::docker::DockerRuntime::new(docker, false, "temps-test".to_string()),
-        );
-
-        let deployment_service = Arc::new(crate::services::services::DeploymentService::new(
-            db.clone(),
-            log_service.clone(),
-            config_service,
-            queue_service.clone(),
-            docker_log_service,
-            deployer,
-        ));
-
-        let cron_service = Arc::new(
-            crate::services::database_cron_service::DatabaseCronConfigService::new(
-                db.clone(),
-                queue_service.clone(),
-            ),
-        );
-
-        let remote_deployment_service =
-            Arc::new(crate::services::RemoteDeploymentService::new(db.clone()));
-
-        let app_state = Arc::new(AppState {
-            deployment_service,
-            log_service: log_service.clone(),
-            cron_service,
-            external_deployment_manager: Arc::new(crate::services::ExternalDeploymentManager::new()),
-            remote_deployment_service,
-        });
+        let app_state = create_test_app_state_for_http(db.clone(), temp_dir.clone()).await;
+        let log_service = app_state.log_service.clone();
 
         // Create test data
         let project = projects::ActiveModel {
@@ -2361,14 +2513,17 @@ mod tests {
         let queue_service: Arc<dyn temps_core::JobQueue> =
             Arc::new(temps_queue::BroadcastQueueService::new(job_sender));
 
-        let deployer: Arc<dyn temps_deployer::ContainerDeployer> = Arc::new(
-            temps_deployer::docker::DockerRuntime::new(docker, false, "temps-test".to_string()),
-        );
+        let deployer: Arc<dyn temps_deployer::ContainerDeployer> =
+            Arc::new(temps_deployer::docker::DockerRuntime::new(
+                docker.clone(),
+                false,
+                "temps-test".to_string(),
+            ));
 
         let deployment_service = Arc::new(crate::services::services::DeploymentService::new(
             db.clone(),
             log_service.clone(),
-            config_service,
+            config_service.clone(),
             queue_service.clone(),
             docker_log_service,
             deployer,
@@ -2384,12 +2539,98 @@ mod tests {
         let remote_deployment_service =
             Arc::new(crate::services::RemoteDeploymentService::new(db.clone()));
 
+        let encryption_service = Arc::new(
+            temps_core::EncryptionService::new(
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            )
+            .expect("Failed to create test encryption service"),
+        );
+
+        let external_service_manager = Arc::new(temps_providers::ExternalServiceManager::new(
+            db.clone(),
+            encryption_service.clone(),
+            docker.clone(),
+        ));
+
+        let dsn_service = Arc::new(temps_error_tracking::DSNService::new(db.clone()));
+
+        let workflow_planner = Arc::new(crate::services::workflow_planner::WorkflowPlanner::new(
+            db.clone(),
+            log_service.clone(),
+            external_service_manager,
+            config_service.clone(),
+            dsn_service,
+            encryption_service,
+        ));
+
+        let rustfs_service = Arc::new(temps_providers::externalsvc::RustfsService::new(
+            "test".to_string(),
+            docker,
+            Arc::new(
+                temps_core::EncryptionService::new(
+                    "0000000000000000000000000000000000000000000000000000000000000000",
+                )
+                .expect("enc"),
+            ),
+        ));
+        let blob_service = Arc::new(temps_blob::BlobService::new(rustfs_service));
+
+        // Use noop screenshot provider via env var
+        // SAFETY: This is test-only code; tests are run single-threaded or this env var
+        // is idempotent (always set to the same value).
+        unsafe {
+            std::env::set_var("TEMPS_SCREENSHOT_PROVIDER", "noop");
+        }
+        let screenshot_service = Arc::new(
+            temps_screenshots::ScreenshotService::new(config_service)
+                .await
+                .expect("Failed to create screenshot service"),
+        );
+
+        let workflow_executor = Arc::new(crate::services::WorkflowExecutionService::new(
+            db.clone(),
+            queue_service.clone(),
+            Arc::new(MockGitProviderManager) as Arc<dyn temps_git::GitProviderManagerTrait>,
+            Arc::new(MockImageBuilder) as Arc<dyn temps_deployer::ImageBuilder>,
+            Arc::new(temps_deployer::docker::DockerRuntime::new(
+                Arc::new(bollard::Docker::connect_with_local_defaults().expect("docker")),
+                false,
+                "temps-test".to_string(),
+            )) as Arc<dyn temps_deployer::ContainerDeployer>,
+            Arc::new(MockStaticDeployer)
+                as Arc<dyn temps_deployer::static_deployer::StaticDeployer>,
+            log_service.clone(),
+            Arc::new(MockCronConfigService) as Arc<dyn crate::jobs::CronConfigService>,
+            Arc::new(ConfigService::new(
+                Arc::new(
+                    temps_config::ServerConfig::new(
+                        "127.0.0.1:0".to_string(),
+                        "postgresql://test:test@localhost:5432/test".to_string(),
+                        None,
+                        None,
+                    )
+                    .expect("config"),
+                ),
+                db.clone(),
+            )),
+            screenshot_service,
+            Arc::new(bollard::Docker::connect_with_local_defaults().expect("docker")),
+        ));
+
         Arc::new(AppState {
             deployment_service,
             log_service,
             cron_service,
             external_deployment_manager: Arc::new(crate::services::ExternalDeploymentManager::new()),
             remote_deployment_service,
+            db: db.clone(),
+            workflow_planner,
+            workflow_executor,
+            queue_service,
+            blob_service,
+            data_dir: temp_dir,
+            image_builder: Arc::new(MockImageBuilder) as Arc<dyn temps_deployer::ImageBuilder>,
+            audit_service: Arc::new(MockAuditLogger) as Arc<dyn temps_core::AuditLogger>,
         })
     }
 
@@ -2923,6 +3164,7 @@ mod tests {
             |mut req: Request, next: axum::middleware::Next| async move {
                 let auth_context = create_test_auth_context();
                 req.extensions_mut().insert(auth_context);
+                req.extensions_mut().insert(create_test_request_metadata());
                 next.run(req).await
             },
         );
@@ -3049,6 +3291,7 @@ mod tests {
             |mut req: Request, next: axum::middleware::Next| async move {
                 let auth_context = create_test_auth_context();
                 req.extensions_mut().insert(auth_context);
+                req.extensions_mut().insert(create_test_request_metadata());
                 next.run(req).await
             },
         );
@@ -3154,6 +3397,7 @@ mod tests {
             |mut req: Request, next: axum::middleware::Next| async move {
                 let auth_context = create_test_auth_context();
                 req.extensions_mut().insert(auth_context);
+                req.extensions_mut().insert(create_test_request_metadata());
                 next.run(req).await
             },
         );
@@ -3243,6 +3487,7 @@ mod tests {
             |mut req: Request, next: axum::middleware::Next| async move {
                 let auth_context = create_test_auth_context();
                 req.extensions_mut().insert(auth_context);
+                req.extensions_mut().insert(create_test_request_metadata());
                 next.run(req).await
             },
         );

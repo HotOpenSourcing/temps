@@ -215,6 +215,12 @@ async function waitForDeployment(projectId: number, environmentId?: number): Pro
       if (deployment.url) {
         keyValue('URL', colors.primary(deployment.url))
       }
+      const envDomains = deployment.environment?.domains || []
+      const firstDomain = envDomains[0]
+      if (firstDomain) {
+        const envUrl = firstDomain.startsWith('http') ? firstDomain : `https://${firstDomain}`
+        keyValue('Environment', colors.primary(envUrl))
+      }
       newline()
       return
     }

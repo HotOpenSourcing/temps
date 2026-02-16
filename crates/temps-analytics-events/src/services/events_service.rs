@@ -1,11 +1,13 @@
 use sea_orm::{DatabaseBackend, DatabaseConnection, FromQueryResult, Statement};
+use std::collections::HashMap;
 use std::sync::Arc;
 use temps_core::{DBDateTime, UtcDateTime};
 use thiserror::Error;
 
 use crate::types::{
-    AggregationLevel, AnalyticsSessionEventsResponse, EventCount, EventTimeline,
-    EventTypeBreakdown, PropertyBreakdownItem, PropertyBreakdownResponse, PropertyTimelineItem,
+    AggregationLevel, AnalyticsSessionEventsResponse, DashboardProjectsAnalyticsResponse,
+    EventCount, EventTimeline, EventTypeBreakdown, ProjectDashboardAnalytics,
+    PropertyBreakdownItem, PropertyBreakdownResponse, PropertyTimelineItem,
     PropertyTimelineResponse, SessionEvent, UniqueCountsResponse,
 };
 
@@ -935,6 +937,205 @@ WHERE project_id = $1
         })
     }
 
+    /// Get dashboard analytics for multiple projects in a single batch.
+    /// Returns unique visitor counts, previous-period comparison, and hourly sparkline.
+    ///
+    /// Uses a hybrid approach:
+    /// - **Current period**: queries raw `events` table for exact accuracy (the continuous
+    ///   aggregate has a 1-hour end_offset gap, so recent data would be missing).
+    ///   For a 24h window this is fast with the `idx_events_project_timestamp` index.
+    /// - **Previous period**: queries `events_hourly` continuous aggregate for speed
+    ///   (older data is fully materialized, approximate is fine for trend comparison).
+    pub async fn get_dashboard_projects_analytics(
+        &self,
+        project_ids: &[i32],
+        start_date: UtcDateTime,
+        end_date: UtcDateTime,
+    ) -> Result<DashboardProjectsAnalyticsResponse, EventsError> {
+        if project_ids.is_empty() {
+            return Ok(DashboardProjectsAnalyticsResponse {
+                projects: HashMap::new(),
+            });
+        }
+
+        // Compute previous period: same duration, shifted back.
+        // e.g. if current = last 24h, previous = 24h-48h ago.
+        let period_duration = end_date - start_date;
+        let prev_start = start_date - period_duration;
+        let prev_end = start_date;
+
+        // Build the $N placeholders for the IN clause: $3, $4, $5, ...
+        let id_placeholders: Vec<String> = project_ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("${}", i + 3))
+            .collect();
+        let in_clause = id_placeholders.join(", ");
+
+        // Base params: start_date, end_date, then all project_ids
+        let mut base_values: Vec<sea_orm::Value> = vec![start_date.into(), end_date.into()];
+        for &pid in project_ids {
+            base_values.push(pid.into());
+        }
+
+        // Previous period params: prev_start, prev_end, then all project_ids
+        let mut prev_values: Vec<sea_orm::Value> = vec![prev_start.into(), prev_end.into()];
+        for &pid in project_ids {
+            prev_values.push(pid.into());
+        }
+
+        // Query 1: Unique visitor counts per project (current period — raw events for accuracy)
+        // The continuous aggregate has a 1-hour end_offset gap, so recent data would be missing.
+        // For a 24h window this query is fast with the idx_events_project_timestamp index.
+        let current_counts_sql = format!(
+            r#"
+            SELECT
+                project_id,
+                COUNT(DISTINCT visitor_id) FILTER (WHERE visitor_id IS NOT NULL)::bigint as count
+            FROM events
+            WHERE timestamp >= $1 AND timestamp <= $2
+              AND project_id IN ({in_clause})
+            GROUP BY project_id
+            "#,
+        );
+
+        #[derive(FromQueryResult)]
+        struct ProjectCount {
+            project_id: i32,
+            count: i64,
+        }
+
+        let counts = ProjectCount::find_by_statement(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            &current_counts_sql,
+            base_values.clone(),
+        ))
+        .all(self.db.as_ref())
+        .await?;
+
+        let counts_map: HashMap<i32, i64> = counts
+            .into_iter()
+            .map(|r| (r.project_id, r.count))
+            .collect();
+
+        // Query 2: Unique visitor counts per project (previous period — continuous aggregate)
+        // Previous period is older data, fully covered by the aggregate. Approximate is fine
+        // for trend comparison (SUM of hourly distincts may slightly overcount).
+        let prev_counts_sql = format!(
+            r#"
+            SELECT
+                project_id,
+                COALESCE(SUM(unique_visitors), 0)::bigint as count
+            FROM events_hourly
+            WHERE bucket >= $1 AND bucket <= $2
+              AND project_id IN ({in_clause})
+            GROUP BY project_id
+            "#,
+        );
+
+        let prev_counts = ProjectCount::find_by_statement(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            &prev_counts_sql,
+            prev_values,
+        ))
+        .all(self.db.as_ref())
+        .await?;
+
+        let prev_counts_map: HashMap<i32, i64> = prev_counts
+            .into_iter()
+            .map(|r| (r.project_id, r.count))
+            .collect();
+
+        // Query 3: Hourly sparkline data per project (current period — raw events for accuracy)
+        let gapfill_start_idx = project_ids.len() + 3;
+        let gapfill_end_idx = gapfill_start_idx + 1;
+
+        let hourly_sql = format!(
+            r#"
+            SELECT
+                p.project_id,
+                sub.bucket::timestamptz as bucket,
+                COALESCE(sub.count, 0) as count
+            FROM unnest(ARRAY[{in_clause}]) AS p(project_id)
+            CROSS JOIN LATERAL (
+                SELECT
+                    time_bucket_gapfill('1 hour', timestamp, ${gapfill_start_idx}::timestamptz, ${gapfill_end_idx}::timestamptz) as bucket,
+                    COALESCE(COUNT(DISTINCT visitor_id) FILTER (WHERE visitor_id IS NOT NULL), 0) as count
+                FROM events
+                WHERE project_id = p.project_id
+                  AND timestamp >= $1
+                  AND timestamp <= $2
+                  AND event_type = 'page_view'
+                GROUP BY bucket
+            ) sub
+            ORDER BY p.project_id, sub.bucket ASC
+            "#,
+        );
+
+        // Append gapfill start/end params
+        let mut hourly_values = base_values;
+        hourly_values.push(start_date.into());
+        hourly_values.push(end_date.into());
+
+        #[derive(FromQueryResult)]
+        struct ProjectHourlyRow {
+            project_id: i32,
+            bucket: UtcDateTime,
+            count: i64,
+        }
+
+        let hourly_rows = ProjectHourlyRow::find_by_statement(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            &hourly_sql,
+            hourly_values,
+        ))
+        .all(self.db.as_ref())
+        .await?;
+
+        // Group hourly rows by project_id
+        let mut hourly_map: HashMap<i32, Vec<EventTimeline>> = HashMap::new();
+        for row in hourly_rows {
+            hourly_map
+                .entry(row.project_id)
+                .or_default()
+                .push(EventTimeline {
+                    date: row.bucket,
+                    count: row.count,
+                });
+        }
+
+        // Build final response with trend calculation
+        let mut projects = HashMap::new();
+        for &pid in project_ids {
+            let current = counts_map.get(&pid).copied().unwrap_or(0);
+            let previous = prev_counts_map.get(&pid).copied().unwrap_or(0);
+
+            // Calculate trend percentage: None if previous was 0 (no baseline)
+            let trend_percentage = if previous > 0 {
+                Some(((current - previous) as f64 / previous as f64) * 100.0)
+            } else if current > 0 {
+                // Had zero visitors before, now has some — show as 100% growth
+                Some(100.0)
+            } else {
+                // Both zero — no trend to show
+                None
+            };
+
+            projects.insert(
+                pid.to_string(),
+                ProjectDashboardAnalytics {
+                    project_id: pid,
+                    unique_visitors: current,
+                    previous_unique_visitors: previous,
+                    trend_percentage,
+                    hourly_visits: hourly_map.remove(&pid).unwrap_or_default(),
+                },
+            );
+        }
+
+        Ok(DashboardProjectsAnalyticsResponse { projects })
+    }
+
     /// Get aggregated metrics by time bucket using TimescaleDB time_bucket_gapfill
     /// Returns counts for visitors/sessions/events grouped by customizable time buckets
     #[allow(clippy::too_many_arguments)]
@@ -1380,7 +1581,7 @@ mod tests {
         };
 
         // Use TimescaleDB with pgvector support
-        let postgres_image = GenericImage::new("timescale/timescaledb", "latest-pg17")
+        let postgres_image = GenericImage::new("timescale/timescaledb-ha", "pg18")
             .with_exposed_port(ContainerPort::Tcp(5432))
             .with_wait_for(WaitFor::message_on_stderr(
                 "database system is ready to accept connections",
@@ -1770,7 +1971,7 @@ mod tests {
         };
 
         // Setup PostgreSQL test container with TimescaleDB
-        let postgres_image = GenericImage::new("timescale/timescaledb", "latest-pg17")
+        let postgres_image = GenericImage::new("timescale/timescaledb-ha", "pg18")
             .with_exposed_port(ContainerPort::Tcp(5432))
             .with_wait_for(WaitFor::message_on_stderr(
                 "database system is ready to accept connections",

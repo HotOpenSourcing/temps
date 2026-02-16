@@ -1,9 +1,10 @@
 use std::sync::Arc;
 use uuid::Uuid;
 
+use super::audit::{DeploymentOperationAudit, ExternalImagePushedAudit};
 use super::types::AppState;
 use axum::{
-    extract::{Path, State},
+    extract::{Extension, Path, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -13,7 +14,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use temps_auth::{permission_guard, RequireAuth};
 use temps_core::problemdetails::{self, Problem};
-use temps_core::UtcDateTime;
+use temps_core::{AuditContext, RequestMetadata, UtcDateTime};
 use tracing::{debug, error, info};
 use utoipa::OpenApi;
 
@@ -101,6 +102,7 @@ pub async fn push_external_image(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(project_id): Path<i32>,
+    Extension(metadata): Extension<RequestMetadata>,
     Json(req): Json<PushImageRequest>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, DeploymentsCreate);
@@ -134,6 +136,20 @@ pub async fn push_external_image(
                 "External image registered for project {}: {}",
                 project_id, req.image_ref
             );
+
+            let audit = ExternalImagePushedAudit {
+                context: AuditContext {
+                    user_id: auth.user_id(),
+                    ip_address: Some(metadata.ip_address.clone()),
+                    user_agent: metadata.user_agent.clone(),
+                },
+                project_id,
+                image_ref: req.image_ref,
+            };
+            if let Err(e) = state.audit_service.create_audit_log(&audit).await {
+                error!("Failed to create audit log: {}", e);
+            }
+
             Ok((
                 StatusCode::CREATED,
                 Json(ExternalImageResponse::from(image)),
@@ -230,6 +246,7 @@ pub async fn execute_deployment_operation(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<AppState>>,
     Path((project_id, deployment_id)): Path<(i32, String)>,
+    Extension(metadata): Extension<RequestMetadata>,
     Json(req): Json<ExecuteOperationRequest>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, DeploymentsWrite);
@@ -255,7 +272,7 @@ pub async fn execute_deployment_operation(
     let result = OperationResult {
         operation,
         success: true,
-        message: format!("Operation executed successfully"),
+        message: "Operation executed successfully".to_string(),
         data: Some(serde_json::json!({
             "deployment_id": deployment_id,
             "project_id": project_id,
@@ -273,6 +290,20 @@ pub async fn execute_deployment_operation(
         return Err(problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
             .with_title("Operation Failed")
             .with_detail(&err));
+    }
+
+    let audit = DeploymentOperationAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        project_id,
+        deployment_id: deployment_id.clone(),
+        operation: req.operation.clone(),
+    };
+    if let Err(e) = state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to create audit log: {}", e);
     }
 
     info!(

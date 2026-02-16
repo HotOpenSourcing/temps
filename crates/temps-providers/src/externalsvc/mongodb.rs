@@ -248,6 +248,7 @@ impl MongodbService {
                 typ: Some(bollard::models::MountTypeEnum::VOLUME),
                 ..Default::default()
             }]),
+            log_config: Some(crate::utils::default_service_log_config()),
             ..Default::default()
         };
 
@@ -326,9 +327,10 @@ impl MongodbService {
     }
 
     async fn wait_for_container_health(&self, docker: &Docker, container_id: &str) -> Result<()> {
-        let mut delay = Duration::from_millis(100);
+        let mut delay = Duration::from_millis(500);
         let mut total_wait = Duration::from_secs(0);
-        let max_wait = Duration::from_secs(60);
+        let max_wait = Duration::from_secs(90);
+        let max_delay = Duration::from_secs(2);
 
         while total_wait < max_wait {
             let info = docker
@@ -341,10 +343,19 @@ impl MongodbService {
                 {
                     return Ok(());
                 }
+                if state.status == Some(bollard::models::ContainerStateStatusEnum::EXITED)
+                    || state.status == Some(bollard::models::ContainerStateStatusEnum::DEAD)
+                {
+                    let exit_code = state.exit_code.unwrap_or(-1);
+                    return Err(anyhow::anyhow!(
+                        "MongoDB container exited unexpectedly with code {}",
+                        exit_code
+                    ));
+                }
             }
             sleep(delay).await;
             total_wait += delay;
-            delay = delay.mul_f32(1.5);
+            delay = std::cmp::min(delay.mul_f32(1.5), max_delay);
         }
 
         Err(anyhow::anyhow!("MongoDB container health check timed out"))
@@ -1425,12 +1436,12 @@ mod tests {
             let field = properties
                 .get(field_name)
                 .and_then(|v| v.as_object())
-                .expect(&format!("{} field should exist", field_name));
+                .unwrap_or_else(|| panic!("{} field should exist", field_name));
 
             let is_editable = field
                 .get("x-editable")
                 .and_then(|v| v.as_bool())
-                .expect(&format!("{} should have x-editable property", field_name));
+                .unwrap_or_else(|| panic!("{} should have x-editable property", field_name));
 
             assert_eq!(
                 is_editable, should_be_editable,
@@ -1581,10 +1592,10 @@ mod tests {
             std::collections::HashMap::new();
         // MongoDB requires username, password, port, database
 
-        assert!(credentials.get("username").is_none());
-        assert!(credentials.get("password").is_none());
-        assert!(credentials.get("port").is_none());
-        assert!(credentials.get("database").is_none());
+        assert!(!credentials.contains_key("username"));
+        assert!(!credentials.contains_key("password"));
+        assert!(!credentials.contains_key("port"));
+        assert!(!credentials.contains_key("database"));
     }
 
     #[test]
@@ -1628,6 +1639,7 @@ mod tests {
     /// Test backup and restore of MongoDB to/from S3 using real Docker containers
     /// This test uses MongoDB and MinIO (S3-compatible) containers
     /// Demonstrates the use of test_utils for backup/restore testing
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     async fn test_mongodb_backup_and_restore_to_s3() {
         use super::super::test_utils::{
@@ -1710,7 +1722,7 @@ mod tests {
             .get_mongo_client()
             .await
             .expect("Failed to get MongoDB client");
-        let db = client.database(&database);
+        let db = client.database(database);
         let collection = db.collection::<mongodb::bson::Document>("test_collection");
 
         // Insert test documents
@@ -1779,12 +1791,12 @@ mod tests {
         // Step 6: Drop the database to simulate data loss
         println!("Step 6: Dropping database to simulate data loss...");
         service
-            .drop_database(&database)
+            .drop_database(database)
             .await
             .expect("Failed to drop database");
 
         // Verify data is gone
-        let db_after_drop = client.database(&database);
+        let db_after_drop = client.database(database);
         let collection_after_drop =
             db_after_drop.collection::<mongodb::bson::Document>("test_collection");
         let count_after_drop = collection_after_drop
@@ -1809,7 +1821,7 @@ mod tests {
 
         // Step 8: Verify restored data
         println!("Step 8: Verifying restored data...");
-        let db_after_restore = client.database(&database);
+        let db_after_restore = client.database(database);
         let collection_after_restore =
             db_after_restore.collection::<mongodb::bson::Document>("test_collection");
         let count_after_restore = collection_after_restore

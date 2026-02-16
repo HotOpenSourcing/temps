@@ -13,6 +13,7 @@ temps-core = { path = "../temps-core" }
 temps-database = { path = "../temps-database" }
 temps-embeddings = { path = "../temps-embeddings" }
 temps-entities = { path = "../temps-entities" }
+temps-geo = { path = "../temps-geo" }
 temps-projects = { path = "../temps-projects" }
 temps-config = { path = "../temps-config" }
 serde = { workspace = true }
@@ -43,10 +44,13 @@ relay-event-schema = { git = "https://github.com/getsentry/relay", rev = "ca7e20
 relay-protocol = { git = "https://github.com/getsentry/relay", rev = "ca7e20d" }
 relay-protocol-derive = { git = "https://github.com/getsentry/relay", rev = "ca7e20d" }
 
+# Source map symbolication
+sourcemap = "9"
+
 # Additional dependencies for Sentry integration
 flate2 = "1.0"  # For gzip decompression
 debugid = { version = "0.8", features = ["serde"] }
-time = { version = "0.3", features = ["parsing", "formatting", "macros", "serde"] }
+time = { version = "0.3.47", features = ["parsing", "formatting", "macros", "serde"] }
 
 [dev-dependencies]
 temps-migrations = { path = "../temps-migrations" }

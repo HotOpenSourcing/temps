@@ -62,7 +62,46 @@ impl GitLabProvider {
             .user_agent("Temps-Engine/1.0")
             .timeout(std::time::Duration::from_secs(30))
             .build()
-            .unwrap()
+            .expect("Failed to build reqwest client with static config")
+    }
+
+    /// Retry configuration for GitLab API calls.
+    fn retry_config() -> temps_core::retry::RetryConfig {
+        temps_core::retry::RetryConfig::new(3)
+            .with_base_delay(std::time::Duration::from_secs(1))
+            .with_max_delay(std::time::Duration::from_secs(10))
+    }
+
+    /// Send an HTTP request with retry logic for transient failures.
+    async fn send_with_retry<F>(
+        &self,
+        mut build_request: F,
+    ) -> Result<reqwest::Response, GitProviderError>
+    where
+        F: FnMut() -> reqwest::RequestBuilder,
+    {
+        Self::retry_config()
+            .retry(|| {
+                let request = build_request();
+                async move {
+                    let response = request
+                        .send()
+                        .await
+                        .map_err(|e| GitProviderError::ApiError(e.to_string()))?;
+
+                    let status = response.status();
+                    if status.is_server_error() || status.as_u16() == 429 {
+                        let error_text = response.text().await.unwrap_or_default();
+                        return Err(GitProviderError::ApiError(format!(
+                            "HTTP {}: {}",
+                            status, error_text
+                        )));
+                    }
+
+                    Ok(response)
+                }
+            })
+            .await
     }
 
     fn get_headers(&self, access_token: &str) -> reqwest::header::HeaderMap {
@@ -115,10 +154,13 @@ impl GitLabProvider {
             ("grant_type", "refresh_token"),
         ];
 
-        let response = client
-            .post(format!("{}/oauth/token", self.base_url))
-            .form(&params)
-            .send()
+        let url = format!("{}/oauth/token", self.base_url);
+        let params_owned: Vec<(String, String)> = params
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let response = self
+            .send_with_retry(|| client.post(&url).form(&params_owned))
             .await
             .map_err(|e| GitProviderError::ApiError(format!("Failed to refresh token: {}", e)))?;
 
@@ -142,29 +184,31 @@ impl GitLabProvider {
         Ok((token_response.access_token, token_response.refresh_token))
     }
 
-    /// Validate a GitLab access token by making a simple API call
-    async fn validate_token(&self, access_token: &str) -> Result<bool, GitProviderError> {
+    /// Validate a GitLab access token by making a simple API call.
+    /// Note: This method does NOT use send_with_retry because 401/403/429
+    /// responses are meaningful status codes, not transient errors.
+    async fn validate_token_internal(&self, access_token: &str) -> Result<bool, GitProviderError> {
         let client = self.get_client();
         let headers = self.get_headers(access_token);
 
         // Use the /user endpoint to validate the token
-        let response = client
-            .get(format!("{}/api/v4/user", self.base_url))
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|e| GitProviderError::ApiError(format!("Failed to validate token: {}", e)))?;
+        let url = format!("{}/api/v4/user", self.base_url);
+        let response = self
+            .send_with_retry(|| client.get(&url).headers(headers.clone()))
+            .await;
+
+        // send_with_retry returns Err for 5xx/429 — handle the retry-level error
+        let response = match response {
+            Ok(resp) => resp,
+            Err(_) => return Err(GitProviderError::RateLimitExceeded),
+        };
 
         // Token is valid if we get a 200 OK
         // 401 means unauthorized (invalid token)
         match response.status() {
             status if status.is_success() => Ok(true),
             status if status.as_u16() == 401 => Ok(false),
-            status if status.as_u16() == 403 => Ok(false), // Token might be invalid or lack permissions
-            status if status.as_u16() == 429 => {
-                // Rate limited
-                Err(GitProviderError::RateLimitExceeded)
-            }
+            status if status.as_u16() == 403 => Ok(false),
             status => {
                 let error_text = response
                     .text()
@@ -195,18 +239,17 @@ impl GitProviderService for GitLabProvider {
                 if let Some(code) = code {
                     // Exchange authorization code for access token
                     let client = self.get_client();
-                    let params = [
-                        ("client_id", app_id.as_str()),
-                        ("client_secret", app_secret.as_str()),
-                        ("code", &code),
-                        ("grant_type", "authorization_code"),
-                        ("redirect_uri", redirect_uri.as_str()),
+                    let params_owned = vec![
+                        ("client_id".to_string(), app_id.clone()),
+                        ("client_secret".to_string(), app_secret.clone()),
+                        ("code".to_string(), code),
+                        ("grant_type".to_string(), "authorization_code".to_string()),
+                        ("redirect_uri".to_string(), redirect_uri.clone()),
                     ];
 
-                    let response = client
-                        .post(format!("{}/oauth/token", self.base_url))
-                        .form(&params)
-                        .send()
+                    let url = format!("{}/oauth/token", self.base_url);
+                    let response = self
+                        .send_with_retry(|| client.post(&url).form(&params_owned))
                         .await
                         .map_err(|e| GitProviderError::ApiError(e.to_string()))?;
 
@@ -232,18 +275,17 @@ impl GitProviderService for GitLabProvider {
                 if let Some(code) = code {
                     // Exchange authorization code for access token
                     let client = self.get_client();
-                    let params = [
-                        ("client_id", client_id.as_str()),
-                        ("client_secret", client_secret.as_str()),
-                        ("code", &code),
-                        ("grant_type", "authorization_code"),
-                        ("redirect_uri", redirect_uri.as_str()),
+                    let params_owned = vec![
+                        ("client_id".to_string(), client_id.clone()),
+                        ("client_secret".to_string(), client_secret.clone()),
+                        ("code".to_string(), code),
+                        ("grant_type".to_string(), "authorization_code".to_string()),
+                        ("redirect_uri".to_string(), redirect_uri.clone()),
                     ];
 
-                    let response = client
-                        .post(format!("{}/oauth/token", self.base_url))
-                        .form(&params)
-                        .send()
+                    let url = format!("{}/oauth/token", self.base_url);
+                    let response = self
+                        .send_with_retry(|| client.post(&url).form(&params_owned))
                         .await
                         .map_err(|e| GitProviderError::ApiError(e.to_string()))?;
 
@@ -291,7 +333,7 @@ impl GitProviderService for GitLabProvider {
 
     async fn token_needs_refresh(&self, access_token: &str) -> bool {
         // Check if the token is valid by making a simple API call
-        match self.validate_token(access_token).await {
+        match self.validate_token_internal(access_token).await {
             Ok(true) => false, // Token is valid, no refresh needed
             Ok(false) => true, // Token is invalid, needs refresh
             Err(_) => true,    // Error validating, assume it needs refresh
@@ -299,38 +341,7 @@ impl GitProviderService for GitLabProvider {
     }
 
     async fn validate_token(&self, access_token: &str) -> Result<bool, GitProviderError> {
-        let client = self.get_client();
-        let headers = self.get_headers(access_token);
-
-        // Use the /user endpoint to validate the token
-        let response = client
-            .get(format!("{}/api/v4/user", self.base_url))
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|e| GitProviderError::ApiError(format!("Failed to validate token: {}", e)))?;
-
-        // Token is valid if we get a 200 OK
-        // 401 means unauthorized (invalid token)
-        match response.status() {
-            status if status.is_success() => Ok(true),
-            status if status.as_u16() == 401 => Ok(false),
-            status if status.as_u16() == 403 => Ok(false), // Token might be invalid or lack permissions
-            status if status.as_u16() == 429 => {
-                // Rate limited
-                Err(GitProviderError::RateLimitExceeded)
-            }
-            status => {
-                let error_text = response
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| "Unknown error".to_string());
-                Err(GitProviderError::ApiError(format!(
-                    "Unexpected response validating token: {} - {}",
-                    status, error_text
-                )))
-            }
-        }
+        self.validate_token_internal(access_token).await
     }
 
     async fn validate_and_refresh_token(
@@ -339,7 +350,7 @@ impl GitProviderService for GitLabProvider {
         refresh_token: Option<&str>,
     ) -> Result<(String, Option<String>), GitProviderError> {
         // First, validate the current token
-        match self.validate_token(access_token).await {
+        match self.validate_token_internal(access_token).await {
             Ok(true) => {
                 // Token is valid, return it as-is
                 debug!("GitLab access token is still valid");
@@ -409,12 +420,9 @@ impl GitProviderService for GitLabProvider {
             format!("{}/api/v4/projects?membership=true", self.base_url)
         };
 
-        let response = client
-            .get(&url)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|e| GitProviderError::ApiError(e.to_string()))?;
+        let response = self
+            .send_with_retry(|| client.get(&url).headers(headers.clone()))
+            .await?;
 
         if !response.status().is_success() {
             return Err(GitProviderError::ApiError(format!(
@@ -494,12 +502,9 @@ impl GitProviderService for GitLabProvider {
         let encoded_path = urlencoding::encode(&project_path);
         let url = format!("{}/api/v4/projects/{}", self.base_url, encoded_path);
 
-        let response = client
-            .get(&url)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|e| GitProviderError::ApiError(e.to_string()))?;
+        let response = self
+            .send_with_retry(|| client.get(&url).headers(headers.clone()))
+            .await?;
 
         if !response.status().is_success() {
             return Err(GitProviderError::ApiError(format!(
@@ -571,12 +576,9 @@ impl GitProviderService for GitLabProvider {
             self.base_url, encoded_path
         );
 
-        let response = client
-            .get(&url)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|e| GitProviderError::ApiError(e.to_string()))?;
+        let response = self
+            .send_with_retry(|| client.get(&url).headers(headers.clone()))
+            .await?;
 
         if !response.status().is_success() {
             return Err(GitProviderError::ApiError(format!(
@@ -631,12 +633,9 @@ impl GitProviderService for GitLabProvider {
             self.base_url, encoded_path
         );
 
-        let response = client
-            .get(&url)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|e| GitProviderError::ApiError(format!("Failed to send request: {}", e)))?;
+        let response = self
+            .send_with_retry(|| client.get(&url).headers(headers.clone()))
+            .await?;
 
         if !response.status().is_success() {
             return Err(GitProviderError::ApiError(format!(
@@ -694,12 +693,9 @@ impl GitProviderService for GitLabProvider {
             url.push_str(&format!("?ref={}", ref_name));
         }
 
-        let response = client
-            .get(&url)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|e| GitProviderError::ApiError(e.to_string()))?;
+        let response = self
+            .send_with_retry(|| client.get(&url).headers(headers.clone()))
+            .await?;
 
         if !response.status().is_success() {
             return Err(GitProviderError::ApiError(format!(
@@ -766,13 +762,9 @@ impl GitProviderService for GitLabProvider {
             pipeline_events: config.events.contains(&"pipeline".to_string()),
         };
 
-        let response = client
-            .post(&url)
-            .headers(headers)
-            .json(&request)
-            .send()
-            .await
-            .map_err(|e| GitProviderError::ApiError(e.to_string()))?;
+        let response = self
+            .send_with_retry(|| client.post(&url).headers(headers.clone()).json(&request))
+            .await?;
 
         if !response.status().is_success() {
             return Err(GitProviderError::ApiError(format!(
@@ -795,12 +787,9 @@ impl GitProviderService for GitLabProvider {
 
         let url = format!("{}/api/v4/user", self.base_url);
 
-        let response = client
-            .get(&url)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|e| GitProviderError::ApiError(e.to_string()))?;
+        let response = self
+            .send_with_retry(|| client.get(&url).headers(headers.clone()))
+            .await?;
 
         if !response.status().is_success() {
             return Err(GitProviderError::ApiError(format!(
@@ -849,12 +838,9 @@ impl GitProviderService for GitLabProvider {
             self.base_url, encoded_path, branch
         );
 
-        let response = client
-            .get(&url)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|e| GitProviderError::ApiError(e.to_string()))?;
+        let response = self
+            .send_with_retry(|| client.get(&url).headers(headers.clone()))
+            .await?;
 
         if !response.status().is_success() {
             return Err(GitProviderError::ApiError(format!(
@@ -896,12 +882,9 @@ impl GitProviderService for GitLabProvider {
             self.base_url, encoded_path, webhook_id
         );
 
-        let response = client
-            .delete(&url)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|e| GitProviderError::ApiError(e.to_string()))?;
+        let response = self
+            .send_with_retry(|| client.delete(&url).headers(headers.clone()))
+            .await?;
 
         if !response.status().is_success() {
             return Err(GitProviderError::ApiError(format!(
@@ -935,11 +918,7 @@ impl GitProviderService for GitLabProvider {
         let encoded_path = urlencoding::encode(&project_path);
         let url = format!("{}/api/v4/projects/{}", self.base_url, encoded_path);
 
-        let response = client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| GitProviderError::ApiError(e.to_string()))?;
+        let response = self.send_with_retry(|| client.get(&url)).await?;
 
         Ok(response.status().is_success())
     }
@@ -1004,12 +983,9 @@ impl GitProviderService for GitLabProvider {
             self.base_url, encoded_project, reference
         );
 
-        let response = client
-            .get(&url)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|e| GitProviderError::ApiError(e.to_string()))?;
+        let response = self
+            .send_with_retry(|| client.get(&url).headers(headers.clone()))
+            .await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -1070,12 +1046,9 @@ impl GitProviderService for GitLabProvider {
             self.base_url, encoded_project, commit_sha
         );
 
-        let response = client
-            .get(&url)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|e| GitProviderError::ApiError(e.to_string()))?;
+        let response = self
+            .send_with_retry(|| client.get(&url).headers(headers.clone()))
+            .await?;
 
         // If we get a 200, the commit exists
         // If we get a 404, the commit doesn't exist
@@ -1122,12 +1095,9 @@ impl GitProviderService for GitLabProvider {
         let client = self.get_client();
         let headers = self.get_headers(access_token);
 
-        let response = client
-            .get(&url)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|e| GitProviderError::ApiError(format!("Failed to request archive: {}", e)))?;
+        let response = self
+            .send_with_retry(|| client.get(&url).headers(headers.clone()))
+            .await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -1211,10 +1181,9 @@ impl GitProviderService for GitLabProvider {
         let namespace_id = if let Some(namespace) = owner {
             // Try to find the namespace/group ID
             let namespace_url = format!("{}/api/v4/namespaces?search={}", self.base_url, namespace);
-            let namespace_response = client
-                .get(&namespace_url)
-                .headers(headers.clone())
-                .send()
+            let headers_clone = headers.clone();
+            let namespace_response = self
+                .send_with_retry(|| client.get(&namespace_url).headers(headers_clone.clone()))
                 .await
                 .map_err(|e| {
                     GitProviderError::ApiError(format!("Failed to find namespace: {}", e))
@@ -1257,11 +1226,8 @@ impl GitProviderService for GitLabProvider {
             name, visibility
         );
 
-        let response = client
-            .post(&url)
-            .headers(headers)
-            .json(&request)
-            .send()
+        let response = self
+            .send_with_retry(|| client.post(&url).headers(headers.clone()).json(&request))
             .await
             .map_err(|e| {
                 GitProviderError::ApiError(format!("Failed to create repository: {}", e))
@@ -1401,11 +1367,13 @@ impl GitProviderService for GitLabProvider {
             "actions": actions
         });
 
-        let response = client
-            .post(&url)
-            .headers(headers)
-            .json(&commit_request)
-            .send()
+        let response = self
+            .send_with_retry(|| {
+                client
+                    .post(&url)
+                    .headers(headers.clone())
+                    .json(&commit_request)
+            })
             .await
             .map_err(|e| GitProviderError::ApiError(format!("Failed to create commit: {}", e)))?;
 

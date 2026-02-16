@@ -26,6 +26,7 @@ impl std::fmt::Display for EmailProviderType {
 }
 
 impl EmailProviderType {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Result<Self, EmailError> {
         match s.to_lowercase().as_str() {
             "ses" | "aws_ses" | "aws-ses" => Ok(EmailProviderType::Ses),

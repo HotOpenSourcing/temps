@@ -241,7 +241,7 @@ pub struct CreateExternalServiceRequest {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UpdateExternalServiceRequest {
     pub parameters: HashMap<String, serde_json::Value>,
-    /// Docker image to use for the service (e.g., "postgres:17-alpine", "timescale/timescaledb-ha:pg17")
+    /// Docker image to use for the service (e.g., "postgres:18-alpine", "timescale/timescaledb-ha:pg18")
     /// When provided, the service will be recreated with the new image while preserving data
     #[serde(skip_serializing_if = "Option::is_none")]
     pub docker_image: Option<String>,
@@ -249,9 +249,9 @@ pub struct UpdateExternalServiceRequest {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UpgradeExternalServiceRequest {
-    /// Docker image to upgrade to (e.g., "postgres:17-alpine")
+    /// Docker image to upgrade to (e.g., "postgres:18-alpine")
     /// This will trigger pg_upgrade for PostgreSQL or equivalent upgrade procedures for other services
-    #[schema(example = "postgres:17-alpine")]
+    #[schema(example = "postgres:18-alpine")]
     pub docker_image: String,
 }
 
@@ -269,11 +269,11 @@ pub struct AvailableContainerInfo {
     /// Container display name
     #[schema(example = "my-postgres")]
     pub container_name: String,
-    /// Docker image name (e.g., "postgres:17-alpine")
-    #[schema(example = "postgres:17-alpine")]
+    /// Docker image name (e.g., "postgres:18-alpine")
+    #[schema(example = "postgres:18-alpine")]
     pub image: String,
     /// Extracted version from image
-    #[schema(example = "17")]
+    #[schema(example = "18")]
     pub version: String,
     /// Service type this container represents
     pub service_type: ServiceTypeRoute,

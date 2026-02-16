@@ -110,6 +110,11 @@ export interface SentryStackFrame {
   post_context?: string[]
   abs_path?: string
   vars?: Record<string, any>
+  // Fields added by backend symbolication
+  symbolicated?: boolean
+  original_filename?: string
+  original_lineno?: number
+  original_colno?: number
 }
 
 export interface SentryException {

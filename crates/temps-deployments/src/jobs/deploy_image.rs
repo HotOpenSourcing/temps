@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use temps_core::{JobResult, WorkflowContext, WorkflowError, WorkflowTask};
 use temps_deployer::{
-    ContainerDeployer, ContainerStatus as DeployerContainerStatus, DeployRequest, PortMapping,
-    Protocol, ResourceLimits, RestartPolicy,
+    ContainerDeployer, ContainerLogConfig, ContainerStatus as DeployerContainerStatus,
+    DeployRequest, PortMapping, Protocol, ResourceLimits, RestartPolicy,
 };
 use temps_logs::{LogLevel, LogService};
 
@@ -119,9 +119,15 @@ pub struct DeploymentJobConfig {
     pub port: u32,
     pub environment_variables: HashMap<String, String>,
     pub resources: ResourceUsage,
+    /// When `None`, HTTP health checks are skipped entirely (only container
+    /// running status is verified). Set to `Some("/")` or a custom path to
+    /// enable HTTP health checks after the container starts.
     pub health_check_path: Option<String>,
     pub ingress_enabled: bool,
     pub ingress_host: Option<String>,
+    /// Maximum time to wait for the application to become ready (container
+    /// start + health checks). Defaults to 300 seconds (5 minutes).
+    pub health_check_timeout_secs: u64,
 }
 
 impl Default for DeploymentJobConfig {
@@ -136,6 +142,7 @@ impl Default for DeploymentJobConfig {
             health_check_path: Some("/".to_string()),
             ingress_enabled: false,
             ingress_host: None,
+            health_check_timeout_secs: 300,
         }
     }
 }
@@ -164,6 +171,8 @@ pub struct DeployImageJob {
     log_stream_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// Optional: directly provided image tag (for external/pre-built images, bypasses BuildImageJob lookup)
     external_image_tag: Option<String>,
+    /// Docker log rotation config to prevent unbounded log growth
+    log_config: Option<ContainerLogConfig>,
 }
 
 impl std::fmt::Debug for DeployImageJob {
@@ -196,7 +205,13 @@ impl DeployImageJob {
             container_ids: Arc::new(Mutex::new(Vec::new())),
             log_stream_task: Arc::new(Mutex::new(None)),
             external_image_tag: None,
+            log_config: None,
         }
+    }
+
+    pub fn with_log_config(mut self, log_config: ContainerLogConfig) -> Self {
+        self.log_config = Some(log_config);
+        self
     }
 
     pub fn with_config(mut self, config: DeploymentJobConfig) -> Self {
@@ -616,6 +631,7 @@ impl DeployImageJob {
             restart_policy: RestartPolicy::Always,
             log_path,
             command: None,
+            log_config: self.log_config.clone(),
         };
 
         let deploy_result = self
@@ -641,7 +657,7 @@ impl DeployImageJob {
         // Wait for deployment to be ready (with timeout)
         self.log(context, "Waiting for container to start...".to_string())
             .await?;
-        let max_wait_time = std::time::Duration::from_secs(300); // 5 minutes
+        let max_wait_time = std::time::Duration::from_secs(self.config.health_check_timeout_secs);
         let start_time = std::time::Instant::now();
 
         // Phase 1: Wait for container to be running
@@ -824,155 +840,175 @@ impl DeployImageJob {
         }
 
         // Phase 2: Wait for application to be ready (connectivity check)
-        // This runs in parallel with log streaming
-        self.log(
-            context,
-            "Waiting for application to be ready...".to_string(),
-        )
-        .await?;
-        let health_check_url = temps_core::DeploymentMode::build_container_url(
-            &deploy_result.container_name,
-            deploy_result.container_port,
-            deploy_result.host_port,
-            self.config.health_check_path.as_deref(),
-        );
-        self.log(context, format!("Health check URL: {}", health_check_url))
+        // When health_check_path is None, skip HTTP health checks entirely --
+        // the container running status from Phase 1 is sufficient (useful for
+        // rollbacks where the image was already verified, or services without
+        // an HTTP endpoint).
+        if let Some(ref health_path) = self.config.health_check_path {
+            self.log(
+                context,
+                "Waiting for application to be ready...".to_string(),
+            )
             .await?;
-
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .build()
-            .map_err(|e| {
-                WorkflowError::JobExecutionFailed(format!("Failed to create HTTP client: {}", e))
-            })?;
-
-        let mut consecutive_successes = 0;
-        let required_successes = 2; // Require 2 consecutive successful connections
-        let mut first_error_time: Option<std::time::Instant> = None;
-        let max_error_duration = std::time::Duration::from_secs(60); // Only retry errors for 60 seconds
-
-        loop {
-            // Check for overall timeout (5 minutes)
-            if start_time.elapsed() > max_wait_time {
-                self.log(
-                    context,
-                    "⏱️  Application readiness timeout - connectivity checks failed".to_string(),
-                )
+            let health_check_url = temps_core::DeploymentMode::build_container_url(
+                &deploy_result.container_name,
+                deploy_result.container_port,
+                deploy_result.host_port,
+                Some(health_path),
+            );
+            self.log(context, format!("Health check URL: {}", health_check_url))
                 .await?;
-                // Clean up container on connectivity timeout
-                self.cleanup_container(context).await?;
-                return Err(WorkflowError::JobExecutionFailed(
-                    "Application timeout - connectivity checks did not pass in time".to_string(),
-                ));
-            }
 
-            // Check for error timeout (60 seconds of consecutive 4xx/5xx errors)
-            if let Some(error_start) = first_error_time {
-                if error_start.elapsed() > max_error_duration {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .map_err(|e| {
+                    WorkflowError::JobExecutionFailed(format!(
+                        "Failed to create HTTP client: {}",
+                        e
+                    ))
+                })?;
+
+            let mut consecutive_successes = 0;
+            let required_successes = 2; // Require 2 consecutive successful connections
+            let mut first_error_time: Option<std::time::Instant> = None;
+            let max_error_duration = std::time::Duration::from_secs(60); // Only retry errors for 60 seconds
+
+            loop {
+                // Check for overall timeout
+                if start_time.elapsed() > max_wait_time {
                     self.log(
                         context,
-                        "⏱️  Application health check failed - server returning errors for too long".to_string(),
+                        "Application readiness timeout - connectivity checks failed".to_string(),
                     )
                     .await?;
-                    // Clean up container on health check failure
+                    // Clean up container on connectivity timeout
                     self.cleanup_container(context).await?;
                     return Err(WorkflowError::JobExecutionFailed(
-                        "Application health check failed - server returned error status codes for 60 seconds".to_string(),
+                        "Application timeout - connectivity checks did not pass in time"
+                            .to_string(),
                     ));
                 }
-            }
 
-            // Check if container is still running (it may have crashed)
-            // This prevents waiting 5 minutes for a container that already exited
-            if let Ok(container_info) = self
-                .container_deployer
-                .get_container_info(&deploy_result.container_id)
-                .await
-            {
-                match container_info.status {
-                    DeployerContainerStatus::Exited | DeployerContainerStatus::Dead => {
+                // Check for error timeout (60 seconds of consecutive 4xx/5xx errors)
+                if let Some(error_start) = first_error_time {
+                    if error_start.elapsed() > max_error_duration {
                         self.log(
                             context,
-                            "❌ Container crashed during startup - application failed to start"
+                            "Application health check failed - server returning errors for too long"
                                 .to_string(),
                         )
                         .await?;
-                        // Clean up crashed container
+                        // Clean up container on health check failure
                         self.cleanup_container(context).await?;
                         return Err(WorkflowError::JobExecutionFailed(
-                            "Container crashed during startup - check container logs for details"
-                                .to_string(),
+                            "Application health check failed - server returned error status codes for 60 seconds".to_string(),
                         ));
                     }
-                    _ => {
-                        // Container is still running, continue with connectivity checks
+                }
+
+                // Check if container is still running (it may have crashed)
+                // This prevents waiting the full timeout for a container that already exited
+                if let Ok(container_info) = self
+                    .container_deployer
+                    .get_container_info(&deploy_result.container_id)
+                    .await
+                {
+                    match container_info.status {
+                        DeployerContainerStatus::Exited | DeployerContainerStatus::Dead => {
+                            self.log(
+                                context,
+                                "Container crashed during startup - application failed to start"
+                                    .to_string(),
+                            )
+                            .await?;
+                            // Clean up crashed container
+                            self.cleanup_container(context).await?;
+                            return Err(WorkflowError::JobExecutionFailed(
+                                "Container crashed during startup - check container logs for details"
+                                    .to_string(),
+                            ));
+                        }
+                        _ => {
+                            // Container is still running, continue with connectivity checks
+                        }
                     }
                 }
-            }
 
-            match client.get(&health_check_url).send().await {
-                Ok(response) => {
-                    let status = response.status();
+                match client.get(&health_check_url).send().await {
+                    Ok(response) => {
+                        let status = response.status();
 
-                    // Only 2xx and 3xx are considered healthy
-                    if status.is_success() || status.is_redirection() {
-                        consecutive_successes += 1;
-                        first_error_time = None; // Reset error timer on success
+                        // Only 2xx and 3xx are considered healthy
+                        if status.is_success() || status.is_redirection() {
+                            consecutive_successes += 1;
+                            first_error_time = None; // Reset error timer on success
 
-                        let message = format!(
-                            "✅ Health check passed - server healthy with status {} ({}/{})",
-                            status, consecutive_successes, required_successes
-                        );
-                        if let (Some(ref log_id), Some(ref log_service)) =
-                            (&self.log_id, &self.log_service)
-                        {
-                            log_service
-                                .append_structured_log(log_id, LogLevel::Success, message.clone())
-                                .await
-                                .map_err(|e| {
-                                    WorkflowError::Other(format!("Failed to write log: {}", e))
-                                })?;
+                            let message = format!(
+                                "Health check passed - server healthy with status {} ({}/{})",
+                                status, consecutive_successes, required_successes
+                            );
+                            if let (Some(ref log_id), Some(ref log_service)) =
+                                (&self.log_id, &self.log_service)
+                            {
+                                log_service
+                                    .append_structured_log(
+                                        log_id,
+                                        LogLevel::Success,
+                                        message.clone(),
+                                    )
+                                    .await
+                                    .map_err(|e| {
+                                        WorkflowError::Other(format!("Failed to write log: {}", e))
+                                    })?;
+                            }
+                            context.log(&message).await?;
+
+                            if consecutive_successes >= required_successes {
+                                self.log(context, "Application is ready and healthy!".to_string())
+                                    .await?;
+                                break;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        } else {
+                            // 4xx, 5xx = application error
+                            consecutive_successes = 0;
+
+                            // Start error timer if this is the first error
+                            if first_error_time.is_none() {
+                                first_error_time = Some(std::time::Instant::now());
+                            }
+
+                            let elapsed = first_error_time.unwrap().elapsed().as_secs();
+                            self.log(
+                                context,
+                                format!(
+                                    "Health check failed - server returned error status {} (not healthy), retrying... ({}/60s)",
+                                    status, elapsed
+                                ),
+                            )
+                            .await?;
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                         }
-                        context.log(&message).await?;
-
-                        if consecutive_successes >= required_successes {
-                            self.log(context, "✅ Application is ready and healthy!".to_string())
-                                .await?;
-                            break;
-                        }
-                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    } else {
-                        // 4xx, 5xx = application error
-                        consecutive_successes = 0;
-
-                        // Start error timer if this is the first error
-                        if first_error_time.is_none() {
-                            first_error_time = Some(std::time::Instant::now());
-                        }
-
-                        let elapsed = first_error_time.unwrap().elapsed().as_secs();
+                    }
+                    Err(e) => {
+                        consecutive_successes = 0; // Reset counter on connection error
+                        first_error_time = None; // Reset error timer - connection errors are expected during startup
                         self.log(
                             context,
-                            format!(
-                                "❌ Health check failed - server returned error status {} (not healthy), retrying... ({}/60s)",
-                                status, elapsed
-                            ),
+                            format!("Connectivity check failed ({}), retrying...", e),
                         )
                         .await?;
                         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     }
                 }
-                Err(e) => {
-                    consecutive_successes = 0; // Reset counter on connection error
-                    first_error_time = None; // Reset error timer - connection errors are expected during startup
-                    self.log(
-                        context,
-                        format!("⏳ Connectivity check failed ({}), retrying...", e),
-                    )
-                    .await?;
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                }
             }
+        } else {
+            self.log(
+                context,
+                "Health check path not configured - skipping HTTP health checks (container is running)".to_string(),
+            )
+            .await?;
         }
 
         let endpoint_url = temps_core::DeploymentMode::build_container_url(
@@ -1137,6 +1173,7 @@ pub struct DeployImageJobBuilder {
     log_id: Option<String>,
     log_service: Option<Arc<LogService>>,
     external_image_tag: Option<String>,
+    log_config: Option<ContainerLogConfig>,
 }
 
 impl DeployImageJobBuilder {
@@ -1149,6 +1186,7 @@ impl DeployImageJobBuilder {
             log_id: None,
             log_service: None,
             external_image_tag: None,
+            log_config: None,
         }
     }
 
@@ -1203,6 +1241,21 @@ impl DeployImageJobBuilder {
         self
     }
 
+    /// Set the health check path. When `None`, HTTP health checks are skipped
+    /// entirely after the container reaches running state. Useful for rollbacks
+    /// or services without an HTTP endpoint.
+    pub fn health_check_path(mut self, path: Option<String>) -> Self {
+        self.config.health_check_path = path;
+        self
+    }
+
+    /// Set the maximum time (in seconds) to wait for the application to become
+    /// ready. Defaults to 300 seconds (5 minutes).
+    pub fn health_check_timeout_secs(mut self, secs: u64) -> Self {
+        self.config.health_check_timeout_secs = secs;
+        self
+    }
+
     pub fn log_id(mut self, log_id: String) -> Self {
         self.log_id = Some(log_id);
         self
@@ -1216,6 +1269,12 @@ impl DeployImageJobBuilder {
     /// Set external image tag (for pre-built images, bypasses build job dependency)
     pub fn external_image_tag(mut self, image_tag: String) -> Self {
         self.external_image_tag = Some(image_tag);
+        self
+    }
+
+    /// Set Docker log rotation config to prevent unbounded log growth
+    pub fn container_log_config(mut self, log_config: ContainerLogConfig) -> Self {
+        self.log_config = Some(log_config);
         self
     }
 
@@ -1242,6 +1301,9 @@ impl DeployImageJobBuilder {
         }
         if let Some(external_image_tag) = self.external_image_tag {
             job = job.with_external_image_tag(external_image_tag);
+        }
+        if let Some(log_config) = self.log_config {
+            job = job.with_log_config(log_config);
         }
 
         Ok(job)

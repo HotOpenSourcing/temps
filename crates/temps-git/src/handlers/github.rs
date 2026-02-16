@@ -310,8 +310,20 @@ async fn handle_push_event(
     push_event: Box<octocrab::models::webhook_events::payload::PushWebhookEventPayload>,
     installation_id: i32,
 ) {
-    let repo = webhook_event.repository.unwrap();
-    let repo_owner = repo.owner.unwrap().login;
+    let repo = match webhook_event.repository {
+        Some(repo) => repo,
+        None => {
+            error!("Push webhook event missing repository field, skipping");
+            return;
+        }
+    };
+    let repo_owner = match repo.owner {
+        Some(owner) => owner.login,
+        None => {
+            error!("Push webhook event repository missing owner field, skipping");
+            return;
+        }
+    };
     let repo_name = repo.name;
 
     // Check if installation exists
@@ -410,11 +422,7 @@ async fn handle_installation_event(
             );
 
             // Extract repositories from the webhook payload if available
-            let payload_repos = event
-                .repositories
-                .as_ref()
-                .map(|repos| repos.clone())
-                .unwrap_or_default();
+            let payload_repos = event.repositories.clone().unwrap_or_default();
 
             if !payload_repos.is_empty() {
                 info!(
@@ -687,9 +695,9 @@ async fn github_app_auth_callback(
         // Redirect to git provider detail page with installation info, or git sources if provider not found
         let redirect_url = if let Some(pid) = provider_id {
             format!(
-                "{}{}?installation_id={}&github_installation_processing=true",
+                "{}/git-providers/{}?installation_id={}&github_installation_processing=true",
                 host.unwrap_or_else(|| "http://localhost:8080".to_string()),
-                format!("/git-providers/{}", pid),
+                pid,
                 installation_id
             )
         } else {
@@ -782,13 +790,16 @@ async fn github_app_installation_callback(
     );
 
     // Installation callback must have installation_id
-    if installation_id.is_none() {
-        return Err(problem_new(StatusCode::BAD_REQUEST)
-            .with_title("Missing Installation ID")
-            .with_detail("The 'installation_id' parameter is required for installation callback"));
-    }
-
-    let installation_id = installation_id.unwrap();
+    let installation_id = match installation_id {
+        Some(id) => id,
+        None => {
+            return Err(problem_new(StatusCode::BAD_REQUEST)
+                .with_title("Missing Installation ID")
+                .with_detail(
+                    "The 'installation_id' parameter is required for installation callback",
+                ));
+        }
+    };
 
     // Allow both "install" and "request" as valid setup actions, or no setup_action
     if let Some(action) = &setup_action {

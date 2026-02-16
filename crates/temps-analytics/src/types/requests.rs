@@ -133,6 +133,12 @@ pub struct VisitorSessionsQuery {
 }
 
 #[derive(Deserialize, Clone, ToSchema)]
+pub struct VisitorJourneyQuery {
+    pub project_id: i32,
+    pub limit_sessions: Option<i32>,
+}
+
+#[derive(Deserialize, Clone, ToSchema)]
 pub struct SessionDetailsQuery {
     pub project_id: i32,
     pub environment_id: Option<i32>,
@@ -266,6 +272,21 @@ pub struct GeneralStatsQuery {
     pub end_date: DateTime,
 }
 
+/// Query parameters for page path visitors
+#[derive(Deserialize, Clone, ToSchema)]
+pub struct PagePathVisitorsQuery {
+    /// The specific page path to get visitors for
+    pub page_path: String,
+    pub project_id: i32,
+    pub environment_id: Option<i32>,
+    pub start_date: DateTime,
+    pub end_date: DateTime,
+    /// Page number (1-based, default: 1)
+    pub page: Option<u64>,
+    /// Items per page (default: 50, max: 100)
+    pub per_page: Option<u64>,
+}
+
 /// Query parameters for page path detail analytics
 #[derive(Deserialize, Clone, ToSchema)]
 pub struct PagePathDetailQuery {
@@ -277,4 +298,19 @@ pub struct PagePathDetailQuery {
     pub end_date: DateTime,
     /// Bucket interval for time series: 'hour', 'day', 'week', 'month' (default: auto)
     pub bucket_interval: Option<String>,
+}
+
+/// Query parameters for page flow analytics
+#[derive(Deserialize, Clone, ToSchema)]
+pub struct PageFlowQuery {
+    pub project_id: i32,
+    pub environment_id: Option<i32>,
+    pub start_date: DateTime,
+    pub end_date: DateTime,
+    /// Maximum number of entry/exit pages to return (default: 20)
+    pub limit: Option<i32>,
+    /// Maximum number of transitions to return (default: 50)
+    pub transitions_limit: Option<i32>,
+    /// Minimum views for drop-off analysis (default: 5)
+    pub min_views_for_dropoff: Option<i32>,
 }

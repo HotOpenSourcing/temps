@@ -73,6 +73,7 @@ impl ImageBuilder for MockImageBuilder {
             size_bytes: 104857600,
             tags: vec![image_name.to_string()],
             created: Some("2025-01-01T00:00:00Z".to_string()),
+            working_dir: Some("/app".to_string()),
         })
     }
 

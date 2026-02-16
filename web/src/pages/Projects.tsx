@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { useAuth } from '@/contexts/AuthContext'
 import { useKeyboardShortcut } from '@/hooks/useKeyboardShortcut'
+import { useDashboardAnalytics } from '@/hooks/useDashboardAnalytics'
 import { usePageTitle } from '@/hooks/usePageTitle'
 import { ProjectCard } from '@/components/dashboard/ProjectCard'
 import { ProjectCardSkeleton } from '@/components/skeletons/ProjectCardSkeleton'
@@ -12,6 +13,7 @@ import {
   listGitProvidersOptions,
 } from '@/api/client/@tanstack/react-query.gen'
 import { useQuery } from '@tanstack/react-query'
+import { subDays } from 'date-fns'
 import { Plus, FolderPlus, GitBranch, Upload } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
 
@@ -78,6 +80,25 @@ export function Projects() {
   }, [projectsData?.projects, navigate])
 
   usePageTitle('Projects')
+
+  // Batch fetch analytics for all visible projects
+  const { startDate, endDate } = useMemo(() => {
+    return {
+      startDate: subDays(new Date(), 1).toISOString(),
+      endDate: new Date().toISOString(),
+    }
+  }, [])
+
+  const projectIds = useMemo(
+    () => projectsData?.projects?.map((p: { id: number }) => p.id) ?? [],
+    [projectsData?.projects]
+  )
+
+  const dashboardAnalytics = useDashboardAnalytics(
+    projectIds,
+    startDate,
+    endDate
+  )
 
   return (
     <div className="sm:p-8 space-y-6">
@@ -198,6 +219,11 @@ export function Projects() {
                 key={project.id}
                 project={project}
                 shortcutNumber={index < 9 ? index + 1 : undefined}
+                analytics={
+                  dashboardAnalytics.data?.projects?.[String(project.id)]
+                }
+                analyticsLoading={dashboardAnalytics.isLoading}
+                analyticsError={dashboardAnalytics.isError}
               />
             ))}
           </>

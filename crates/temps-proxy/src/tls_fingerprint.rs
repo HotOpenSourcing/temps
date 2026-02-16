@@ -20,11 +20,9 @@ use tracing::debug;
 /// This provides a reasonably unique identifier for TLS clients that can be
 /// used for bot detection and attack mitigation.
 pub fn compute_tls_fingerprint(ssl_digest: &SslDigest) -> Option<String> {
-    // Get TLS version (e.g., "TLSv1.3")
-    let version = ssl_digest.version;
-
-    // Get negotiated cipher suite
-    let cipher = ssl_digest.cipher;
+    // Get TLS version and cipher as &str (Cow<'static, str> in Pingora 0.7.0)
+    let version: &str = ssl_digest.version.as_ref();
+    let cipher: &str = ssl_digest.cipher.as_ref();
 
     // Construct fingerprint components
     let protocol = match version {
@@ -77,11 +75,9 @@ pub fn compute_fingerprint(
     ip_address: Option<&str>,
     user_agent: &str,
 ) -> Option<String> {
-    // Get TLS version (e.g., "TLSv1.3")
-    let version = ssl_digest.version;
-
-    // Get negotiated cipher suite
-    let cipher = ssl_digest.cipher;
+    // Get TLS version and cipher as &str (Cow<'static, str> in Pingora 0.7.0)
+    let version: &str = ssl_digest.version.as_ref();
+    let cipher: &str = ssl_digest.cipher.as_ref();
 
     // Construct fingerprint components
     let protocol = match version {

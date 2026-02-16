@@ -25,6 +25,8 @@ pub struct PerformanceMetricsQuery {
     project_id: i32,
     environment_id: Option<i32>,
     deployment_id: Option<i32>,
+    /// Device type filter: "desktop" or "mobile"
+    device_type: Option<String>,
 }
 
 #[derive(Deserialize, Clone, ToSchema)]
@@ -146,7 +148,8 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         ("end_date" = String, Query, description = "End date in format YYYY-MM-DD HH:MM:SS"),
         ("project_id" = i32, Query, description = "Project ID or slug"),
         ("environment_id" = Option<i32>, Query, description = "Environment ID (optional)"),
-        ("deployment_id" = Option<i32>, Query, description = "Deployment ID (optional)")
+        ("deployment_id" = Option<i32>, Query, description = "Deployment ID (optional)"),
+        ("device_type" = Option<String>, Query, description = "Device type filter: desktop or mobile (optional)")
     ),
     responses(
         (status = 200, description = "Successfully retrieved performance metrics", body = PerformanceMetricsResponse),
@@ -166,6 +169,7 @@ async fn get_performance_metrics(
             query.project_id,
             query.environment_id,
             query.deployment_id,
+            query.device_type,
         )
         .await
     {
@@ -193,7 +197,8 @@ async fn get_performance_metrics(
         ("end_date" = String, Query, description = "End date in format YYYY-MM-DDTHH:MM:SSZ"),
         ("project_id" = i32, Query, description = "Project ID or slug"),
         ("environment_id" = Option<i32>, Query, description = "Environment ID (optional)"),
-        ("deployment_id" = Option<i32>, Query, description = "Deployment ID (optional)")
+        ("deployment_id" = Option<i32>, Query, description = "Deployment ID (optional)"),
+        ("device_type" = Option<String>, Query, description = "Device type filter: desktop or mobile (optional)")
     ),
     responses(
         (status = 200, description = "Successfully retrieved metrics over time", body = MetricsOverTimeResponse),
@@ -213,6 +218,7 @@ async fn get_metrics_over_time(
             query.project_id,
             query.environment_id,
             query.deployment_id,
+            query.device_type,
         )
         .await
     {

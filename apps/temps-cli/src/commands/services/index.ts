@@ -172,7 +172,7 @@ export function registerServicesCommands(program: Command): void {
     .command('update')
     .description('Update a service')
     .requiredOption('--id <id>', 'Service ID')
-    .option('-n, --name <name>', 'Docker image name (e.g., postgres:17-alpine)')
+    .option('-n, --name <name>', 'Docker image name (e.g., postgres:18-alpine)')
     .option('--parameters <json>', 'Service parameters as JSON string')
     .action(updateServiceAction)
 
@@ -180,7 +180,7 @@ export function registerServicesCommands(program: Command): void {
     .command('upgrade')
     .description('Upgrade a service to a newer version')
     .requiredOption('--id <id>', 'Service ID')
-    .option('-v, --version <version>', 'Docker image to upgrade to (e.g., postgres:17-alpine)')
+    .option('-v, --version <version>', 'Docker image to upgrade to (e.g., postgres:18-alpine)')
     .action(upgradeServiceAction)
 
   services
@@ -677,7 +677,7 @@ async function upgradeServiceAction(options: UpgradeOptions): Promise<void> {
     dockerImage = options.version
   } else {
     dockerImage = await promptText({
-      message: 'Docker image to upgrade to (e.g., postgres:17-alpine)',
+      message: 'Docker image to upgrade to (e.g., postgres:18-alpine)',
       required: true,
     })
   }

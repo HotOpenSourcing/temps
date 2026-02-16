@@ -12,6 +12,7 @@
 //!
 //! ```rust,no_run
 //! use temps_query_s3::S3Source;
+//! use temps_query::DataSource;
 //!
 //! # async fn example() -> temps_query::Result<()> {
 //! let source = S3Source::new(
@@ -568,7 +569,7 @@ mod tests {
     #[test]
     fn test_capabilities() {
         // Test that S3 reports ObjectStore capability
-        let capabilities = vec![Capability::ObjectStore];
+        let capabilities = [Capability::ObjectStore];
         assert!(capabilities.contains(&Capability::ObjectStore));
     }
 

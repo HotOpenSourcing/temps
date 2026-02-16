@@ -98,9 +98,9 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
   const [isEditingSettings, setIsEditingSettings] = useState(false)
   const [isCustomBranch, setIsCustomBranch] = useState(false)
   const [customBranch, setCustomBranch] = useState('')
-  const [selectedProvider, setSelectedProvider] = useState<number | null>(
-    () => project?.git_provider_connection_id || null
-  )
+  const [selectedConnectionId, setSelectedConnectionId] = useState<
+    number | null
+  >(() => project?.git_provider_connection_id || null)
   const [selectedRepository, setSelectedRepository] =
     useState<RepositoryResponse | null>(null)
   const [isSelectingRepository, setIsSelectingRepository] = useState(false)
@@ -296,6 +296,10 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
           directory: values.directory!,
           repo_owner: project.repo_owner!,
           repo_name: project.repo_name!,
+          git_provider_connection_id:
+            selectedConnectionId ??
+            project.git_provider_connection_id ??
+            null,
         },
         path: { project_id: project.id },
       })
@@ -322,7 +326,7 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
       const formPreset = form.getValues('preset')
       const [presetName] = formPreset?.split('::') || ['']
 
-      // Update repository information
+      // Update repository information including the git provider connection
       await updateGithubRepo.mutateAsync({
         body: {
           repo_owner: repo.owner,
@@ -331,13 +335,13 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
           preset: presetName,
           main_branch:
             form.getValues('branch') || repo.default_branch || 'main',
+          git_provider_connection_id:
+            selectedConnectionId ??
+            project.git_provider_connection_id ??
+            null,
         },
         path: { project_id: project.id },
       })
-
-      // Note: git_provider_connection_id should be updated through a separate API
-      // if available in the future. For now, the backend should maintain the association
-      // based on the repository owner/name and the active git provider connection.
 
       toast.success('Repository connected successfully')
       refetch()
@@ -422,54 +426,67 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                     </div>
                     {isSelectingRepository && isEditingSettings ? (
                       <div className="space-y-4">
-                        {/* Git Provider Selection */}
+                        {/* Git Provider Connection Selection */}
                         <div className="space-y-2">
-                          <Label htmlFor="change-provider">
+                          <Label htmlFor="change-connection">
                             Git Provider Connection
                           </Label>
                           <Select
                             value={
-                              selectedProvider?.toString() ||
+                              selectedConnectionId?.toString() ||
                               project.git_provider_connection_id?.toString()
                             }
                             onValueChange={(value) => {
-                              setSelectedProvider(Number(value))
+                              setSelectedConnectionId(Number(value))
                               setSelectedRepository(null)
                             }}
                           >
-                            <SelectTrigger id="change-provider">
-                              <SelectValue placeholder="Select a git provider" />
+                            <SelectTrigger id="change-connection">
+                              <SelectValue placeholder="Select a git connection" />
                             </SelectTrigger>
                             <SelectContent>
-                              {providers.map((provider) => (
-                                <SelectItem
-                                  key={provider.id}
-                                  value={provider.id.toString()}
-                                >
-                                  <div className="flex items-center gap-2">
-                                    <GithubIcon className="h-4 w-4" />
-                                    {provider.name}
-                                    {provider.is_default && (
-                                      <Badge
-                                        variant="secondary"
-                                        className="ml-2"
-                                      >
-                                        Default
-                                      </Badge>
-                                    )}
-                                  </div>
-                                </SelectItem>
-                              ))}
+                              {(
+                                connectionsData?.connections ?? []
+                              ).map((conn) => {
+                                const provider = providers.find(
+                                  (p) => p.id === conn.provider_id
+                                )
+                                return (
+                                  <SelectItem
+                                    key={conn.id}
+                                    value={conn.id.toString()}
+                                  >
+                                    <div className="flex items-center gap-2">
+                                      {provider?.provider_type === 'github' ||
+                                      provider?.provider_type ===
+                                        'github_app' ? (
+                                        <GithubIcon className="h-4 w-4" />
+                                      ) : (
+                                        <GitBranchIcon className="h-4 w-4" />
+                                      )}
+                                      {conn.account_name}
+                                      {provider && (
+                                        <Badge
+                                          variant="secondary"
+                                          className="ml-1 text-xs"
+                                        >
+                                          {provider.name}
+                                        </Badge>
+                                      )}
+                                    </div>
+                                  </SelectItem>
+                                )
+                              })}
                             </SelectContent>
                           </Select>
                         </div>
 
                         {/* Repository Selection */}
-                        {(selectedProvider ||
+                        {(selectedConnectionId ||
                           project.git_provider_connection_id) && (
                           <RepositorySelector
                             connectionId={
-                              selectedProvider ||
+                              selectedConnectionId ||
                               project.git_provider_connection_id!
                             }
                             onSelect={(repo) => {
@@ -982,36 +999,53 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">
-                {/* Git Provider Selection */}
+                {/* Git Provider Connection Selection */}
                 <div className="space-y-2">
-                  <Label htmlFor="provider">Git Provider</Label>
+                  <Label htmlFor="initial-connection">
+                    Git Provider Connection
+                  </Label>
                   <Select
-                    value={selectedProvider?.toString()}
+                    value={selectedConnectionId?.toString()}
                     onValueChange={(value) => {
-                      setSelectedProvider(Number(value))
+                      setSelectedConnectionId(Number(value))
                       setSelectedRepository(null)
                     }}
                   >
-                    <SelectTrigger id="provider">
-                      <SelectValue placeholder="Select a git provider" />
+                    <SelectTrigger id="initial-connection">
+                      <SelectValue placeholder="Select a git connection" />
                     </SelectTrigger>
                     <SelectContent>
-                      {providers.map((provider) => (
-                        <SelectItem
-                          key={provider.id}
-                          value={provider.id.toString()}
-                        >
-                          <div className="flex items-center gap-2">
-                            <GithubIcon className="h-4 w-4" />
-                            {provider.name}
-                            {provider.is_default && (
-                              <Badge variant="secondary" className="ml-2">
-                                Default
-                              </Badge>
-                            )}
-                          </div>
-                        </SelectItem>
-                      ))}
+                      {(connectionsData?.connections ?? []).map(
+                        (conn) => {
+                          const provider = providers.find(
+                            (p) => p.id === conn.provider_id
+                          )
+                          return (
+                            <SelectItem
+                              key={conn.id}
+                              value={conn.id.toString()}
+                            >
+                              <div className="flex items-center gap-2">
+                                {provider?.provider_type === 'github' ||
+                                provider?.provider_type === 'github_app' ? (
+                                  <GithubIcon className="h-4 w-4" />
+                                ) : (
+                                  <GitBranchIcon className="h-4 w-4" />
+                                )}
+                                {conn.account_name}
+                                {provider && (
+                                  <Badge
+                                    variant="secondary"
+                                    className="ml-1 text-xs"
+                                  >
+                                    {provider.name}
+                                  </Badge>
+                                )}
+                              </div>
+                            </SelectItem>
+                          )
+                        }
+                      )}
                     </SelectContent>
                   </Select>
                   <p className="text-sm text-muted-foreground">
@@ -1020,11 +1054,11 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                 </div>
 
                 {/* Repository Selection */}
-                {selectedProvider && (
+                {selectedConnectionId && (
                   <div className="space-y-2">
                     {isSelectingRepository ? (
                       <RepositorySelector
-                        connectionId={selectedProvider}
+                        connectionId={selectedConnectionId}
                         onSelect={handleRepositorySelect}
                         selectedRepository={selectedRepository}
                         title="Select Repository"

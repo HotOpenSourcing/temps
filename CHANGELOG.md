@@ -35,5 +35,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Status page and uptime monitoring
 - Web UI built with React and Rsbuild
 
-[Unreleased]: https://github.com/YOUR_ORG/temps/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/YOUR_ORG/temps/releases/tag/v0.1.0
+[Unreleased]: https://github.com/gotempsh/temps/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/gotempsh/temps/releases/tag/v0.1.0

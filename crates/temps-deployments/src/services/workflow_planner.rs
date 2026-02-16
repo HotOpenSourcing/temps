@@ -58,7 +58,10 @@ impl WorkflowPlanner {
     /// This includes:
     /// 1. Environment variables from the env_vars table for the specific environment (via env_var_environments junction table)
     /// 2. Runtime environment variables from external services linked to the project
-    /// 3. Sentry DSN environment variables (SENTRY_DSN and NEXT_PUBLIC_SENTRY_DSN) - auto-generated per project/environment
+    /// 3. Sentry DSN environment variables - auto-generated per project/environment:
+    ///    - `SENTRY_DSN` is always added
+    ///    - `NEXT_PUBLIC_SENTRY_DSN` is added when preset is Next.js
+    ///    - `VITE_PUBLIC_SENTRY_DSN` is added when preset is Vite
     /// 4. Deployment token environment variables (TEMPS_API_URL and TEMPS_API_TOKEN) - for API access from deployed apps
     ///
     /// IMPORTANT: If any external service fails to provide env vars, the entire deployment will fail
@@ -208,9 +211,21 @@ impl WorkflowPlanner {
                             "Got DSN for project {} environment {}: {}",
                             project.id, environment.id, project_dsn.dsn
                         );
-                        // Add both SENTRY_DSN and NEXT_PUBLIC_SENTRY_DSN for compatibility with different frameworks
+                        // Always add SENTRY_DSN for server-side usage
                         env_vars_map.insert("SENTRY_DSN".to_string(), project_dsn.dsn.clone());
-                        env_vars_map.insert("NEXT_PUBLIC_SENTRY_DSN".to_string(), project_dsn.dsn);
+
+                        // Add framework-specific public DSN env var based on preset
+                        match project.preset {
+                            temps_entities::preset::Preset::NextJs => {
+                                env_vars_map
+                                    .insert("NEXT_PUBLIC_SENTRY_DSN".to_string(), project_dsn.dsn);
+                            }
+                            temps_entities::preset::Preset::Vite => {
+                                env_vars_map
+                                    .insert("VITE_PUBLIC_SENTRY_DSN".to_string(), project_dsn.dsn);
+                            }
+                            _ => {}
+                        }
                     }
                     Err(e) => {
                         // Warn about Sentry DSN failure but don't fail the deployment
@@ -449,14 +464,14 @@ impl WorkflowPlanner {
 
     /// Determine the effective deployment source type for this deployment
     ///
-    /// For flexible (Manual) projects, this determines the actual deployment method based on:
+    /// Checks deployment metadata first (for all project types), then falls back
+    /// to the project's configured source type:
     /// 1. Explicit `deployment_source_type` in metadata (set by remote deployment handlers)
     /// 2. Presence of `external_image_ref` in metadata -> DockerImage
     /// 3. Presence of `static_bundle_path` in metadata -> StaticFiles
-    /// 4. Has git info (repo_owner, repo_name) -> Git
-    /// 5. Fallback to Manual (will fail at job planning time)
-    ///
-    /// For non-flexible projects, always returns the project's source type.
+    /// 4. Project's own source type (for non-flexible projects)
+    /// 5. Has git info (repo_owner, repo_name) -> Git (for flexible/Manual projects)
+    /// 6. Fallback to Manual (will fail at job planning time)
     fn determine_deployment_source_type(
         &self,
         project: &projects::Model,
@@ -464,12 +479,9 @@ impl WorkflowPlanner {
     ) -> temps_entities::source_type::SourceType {
         use temps_entities::source_type::SourceType;
 
-        // Non-flexible projects: always use project source type
-        if !project.source_type.is_flexible() {
-            return project.source_type;
-        }
-
-        // Manual/Flexible projects: check deployment metadata
+        // Check deployment metadata first (applies to ALL project types)
+        // This allows any project to deploy via Docker image or static bundle
+        // through the remote deployment API, regardless of its configured source type
         if let Some(metadata) = &deployment.metadata {
             // 1. Explicit deployment_source_type (set by remote deployment handlers)
             if let Some(dtype) = &metadata.deployment_source_type {
@@ -493,13 +505,18 @@ impl WorkflowPlanner {
             }
         }
 
-        // 4. Check if project has git info (fallback to Git deployment)
+        // 4. Non-flexible projects: use project source type
+        if !project.source_type.is_flexible() {
+            return project.source_type;
+        }
+
+        // 5. Flexible/Manual projects: check if project has git info
         if !project.repo_owner.is_empty() && !project.repo_name.is_empty() {
             debug!("Using Git deployment for Manual project with git info");
             return SourceType::Git;
         }
 
-        // 5. No deployment method could be determined
+        // 6. No deployment method could be determined
         // Keep as Manual - will cause a meaningful error in plan_jobs_for_project
         debug!("Could not determine deployment method for Manual project");
         SourceType::Manual
@@ -579,9 +596,17 @@ impl WorkflowPlanner {
         project: &projects::Model,
         environment: &environments::Model,
         deployment: &deployments::Model,
-        env_vars: std::collections::HashMap<String, String>,
+        mut env_vars: std::collections::HashMap<String, String>,
     ) -> anyhow::Result<Vec<JobDefinition>> {
         let mut jobs = Vec::new();
+
+        // Inject SENTRY_RELEASE so the SDK tags events with the correct release version.
+        // This must match the release used for source map uploads.
+        if let Some(ref commit_sha) = deployment.commit_sha {
+            env_vars
+                .entry("SENTRY_RELEASE".to_string())
+                .or_insert_with(|| commit_sha.clone());
+        }
 
         // Check if git info is available
         let has_git_info = !project.repo_owner.is_empty() && !project.repo_name.is_empty();
@@ -880,6 +905,60 @@ impl WorkflowPlanner {
             );
         } else {
             debug!("Skipping vulnerability scan job - no git info available");
+        }
+
+        // Job 8: Capture source maps (only for JS-based presets with git info)
+        // Extracts .map files from the built image for error symbolication
+        if has_git_info {
+            // Search paths are relative to the image's WORKDIR (detected at runtime).
+            // The CaptureSourceMapsJob inspects the image to find the WORKDIR and
+            // prepends it to these relative paths.
+            let search_paths = match project.preset {
+                temps_entities::preset::Preset::NextJs => {
+                    vec![".next/static".to_string(), ".next/server".to_string()]
+                }
+                temps_entities::preset::Preset::Vite => vec!["dist/assets".to_string()],
+                _ => vec!["dist".to_string(), "build/static".to_string()],
+            };
+
+            // Path rewrites: map container paths to browser-visible paths.
+            // Next.js serves .next/static as /_next/static in the browser,
+            // so we rewrite .next -> _next to match stack trace filenames.
+            let path_rewrites: Vec<(String, String)> = match project.preset {
+                temps_entities::preset::Preset::NextJs => {
+                    vec![(".next".to_string(), "_next".to_string())]
+                }
+                _ => vec![],
+            };
+
+            // Use commit SHA as release version (matches SENTRY_RELEASE env var)
+            let release = deployment
+                .commit_sha
+                .clone()
+                .unwrap_or_else(|| format!("deploy-{}", deployment.id));
+
+            jobs.push(JobDefinition {
+                job_id: "capture_source_maps".to_string(),
+                job_type: "CaptureSourceMapsJob".to_string(),
+                name: "Capture Source Maps".to_string(),
+                description: Some(
+                    "Extract source maps from build output for error symbolication".to_string(),
+                ),
+                dependencies: vec!["mark_deployment_complete".to_string()],
+                job_config: Some(serde_json::json!({
+                    "deployment_id": deployment.id,
+                    "project_id": project.id,
+                    "release": release,
+                    "build_job_id": "build_image",
+                    "search_paths": search_paths,
+                    "path_rewrites": path_rewrites,
+                })),
+                required_for_completion: false,
+            });
+            debug!(
+                "Added capture_source_maps job to workflow (release: {})",
+                release
+            );
         }
 
         info!(
@@ -1557,6 +1636,112 @@ mod tests {
                 job.job_id
             );
         }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_git_project_with_docker_image_deployment(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let test_db = TestDatabase::with_migrations().await?;
+        let db = test_db.connection_arc();
+        let log_service = Arc::new(LogService::new(std::env::temp_dir()));
+        let config_service = create_test_config_service(db.clone());
+        let dsn_service = create_test_dsn_service(db.clone());
+        let external_service_manager = create_test_external_service_manager(db.clone());
+        let planner = WorkflowPlanner::new(
+            db.clone(),
+            log_service,
+            external_service_manager,
+            config_service,
+            dsn_service,
+            create_test_encryption_service(),
+        );
+
+        // Create a Git project (default source_type)
+        let project = projects::ActiveModel {
+            name: Set("Git Project".to_string()),
+            slug: Set("git-project".to_string()),
+            repo_owner: Set("test-owner".to_string()),
+            repo_name: Set("test-repo".to_string()),
+            main_branch: Set("main".to_string()),
+            git_provider_connection_id: Set(Some(1)),
+            preset: Set(Preset::NextJs),
+            directory: Set("/".to_string()),
+            created_at: Set(Utc::now()),
+            updated_at: Set(Utc::now()),
+            ..Default::default()
+        };
+        let project = project.insert(db.as_ref()).await?;
+
+        // Verify it's a Git project
+        assert_eq!(
+            project.source_type,
+            temps_entities::source_type::SourceType::Git
+        );
+
+        // Create environment
+        let environment = environments::ActiveModel {
+            project_id: Set(project.id),
+            name: Set("Production".to_string()),
+            slug: Set("production".to_string()),
+            host: Set("test.example.com".to_string()),
+            upstreams: Set(UpstreamList::default()),
+            subdomain: Set("test.example.com".to_string()),
+            created_at: Set(Utc::now()),
+            updated_at: Set(Utc::now()),
+            ..Default::default()
+        };
+        let environment = environment.insert(db.as_ref()).await?;
+
+        // Create deployment with Docker image metadata (simulating deploy_from_image handler)
+        let deployment_metadata = temps_entities::deployments::DeploymentMetadata {
+            external_image_ref: Some("ghcr.io/org/app:v1.0".to_string()),
+            deployment_source_type: Some(temps_entities::source_type::SourceType::DockerImage),
+            ..Default::default()
+        };
+
+        let deployment = deployments::ActiveModel {
+            project_id: Set(project.id),
+            environment_id: Set(environment.id),
+            slug: Set("test-docker-deploy".to_string()),
+            state: Set("pending".to_string()),
+            metadata: Set(Some(deployment_metadata)),
+            image_name: Set(Some("ghcr.io/org/app:v1.0".to_string())),
+            created_at: Set(Utc::now()),
+            updated_at: Set(Utc::now()),
+            ..Default::default()
+        };
+        let deployment = deployment.insert(db.as_ref()).await?;
+
+        let jobs = planner.create_deployment_jobs(deployment.id).await?;
+
+        let job_ids: Vec<String> = jobs.iter().map(|j| j.job_id.clone()).collect();
+
+        // Should use Docker image pipeline, NOT Git pipeline
+        assert!(
+            job_ids.contains(&"pull_external_image".to_string()),
+            "Expected pull_external_image job for Docker image deployment, got: {:?}",
+            job_ids
+        );
+        assert!(
+            job_ids.contains(&"deploy_container".to_string()),
+            "Expected deploy_container job"
+        );
+        assert!(
+            job_ids.contains(&"mark_deployment_complete".to_string()),
+            "Expected mark_deployment_complete job"
+        );
+
+        // Should NOT contain Git pipeline jobs
+        assert!(
+            !job_ids.contains(&"download_repo".to_string()),
+            "Should NOT contain download_repo for Docker image deployment"
+        );
+        assert!(
+            !job_ids.contains(&"build_image".to_string()),
+            "Should NOT contain build_image for Docker image deployment"
+        );
 
         Ok(())
     }

@@ -34,6 +34,30 @@ pub struct AppSettings {
 
     // System monitoring settings
     pub disk_space_alert: DiskSpaceAlertSettings,
+
+    // Docker container log settings
+    pub container_logs: ContainerLogSettings,
+}
+
+/// Docker container log rotation settings
+/// Controls the `--log-opt max-size` and `--log-opt max-file` for containers
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(default)]
+pub struct ContainerLogSettings {
+    /// Maximum size of each log file (e.g., "50m", "100m", "1g")
+    /// Docker default is unlimited; we default to "50m" to prevent disk exhaustion
+    #[schema(example = "50m")]
+    pub max_size: String,
+    /// Maximum number of rotated log files to keep (e.g., 3 means up to 3 x max_size total)
+    #[schema(example = 3)]
+    pub max_file: u32,
+    /// Maximum size for external service container logs (postgres, redis, etc.)
+    /// Defaults to "20m" since services are typically less verbose than app containers
+    #[schema(example = "20m")]
+    pub service_max_size: String,
+    /// Maximum rotated log files for external service containers
+    #[schema(example = 3)]
+    pub service_max_file: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -112,6 +136,7 @@ pub struct DiskSpaceAlertSettings {
 /// Demo mode settings for allowing unauthenticated access to demo subdomain
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(default)]
+#[derive(Default)]
 pub struct DemoModeSettings {
     /// Whether demo mode is enabled (disabled by default for security)
     pub enabled: bool,
@@ -136,6 +161,18 @@ impl Default for AppSettings {
             rate_limiting: RateLimitSettings::default(),
             docker_registry: DockerRegistrySettings::default(),
             disk_space_alert: DiskSpaceAlertSettings::default(),
+            container_logs: ContainerLogSettings::default(),
+        }
+    }
+}
+
+impl Default for ContainerLogSettings {
+    fn default() -> Self {
+        Self {
+            max_size: "50m".to_string(),
+            max_file: 3,
+            service_max_size: "20m".to_string(),
+            service_max_file: 3,
         }
     }
 }
@@ -218,15 +255,6 @@ impl Default for DiskSpaceAlertSettings {
             threshold_percent: 80,       // Alert at 80% usage
             check_interval_seconds: 300, // Check every 5 minutes
             monitor_path: None,          // Use data directory by default
-        }
-    }
-}
-
-impl Default for DemoModeSettings {
-    fn default() -> Self {
-        Self {
-            enabled: false, // Disabled by default for security
-            domain: None,   // Uses demo.<preview_domain> by default
         }
     }
 }

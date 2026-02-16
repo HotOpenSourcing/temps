@@ -2,8 +2,8 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use sea_orm::{
-    prelude::Uuid, sea_query::Expr, ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait,
-    QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
+    prelude::Uuid, ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
+    QueryOrder, QuerySelect, Set,
 };
 use temps_core::{Job, ProjectCreatedJob, ProjectDeletedJob, ProjectUpdatedJob};
 use temps_entities::projects;
@@ -472,198 +472,62 @@ impl ProjectService {
         Ok(project_found)
     }
 
-    pub async fn delete_project(&self, project_id: i32) -> Result<(), ProjectError> {
-        // Get project info before deletion for the event
-        let project = projects::Entity::find_by_id(project_id)
-            .one(self.db.as_ref())
-            .await
-            .map_err(|e| ProjectError::Other(e.to_string()))?;
-        if project.is_none() {
-            return Err(ProjectError::NotFound(format!(
-                "project {} not found",
-                project_id
-            )));
-        }
-        // Teardown all deployments for this project before deletion
-        if let Some(project_info) = &project {
-            info!(
-                "Tearing down all deployments for project {}",
-                project_info.id
-            );
-            let deployments = temps_entities::deployments::Entity::find()
-                .filter(temps_entities::deployments::Column::ProjectId.eq(project_id))
+    pub async fn delete_project(
+        &self,
+        project_id: i32,
+        project_name: &str,
+    ) -> Result<(), ProjectError> {
+        // Fetch environments before deletion to emit cleanup jobs.
+        // We only need id, name, and project_id — use select_only to avoid loading full models.
+        let environments_to_delete: Vec<(i32, String, i32)> =
+            temps_entities::environments::Entity::find()
+                .filter(temps_entities::environments::Column::ProjectId.eq(project_id))
+                .select_only()
+                .column(temps_entities::environments::Column::Id)
+                .column(temps_entities::environments::Column::Name)
+                .column(temps_entities::environments::Column::ProjectId)
+                .into_tuple()
                 .all(self.db.as_ref())
                 .await
                 .map_err(|e| ProjectError::Other(e.to_string()))?;
 
-            // Extract deployment IDs for bulk operations instead of individual teardowns
-            let deployment_ids: Vec<i32> = deployments.iter().map(|d| d.id).collect();
-
-            // Bulk teardown operations - update all deployment states to "cancelled" in one query
-            if !deployment_ids.is_empty() {
-                use temps_entities::deployments;
-                deployments::Entity::update_many()
-                    .col_expr(deployments::Column::State, Expr::value("cancelled"))
-                    .col_expr(
-                        deployments::Column::UpdatedAt,
-                        Expr::current_timestamp().into(),
-                    )
-                    .filter(deployments::Column::Id.is_in(deployment_ids))
-                    .exec(self.db.as_ref())
-                    .await
-                    .map_err(|e| {
-                        ProjectError::Other(format!("Failed to bulk cancel deployments: {}", e))
-                    })?;
-
-                info!(
-                    "Bulk cancelled {} deployments for project deletion",
-                    deployments.len()
-                );
-            }
-        }
-        let txn = self.db.begin().await?;
-
-        use temps_entities::{
-            crons, deployment_domains, deployments, env_var_environments, env_vars,
-            environment_domains, environments, project_custom_domains, project_services, projects,
-        };
-
-        // NOTE: We're NOT deleting analytics_events, visitor, traces, logs, proxy_logs, or performance_metrics
-        // These are kept for historical/audit purposes and can be very large tables
-        info!("Keeping analytics data, visitor data, traces, and logs for historical purposes");
-
-        info!("deleting deployment domains");
-        // Get all deployment IDs for this project first
-        let deployment_ids: Vec<i32> = deployments::Entity::find()
-            .filter(deployments::Column::ProjectId.eq(project_id))
-            .all(&txn)
-            .await?
-            .into_iter()
-            .map(|d| d.id)
-            .collect();
-
-        // Delete deployment_domains for these deployments
-        deployment_domains::Entity::delete_many()
-            .filter(deployment_domains::Column::DeploymentId.is_in(deployment_ids.clone()))
-            .exec(&txn)
-            .await?;
-
-        info!("deleting environment domains");
-        // Get all environment IDs for this project first
-        let environment_ids: Vec<i32> = environments::Entity::find()
-            .filter(environments::Column::ProjectId.eq(project_id))
-            .all(&txn)
-            .await?
-            .into_iter()
-            .map(|e| e.id)
-            .collect();
-
-        // Delete environment_domains for these environments
-        environment_domains::Entity::delete_many()
-            .filter(environment_domains::Column::EnvironmentId.is_in(environment_ids.clone()))
-            .exec(&txn)
-            .await?;
-
-        // Delete cron jobs for this project
-        info!("Deleting cron jobs");
-        crons::Entity::delete_many()
-            .filter(crons::Column::ProjectId.eq(project_id))
-            .exec(&txn)
-            .await?;
-
-        // Delete project services
-        info!("Deleting project services");
-        project_services::Entity::delete_many()
-            .filter(project_services::Column::ProjectId.eq(project_id))
-            .exec(&txn)
-            .await?;
-
-        info!("deleting env_var_environments");
-        // Delete env_var_environments for these environments
-        env_var_environments::Entity::delete_many()
-            .filter(env_var_environments::Column::EnvironmentId.is_in(environment_ids))
-            .exec(&txn)
-            .await?;
-
-        info!("deleting env_vars");
-        // Delete environment variables
-        env_vars::Entity::delete_many()
-            .filter(env_vars::Column::ProjectId.eq(project_id))
-            .exec(&txn)
-            .await?;
-
-        info!("deleting deployments");
-        // Delete all deployments for this project
-        deployments::Entity::delete_many()
-            .filter(deployments::Column::ProjectId.eq(project_id))
-            .exec(&txn)
-            .await?;
-
-        info!("deleting environments");
-        // Get all environments before deletion to emit events
-        let environments_to_delete = environments::Entity::find()
-            .filter(environments::Column::ProjectId.eq(project_id))
-            .all(&txn)
-            .await?;
-
-        // Emit EnvironmentDeleted jobs for each environment
-        for env in &environments_to_delete {
+        // Emit EnvironmentDeleted jobs before deletion so subscribers can clean up
+        for (env_id, env_name, env_project_id) in &environments_to_delete {
             let env_deleted_job = Job::EnvironmentDeleted(temps_core::EnvironmentDeletedJob {
-                environment_id: env.id,
-                environment_name: env.name.clone(),
-                project_id: env.project_id,
+                environment_id: *env_id,
+                environment_name: env_name.clone(),
+                project_id: *env_project_id,
             });
 
             if let Err(e) = self.queue_service.send(env_deleted_job).await {
                 warn!(
                     "Failed to emit EnvironmentDeleted job for environment {}: {}",
-                    env.id, e
+                    env_id, e
                 );
-            } else {
-                info!("Emitted EnvironmentDeleted job for environment {}", env.id);
             }
         }
 
-        // Delete all environments for this project
-        environments::Entity::delete_many()
-            .filter(environments::Column::ProjectId.eq(project_id))
-            .exec(&txn)
+        // Delete the project row — all related data (deployments, environments, domains,
+        // crons, env_vars, services, etc.) is cleaned up via ON DELETE CASCADE foreign keys.
+        temps_entities::projects::Entity::delete_by_id(project_id)
+            .exec(self.db.as_ref())
             .await?;
 
-        info!("deleting custom domains");
-        // Delete all custom domains for this project
-        project_custom_domains::Entity::delete_many()
-            .filter(project_custom_domains::Column::ProjectId.eq(project_id))
-            .exec(&txn)
-            .await?;
+        // Emit ProjectDeleted job for async cleanup (e.g. status monitors)
+        let project_deleted_job = Job::ProjectDeleted(ProjectDeletedJob {
+            project_id,
+            project_name: project_name.to_string(),
+        });
 
-        info!("Hard deleting project from database");
-        // Actually delete the project row from the database
-        projects::Entity::delete_by_id(project_id)
-            .exec(&txn)
-            .await?;
-
-        txn.commit().await?;
-
-        // Emit ProjectDeleted job
-        if let Some(project_data) = project {
-            let project_deleted_job = Job::ProjectDeleted(ProjectDeletedJob {
-                project_id: project_data.id,
-                project_name: project_data.name.clone(),
-            });
-
-            if let Err(e) = self.queue_service.send(project_deleted_job).await {
-                warn!(
-                    "Failed to emit ProjectDeleted job for project {}: {}",
-                    project_id, e
-                );
-            } else {
-                info!("Emitted ProjectDeleted job for project {}", project_id);
-            }
+        if let Err(e) = self.queue_service.send(project_deleted_job).await {
+            warn!(
+                "Failed to emit ProjectDeleted job for project {}: {}",
+                project_id, e
+            );
         }
 
         info!(
-            "Project and all related data deleted successfully for project_id: {}",
+            "Project {} and all related data deleted successfully",
             project_id
         );
 

@@ -63,7 +63,7 @@ impl KvService {
 
         debug!("KV GET {}", namespaced);
 
-        let result: Option<String> = conn.get(&namespaced).await.map_err(|e| KvError::Redis(e))?;
+        let result: Option<String> = conn.get(&namespaced).await.map_err(KvError::Redis)?;
 
         match result {
             Some(s) => {
@@ -138,10 +138,7 @@ impl KvService {
 
         debug!("KV DEL {:?}", namespaced_keys);
 
-        let deleted: i64 = conn
-            .del(&namespaced_keys)
-            .await
-            .map_err(|e| KvError::Redis(e))?;
+        let deleted: i64 = conn.del(&namespaced_keys).await.map_err(KvError::Redis)?;
 
         Ok(deleted)
     }
@@ -153,10 +150,7 @@ impl KvService {
 
         debug!("KV INCR {}", namespaced);
 
-        let result: i64 = conn
-            .incr(&namespaced, 1)
-            .await
-            .map_err(|e| KvError::Redis(e))?;
+        let result: i64 = conn.incr(&namespaced, 1).await.map_err(KvError::Redis)?;
 
         Ok(result)
     }
@@ -171,7 +165,7 @@ impl KvService {
         let result: i64 = conn
             .incr(&namespaced, amount)
             .await
-            .map_err(|e| KvError::Redis(e))?;
+            .map_err(KvError::Redis)?;
 
         Ok(result)
     }
@@ -186,7 +180,7 @@ impl KvService {
         let result: bool = conn
             .expire(&namespaced, seconds)
             .await
-            .map_err(|e| KvError::Redis(e))?;
+            .map_err(KvError::Redis)?;
 
         Ok(result)
     }
@@ -198,7 +192,7 @@ impl KvService {
 
         debug!("KV TTL {}", namespaced);
 
-        let result: i64 = conn.ttl(&namespaced).await.map_err(|e| KvError::Redis(e))?;
+        let result: i64 = conn.ttl(&namespaced).await.map_err(KvError::Redis)?;
 
         Ok(result)
     }
@@ -215,7 +209,7 @@ impl KvService {
         let keys: Vec<String> = conn
             .keys(&namespaced_pattern)
             .await
-            .map_err(|e| KvError::Redis(e))?;
+            .map_err(KvError::Redis)?;
 
         // Strip namespace from results
         let stripped: Vec<String> = keys
@@ -233,10 +227,7 @@ impl KvService {
 
         debug!("KV EXISTS {}", namespaced);
 
-        let result: bool = conn
-            .exists(&namespaced)
-            .await
-            .map_err(|e| KvError::Redis(e))?;
+        let result: bool = conn.exists(&namespaced).await.map_err(KvError::Redis)?;
 
         Ok(result)
     }
@@ -260,10 +251,8 @@ impl KvService {
 
         debug!("KV MGET {:?}", namespaced_keys);
 
-        let results: Vec<Option<String>> = conn
-            .mget(&namespaced_keys)
-            .await
-            .map_err(|e| KvError::Redis(e))?;
+        let results: Vec<Option<String>> =
+            conn.mget(&namespaced_keys).await.map_err(KvError::Redis)?;
 
         let values: Vec<Option<Value>> = results
             .into_iter()
@@ -276,7 +265,6 @@ impl KvService {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn test_namespaced_key() {

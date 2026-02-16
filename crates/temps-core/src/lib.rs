@@ -10,6 +10,7 @@ pub mod notifications;
 pub mod openapi;
 pub mod plugin;
 pub mod problemdetails;
+pub mod retry;
 pub use problemdetails::ProblemDetails;
 mod app_settings;
 mod constants;
@@ -37,8 +38,9 @@ pub use utils::*;
 // Re-export external dependencies
 pub use anyhow;
 pub use app_settings::{
-    AppSettings, DiskSpaceAlertSettings, DnsProviderSettings, DockerRegistrySettings,
-    LetsEncryptSettings, RateLimitSettings, ScreenshotSettings, SecurityHeadersSettings,
+    AppSettings, ContainerLogSettings, DiskSpaceAlertSettings, DnsProviderSettings,
+    DockerRegistrySettings, LetsEncryptSettings, RateLimitSettings, ScreenshotSettings,
+    SecurityHeadersSettings,
 };
 pub use async_trait;
 pub use chrono;

@@ -1,6 +1,7 @@
 use crate::{CertificateRepository, DomainService, TlsService};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use temps_core::AuditLogger;
 use temps_dns::services::DnsProviderService;
 
 use utoipa::ToSchema;
@@ -11,18 +12,21 @@ pub struct DomainAppState {
     pub domain_service: Arc<DomainService>,
     /// DNS provider service for automatic DNS record setup (optional)
     pub dns_provider_service: Option<Arc<DnsProviderService>>,
+    pub audit_service: Arc<dyn AuditLogger>,
 }
 
 pub fn create_domain_app_state(
     tls_service: Arc<TlsService>,
     repository: Arc<dyn CertificateRepository>,
     domain_service: Arc<DomainService>,
+    audit_service: Arc<dyn AuditLogger>,
 ) -> Arc<DomainAppState> {
     Arc::new(DomainAppState {
         tls_service,
         repository,
         domain_service,
         dns_provider_service: None,
+        audit_service,
     })
 }
 
@@ -31,12 +35,14 @@ pub fn create_domain_app_state_with_dns(
     repository: Arc<dyn CertificateRepository>,
     domain_service: Arc<DomainService>,
     dns_provider_service: Arc<DnsProviderService>,
+    audit_service: Arc<dyn AuditLogger>,
 ) -> Arc<DomainAppState> {
     Arc::new(DomainAppState {
         tls_service,
         repository,
         domain_service,
         dns_provider_service: Some(dns_provider_service),
+        audit_service,
     })
 }
 

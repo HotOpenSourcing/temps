@@ -37,6 +37,7 @@ struct DomainsResponse {
 #[derive(Debug, Deserialize)]
 struct DoDomain {
     name: String,
+    #[allow(dead_code)]
     ttl: Option<u32>,
 }
 

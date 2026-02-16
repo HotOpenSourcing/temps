@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::Serialize;
 use temps_core::UtcDateTime;
 use utoipa::ToSchema;
@@ -111,4 +113,26 @@ pub struct AggregatedBucketsResponse {
     pub aggregation_level: String,
     pub items: Vec<AggregatedBucketItem>,
     pub total: i64,
+}
+
+/// Analytics data for a single project in the dashboard batch response
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ProjectDashboardAnalytics {
+    pub project_id: i32,
+    /// Unique visitor count in the current time range
+    pub unique_visitors: i64,
+    /// Unique visitor count in the previous period (same duration, shifted back)
+    pub previous_unique_visitors: i64,
+    /// Percentage change from previous period (positive = growth, negative = decline)
+    /// Null when previous period had zero visitors (no baseline to compare)
+    pub trend_percentage: Option<f64>,
+    /// Hourly sparkline data points
+    pub hourly_visits: Vec<EventTimeline>,
+}
+
+/// Batch response for dashboard project analytics
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DashboardProjectsAnalyticsResponse {
+    /// Map of project_id -> analytics data
+    pub projects: HashMap<String, ProjectDashboardAnalytics>,
 }

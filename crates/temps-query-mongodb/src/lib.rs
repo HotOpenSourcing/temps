@@ -11,6 +11,7 @@
 //! ## Example
 //!
 //! ```rust,no_run
+//! use temps_query::DataSource;
 //! use temps_query_mongodb::MongoDBSource;
 //!
 //! # async fn example() -> temps_query::Result<()> {
@@ -608,7 +609,7 @@ mod tests {
 
     #[test]
     fn test_capabilities() {
-        let capabilities = vec![Capability::Document];
+        let capabilities = [Capability::Document];
         assert!(capabilities.contains(&Capability::Document));
     }
 }

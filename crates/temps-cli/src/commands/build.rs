@@ -183,14 +183,7 @@ impl BuildCommand {
         }
 
         // Determine if we should use BuildKit
-        let use_buildkit = match self.buildkit {
-            Some(v) => v,
-            None => {
-                // Auto-detect: Try to check if BuildKit is available
-                // For now, default to legacy builder for broader compatibility
-                false
-            }
-        };
+        let use_buildkit = self.buildkit.unwrap_or_default();
 
         // Configure build options
         let build_options = bollard::query_parameters::BuildImageOptions {
@@ -457,8 +450,8 @@ impl BuildCommand {
             let pattern_str = if line.starts_with('!') {
                 // Negation patterns not fully supported, skip for now
                 continue;
-            } else if line.starts_with('/') {
-                line[1..].to_string()
+            } else if let Some(stripped) = line.strip_prefix('/') {
+                stripped.to_string()
             } else {
                 format!("**/{}", line)
             };

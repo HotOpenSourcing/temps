@@ -619,74 +619,43 @@ impl EnvironmentService {
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use std::sync::Arc;
-//     use temps_config::{ConfigService, Settings};
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-//     // Mock database connection for testing
-//     fn create_mock_db() -> Arc<temps_database::DbConnection> {
-//         // Note: In real tests, you'd use a test database
-//         // This is just for compilation testing
-//         Arc::new(temps_database::DbConnection::default())
-//     }
+    #[test]
+    fn test_environment_error_display() {
+        let error = EnvironmentError::NotFound("test".to_string());
+        assert_eq!(error.to_string(), "Environment not found");
 
-//     #[tokio::test]
-//     async fn test_environment_service_creation() {
-//         let db = create_mock_db();
+        let error = EnvironmentError::InvalidInput("invalid input".to_string());
+        assert_eq!(error.to_string(), "Invalid input: invalid input");
 
-//         // Create a minimal config service for testing
-//         let config = Arc::new(temps_config::ConfigService::new(
-//             db.clone(),
-//             Arc::new(
-//                 temps_core::EncryptionService::new(
-//                     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-//                 )
-//                 .unwrap(),
-//             ),
-//         ));
+        let error = EnvironmentError::Other("some error".to_string());
+        assert_eq!(error.to_string(), "Other error: some error");
+    }
 
-//         let service = EnvironmentService::new(db, config);
+    #[test]
+    fn test_domain_environment_struct() {
+        let domain_env = DomainEnvironment {
+            id: 1,
+            name: "production".to_string(),
+            slug: "prod".to_string(),
+        };
 
-//         // Test that service fields are accessible
-//         assert!(std::ptr::addr_of!(service.db).is_null() == false);
-//         assert!(std::ptr::addr_of!(service.config_service).is_null() == false);
-//     }
+        assert_eq!(domain_env.id, 1);
+        assert_eq!(domain_env.name, "production");
+        assert_eq!(domain_env.slug, "prod");
+    }
 
-//     #[test]
-//     fn test_environment_error_display() {
-//         let error = EnvironmentError::NotFound("test".to_string());
-//         assert_eq!(error.to_string(), "Environment not found");
+    #[test]
+    fn test_environment_error_from_db_err() {
+        let db_error = DbErr::RecordNotFound("test".to_string());
+        let env_error = EnvironmentError::from(db_error);
 
-//         let error = EnvironmentError::InvalidInput("invalid input".to_string());
-//         assert_eq!(error.to_string(), "Invalid input: invalid input");
-
-//         let error = EnvironmentError::Other("some error".to_string());
-//         assert_eq!(error.to_string(), "Other error: some error");
-//     }
-
-//     #[test]
-//     fn test_domain_environment_struct() {
-//         let domain_env = DomainEnvironment {
-//             id: 1,
-//             name: "production".to_string(),
-//             slug: "prod".to_string(),
-//         };
-
-//         assert_eq!(domain_env.id, 1);
-//         assert_eq!(domain_env.name, "production");
-//         assert_eq!(domain_env.slug, "prod");
-//     }
-
-//     #[test]
-//     fn test_environment_error_from_db_err() {
-//         let db_error = DbErr::RecordNotFound("test".to_string());
-//         let env_error = EnvironmentError::from(db_error);
-
-//         match env_error {
-//             EnvironmentError::NotFound(_) => assert!(true),
-//             _ => panic!("Expected NotFound error"),
-//         }
-//     }
-// }
+        match env_error {
+            EnvironmentError::NotFound(_) => {}
+            _ => panic!("Expected NotFound error"),
+        }
+    }
+}

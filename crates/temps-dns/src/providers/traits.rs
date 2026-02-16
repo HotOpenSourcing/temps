@@ -46,6 +46,7 @@ impl std::fmt::Display for DnsProviderType {
 }
 
 impl DnsProviderType {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Result<Self, DnsError> {
         match s.to_lowercase().as_str() {
             "cloudflare" | "cf" => Ok(DnsProviderType::Cloudflare),
@@ -926,7 +927,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_manual_provider_default() {
-        let provider = ManualDnsProvider::default();
+        let provider = ManualDnsProvider;
         assert_eq!(provider.provider_type(), DnsProviderType::Manual);
     }
 

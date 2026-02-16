@@ -118,7 +118,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_email_plugin_default() {
-        let email_plugin = EmailPlugin::default();
+        let email_plugin = EmailPlugin;
         assert_eq!(email_plugin.name(), "email");
     }
 }

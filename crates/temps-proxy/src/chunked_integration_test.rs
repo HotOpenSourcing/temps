@@ -52,14 +52,12 @@ mod chunked_integration_tests {
                                             let _ = socket.flush().await;
 
                                             // Send JSON chunks with delays to simulate streaming
-                                            let json_chunks = vec![
-                                                r#"{"type":"start","timestamp":"#,
+                                            let json_chunks = [r#"{"type":"start","timestamp":"#,
                                                 r#"2025-01-08T12:00:00Z","#,
                                                 r#""data":{"message":"chunk"#,
                                                 r#"_1"}}"#,
                                                 r#"{"type":"end","status":"#,
-                                                r#""ok"}"#,
-                                            ];
+                                                r#""ok"}"#];
 
                                             for (i, chunk_data) in json_chunks.iter().enumerate() {
                                                 let chunk_header = format!("{:x}\r\n", chunk_data.len());

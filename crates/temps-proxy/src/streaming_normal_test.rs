@@ -355,7 +355,7 @@ mod streaming_normal_tests {
             }
         }
 
-        let _ = shutdown_tx.send(());
+        drop(shutdown_tx.send(()));
     }
 
     /// Test streaming with no Content-Length or Transfer-Encoding
@@ -452,6 +452,6 @@ mod streaming_normal_tests {
             }
         }
 
-        let _ = shutdown_tx.send(());
+        drop(shutdown_tx.send(()));
     }
 }

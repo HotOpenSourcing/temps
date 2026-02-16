@@ -15,14 +15,29 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
+import { Badge } from '@/components/ui/badge'
 import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
 import { useQuery } from '@tanstack/react-query'
-import { format } from 'date-fns'
+import { format, formatDistanceToNow } from 'date-fns'
 import {
   Globe,
-  Bug,
-  Users as UserIcon,
+  Bot,
+  User,
   ChevronLeft,
   ChevronRight,
 } from 'lucide-react'
@@ -32,6 +47,50 @@ import { Skeleton } from '@/components/ui/skeleton'
 
 interface VisitorsListProps {
   project: ProjectResponse
+}
+
+function countryCodeToFlag(countryCode: string | null | undefined): string {
+  if (!countryCode || countryCode.length !== 2) return ''
+  const codePoints = countryCode
+    .toUpperCase()
+    .split('')
+    .map((char) => 127397 + char.charCodeAt(0))
+  return String.fromCodePoint(...codePoints)
+}
+
+function formatLocation(visitor: VisitorInfo): string {
+  const parts: string[] = []
+  if (visitor.city) parts.push(visitor.city)
+  if (visitor.region && visitor.region !== visitor.city) parts.push(visitor.region)
+  if (visitor.country) parts.push(visitor.country)
+  return parts.join(', ') || 'Unknown'
+}
+
+function getBrowserInfo(userAgent: string): { name: string; icon: string } {
+  if (userAgent.includes('Edge') || userAgent.includes('Edg/')) {
+    return { name: 'Edge', icon: 'edge' }
+  } else if (userAgent.includes('Chrome') && !userAgent.includes('Chromium')) {
+    return { name: 'Chrome', icon: 'chrome' }
+  } else if (userAgent.includes('Safari') && !userAgent.includes('Chrome')) {
+    return { name: 'Safari', icon: 'safari' }
+  } else if (userAgent.includes('Firefox')) {
+    return { name: 'Firefox', icon: 'firefox' }
+  } else if (userAgent.includes('Opera') || userAgent.includes('OPR')) {
+    return { name: 'Opera', icon: 'opera' }
+  } else if (userAgent.includes('bot') || userAgent.includes('Bot')) {
+    return { name: 'Bot', icon: 'bot' }
+  }
+  return { name: 'Unknown', icon: 'unknown' }
+}
+
+function getOSName(userAgent: string): string {
+  if (userAgent.includes('Windows')) return 'Windows'
+  if (userAgent.includes('Mac OS')) return 'macOS'
+  if (userAgent.includes('Linux') && !userAgent.includes('Android')) return 'Linux'
+  if (userAgent.includes('Android')) return 'Android'
+  if (userAgent.includes('iPhone') || userAgent.includes('iPad')) return 'iOS'
+  if (userAgent.includes('CrOS')) return 'ChromeOS'
+  return 'Unknown'
 }
 
 export function VisitorsList({ project }: VisitorsListProps) {
@@ -110,7 +169,9 @@ export function VisitorsList({ project }: VisitorsListProps) {
               </div>
               <Select
                 value={crawlerFilter}
-                onValueChange={(value: any) => setCrawlerFilter(value)}
+                onValueChange={(value: 'all' | 'humans' | 'crawlers') =>
+                  setCrawlerFilter(value)
+                }
               >
                 <SelectTrigger className="w-[140px]">
                   <SelectValue />
@@ -140,9 +201,9 @@ export function VisitorsList({ project }: VisitorsListProps) {
         </CardHeader>
         <CardContent>
           {isLoading ? (
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              {[...Array(4)].map((_, i) => (
-                <Skeleton key={i} className="h-96 w-full rounded-lg" />
+            <div className="space-y-2">
+              {[...Array(8)].map((_, i) => (
+                <Skeleton key={i} className="h-12 w-full rounded" />
               ))}
             </div>
           ) : error ? (
@@ -156,126 +217,37 @@ export function VisitorsList({ project }: VisitorsListProps) {
             </div>
           ) : !data || data.visitors.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12">
-              <UserIcon className="h-12 w-12 text-muted-foreground mb-4" />
+              <User className="h-12 w-12 text-muted-foreground mb-4" />
               <p className="text-muted-foreground">No visitors found</p>
             </div>
           ) : (
             <>
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                {data.visitors.map((visitor: VisitorInfo) => (
-                  <Card
-                    key={visitor.visitor_id}
-                    className="cursor-pointer hover:shadow-md hover:border-primary/60 transition-all border-l-4 border-l-blue-500"
-                    onClick={() => {
-                      navigate(
-                        `/projects/${project.slug}/analytics/visitors/${visitor.id}`
-                      )
-                    }}
-                  >
-                    <CardContent className="p-5 space-y-4">
-                      {/* Header with visitor type indicator */}
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="flex items-center gap-3 flex-1 min-w-0">
-                          {/* Avatar/Icon */}
-                          <div
-                            className={`p-2.5 rounded-lg flex-shrink-0 ${
-                              visitor.is_crawler
-                                ? 'bg-amber-100 dark:bg-amber-900/30'
-                                : 'bg-blue-100 dark:bg-blue-900/30'
-                            }`}
-                          >
-                            {visitor.is_crawler ? (
-                              <Bug
-                                className={`h-5 w-5 text-amber-600 dark:text-amber-400`}
-                              />
-                            ) : (
-                              <UserIcon
-                                className={`h-5 w-5 text-blue-600 dark:text-blue-400`}
-                              />
-                            )}
-                          </div>
-
-                          {/* Visitor ID and Type */}
-                          <div className="min-w-0 flex-1">
-                            <div className="font-mono text-xs text-muted-foreground truncate">
-                              {visitor.visitor_id?.substring(0, 12)}
-                            </div>
-                            <p className="text-sm font-medium text-foreground mt-1">
-                              {visitor.is_crawler ? 'Bot' : 'Human Visitor'}
-                              {visitor.crawler_name &&
-                                ` - ${visitor.crawler_name}`}
-                            </p>
-                          </div>
-                        </div>
-                      </div>
-                      {/* Browser and Page Views */}
-                      <div className="grid grid-cols-2 gap-3 pt-2 border-t">
-                        <div>
-                          <p className="text-xs text-muted-foreground font-medium mb-1">
-                            Browser
-                          </p>
-                          <p className="text-sm font-medium">
-                            {visitor.user_agent
-                              ? getBrowserName(visitor.user_agent)
-                              : 'Unknown'}
-                          </p>
-                        </div>
-                      </div>
-
-                      {/* Location info */}
-                      <div className="pt-2 border-t">
-                        <p className="text-xs text-muted-foreground font-medium mb-2">
-                          Location
-                        </p>
-                        <div className="flex items-center gap-2">
-                          <Globe className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-                          <span className="text-sm font-medium">
-                            {visitor.city}, {visitor.region}
-                          </span>
-                          <span className="text-xs text-muted-foreground">
-                            {visitor.country}
-                            {visitor.is_eu && ' (EU)'}
-                          </span>
-                        </div>
-                      </div>
-
-                      {/* First and Last Seen */}
-                      <div className="pt-2 border-t grid grid-cols-2 gap-3">
-                        <div>
-                          <p className="text-xs text-muted-foreground font-medium mb-1">
-                            First Seen
-                          </p>
-                          <p className="text-sm font-medium">
-                            {format(
-                              new Date(visitor.first_seen),
-                              'MMM d, HH:mm'
-                            )}
-                          </p>
-                        </div>
-                        <div>
-                          <p className="text-xs text-muted-foreground font-medium mb-1">
-                            Last Seen
-                          </p>
-                          <p className="text-sm font-medium">
-                            {format(
-                              new Date(visitor.last_seen),
-                              'MMM d, HH:mm'
-                            )}
-                          </p>
-                        </div>
-                      </div>
-
-                      {/* View details footer */}
-                      <div className="pt-2 border-t flex items-center justify-between">
-                        <span className="text-xs text-muted-foreground">
-                          View full details
-                        </span>
-                        <ChevronRight className="h-4 w-4 text-muted-foreground" />
-                      </div>
-                    </CardContent>
-                  </Card>
-                ))}
-              </div>
+              <TooltipProvider>
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="w-[280px]">Visitor</TableHead>
+                      <TableHead>Location</TableHead>
+                      <TableHead>Browser / OS</TableHead>
+                      <TableHead>First Seen</TableHead>
+                      <TableHead>Last Seen</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {data.visitors.map((visitor: VisitorInfo) => (
+                      <VisitorRow
+                        key={visitor.visitor_id}
+                        visitor={visitor}
+                        onClick={() =>
+                          navigate(
+                            `/projects/${project.slug}/analytics/visitors/${visitor.id}`
+                          )
+                        }
+                      />
+                    ))}
+                  </TableBody>
+                </Table>
+              </TooltipProvider>
 
               {/* Pagination */}
               {totalPages > 1 && (
@@ -334,20 +306,116 @@ export function VisitorsList({ project }: VisitorsListProps) {
   )
 }
 
-// Helper function to extract browser name from user agent
-function getBrowserName(userAgent: string): string {
-  if (userAgent.includes('Chrome') && !userAgent.includes('Chromium')) {
-    return 'Chrome'
-  } else if (userAgent.includes('Safari') && !userAgent.includes('Chrome')) {
-    return 'Safari'
-  } else if (userAgent.includes('Firefox')) {
-    return 'Firefox'
-  } else if (userAgent.includes('Edge')) {
-    return 'Edge'
-  } else if (userAgent.includes('Opera') || userAgent.includes('OPR')) {
-    return 'Opera'
-  } else if (userAgent.includes('bot') || userAgent.includes('Bot')) {
-    return 'Bot'
-  }
-  return 'Unknown'
+interface VisitorRowProps {
+  visitor: VisitorInfo
+  onClick: () => void
+}
+
+function VisitorRow({ visitor, onClick }: VisitorRowProps) {
+  const browserInfo = visitor.user_agent
+    ? getBrowserInfo(visitor.user_agent)
+    : null
+  const osName = visitor.user_agent ? getOSName(visitor.user_agent) : null
+  const location = formatLocation(visitor)
+  const flag = countryCodeToFlag(visitor.country_code)
+  const lastSeenDate = new Date(visitor.last_seen)
+  const firstSeenDate = new Date(visitor.first_seen)
+
+  return (
+    <TableRow
+      className="cursor-pointer"
+      onClick={onClick}
+    >
+      {/* Visitor identity */}
+      <TableCell>
+        <div className="flex items-center gap-3">
+          <div
+            className={`flex h-8 w-8 items-center justify-center rounded-full flex-shrink-0 ${
+              visitor.is_crawler
+                ? 'bg-amber-100 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400'
+                : 'bg-blue-100 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400'
+            }`}
+          >
+            {visitor.is_crawler ? (
+              <Bot className="h-4 w-4" />
+            ) : (
+              <User className="h-4 w-4" />
+            )}
+          </div>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="font-mono text-sm truncate">
+                {visitor.visitor_id?.substring(0, 12)}
+              </span>
+              <Badge
+                variant={visitor.is_crawler ? 'warning' : 'secondary'}
+                className="text-[10px] px-1.5 py-0"
+              >
+                {visitor.is_crawler
+                  ? visitor.crawler_name || 'Bot'
+                  : 'Human'}
+              </Badge>
+            </div>
+          </div>
+        </div>
+      </TableCell>
+
+      {/* Location */}
+      <TableCell>
+        <div className="flex items-center gap-2">
+          {flag ? (
+            <span className="text-base leading-none">{flag}</span>
+          ) : (
+            <Globe className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+          )}
+          <span className="text-sm truncate max-w-[200px]">{location}</span>
+          {visitor.is_eu && (
+            <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+              EU
+            </Badge>
+          )}
+        </div>
+      </TableCell>
+
+      {/* Browser / OS */}
+      <TableCell>
+        <div className="flex items-center gap-1.5">
+          <span className="text-sm">
+            {browserInfo?.name || 'Unknown'}
+          </span>
+          {osName && osName !== 'Unknown' && (
+            <span className="text-xs text-muted-foreground">/ {osName}</span>
+          )}
+        </div>
+      </TableCell>
+
+      {/* First Seen */}
+      <TableCell>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="text-sm text-muted-foreground cursor-default">
+              {formatDistanceToNow(firstSeenDate, { addSuffix: true })}
+            </span>
+          </TooltipTrigger>
+          <TooltipContent>
+            {format(firstSeenDate, 'MMM d, yyyy HH:mm:ss')}
+          </TooltipContent>
+        </Tooltip>
+      </TableCell>
+
+      {/* Last Seen */}
+      <TableCell>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="text-sm text-muted-foreground cursor-default">
+              {formatDistanceToNow(lastSeenDate, { addSuffix: true })}
+            </span>
+          </TooltipTrigger>
+          <TooltipContent>
+            {format(lastSeenDate, 'MMM d, yyyy HH:mm:ss')}
+          </TooltipContent>
+        </Tooltip>
+      </TableCell>
+    </TableRow>
+  )
 }

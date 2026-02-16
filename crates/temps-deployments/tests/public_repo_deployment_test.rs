@@ -227,10 +227,14 @@ mod public_repo_tests {
     ];
 
     #[tokio::test]
+    #[ignore] // Heavy integration test: clones public repos, builds Docker images, deploys containers.
+              // Run explicitly with: cargo test -p temps-deployments test_deploy_public_repositories -- --ignored
     async fn test_deploy_public_repositories() {
         // Enable verbose Docker build output
-        // Set RUST_LOG to show debug logs from temps-deployer
-        std::env::set_var("RUST_LOG", "temps_deployer=debug,temps_deployments=info");
+        // SAFETY: This is only called from a single-threaded test; no concurrent access.
+        unsafe {
+            std::env::set_var("RUST_LOG", "temps_deployer=debug,temps_deployments=info");
+        }
         let _ = env_logger::try_init();
 
         // Allow filtering to a single test case via environment variable

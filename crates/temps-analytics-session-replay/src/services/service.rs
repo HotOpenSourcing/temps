@@ -6,7 +6,7 @@ use flate2::read::ZlibDecoder;
 use sea_orm::sea_query::Expr;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, FromQueryResult,
-    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, RelationTrait, Set,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -14,9 +14,9 @@ use std::io::Read;
 use std::sync::Arc;
 use temps_core::UtcDateTime;
 use thiserror::Error;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
-use temps_entities::{session_replay_events, session_replay_sessions, visitor};
+use temps_entities::{ip_geolocations, session_replay_events, session_replay_sessions, visitor};
 
 #[derive(Error, Debug)]
 pub enum SessionReplayError {
@@ -101,7 +101,7 @@ pub struct VisitorInfo {
     pub user_agent: Option<String>,
     pub is_crawler: bool,
     pub crawler_name: Option<String>,
-    pub custom_data: Option<String>,
+    pub custom_data: Option<serde_json::Value>,
 }
 
 // Typed query result struct for efficient row parsing
@@ -131,7 +131,12 @@ pub struct SessionReplayQueryResult {
     pub visitor_user_agent: Option<String>,
     pub visitor_is_crawler: bool,
     pub visitor_crawler_name: Option<String>,
-    pub visitor_custom_data: Option<String>,
+    pub visitor_custom_data: Option<serde_json::Value>,
+    // Geolocation fields
+    pub visitor_city: Option<String>,
+    pub visitor_country: Option<String>,
+    pub visitor_country_code: Option<String>,
+    pub visitor_region: Option<String>,
 }
 
 // Projection for list query
@@ -166,7 +171,12 @@ struct SessionWithVisitorAndCountRow {
     pub visitor_user_agent: Option<String>,
     pub visitor_is_crawler: bool,
     pub visitor_crawler_name: Option<String>,
-    pub visitor_custom_data: Option<String>,
+    pub visitor_custom_data: Option<serde_json::Value>,
+    // Geolocation fields (from ip_geolocations via visitor)
+    pub visitor_city: Option<String>,
+    pub visitor_country: Option<String>,
+    pub visitor_country_code: Option<String>,
+    pub visitor_region: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -218,7 +228,12 @@ pub struct SessionReplayWithVisitor {
     pub visitor_last_seen: UtcDateTime,
     pub visitor_is_crawler: bool,
     pub visitor_crawler_name: Option<String>,
-    pub visitor_custom_data: Option<String>,
+    pub visitor_custom_data: Option<serde_json::Value>,
+    // Geolocation fields
+    pub visitor_city: Option<String>,
+    pub visitor_country: Option<String>,
+    pub visitor_country_code: Option<String>,
+    pub visitor_region: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -354,19 +369,12 @@ impl SessionReplayService {
         let events: Value = serde_json::from_str(&decompressed)?;
 
         let mut event_count = 0;
-        let mut min_timestamp: Option<i64> = None;
-        let mut max_timestamp: Option<i64> = None;
 
         // Extract events handling both formats
         let events_to_store = self.extract_events_from_json(&events)?;
 
         for event in &events_to_store {
             let timestamp = event.get("timestamp").and_then(|t| t.as_i64()).unwrap_or(0);
-
-            // Track min/max timestamps for duration calculation
-            min_timestamp = Some(min_timestamp.map_or(timestamp, |min| min.min(timestamp)));
-            max_timestamp = Some(max_timestamp.map_or(timestamp, |max| max.max(timestamp)));
-
             let event_type = event.get("type").and_then(|t| t.as_i64()).map(|t| t as i32);
 
             let event_model = session_replay_events::ActiveModel {
@@ -382,18 +390,10 @@ impl SessionReplayService {
             event_count += 1;
         }
 
-        // Update session duration if we have timestamps
-        if let (Some(min), Some(max)) = (min_timestamp, max_timestamp) {
-            let duration_ms = (max - min) as i32;
-
-            // Get current duration if exists
-            let current_duration = session.duration.unwrap_or(0);
-            let new_duration = current_duration.max(duration_ms);
-
-            if new_duration > current_duration {
-                self.update_session_duration(session_id, new_duration)
-                    .await?;
-            }
+        // Recompute duration from ALL stored events (not just this batch)
+        if event_count > 0 {
+            self.compute_and_update_session_duration(session_id, session.id)
+                .await?;
         }
 
         info!("Added {} events to session {}", event_count, session_id);
@@ -473,20 +473,17 @@ impl SessionReplayService {
         let events_to_store = self.extract_events_from_json(&unpacked.events)?;
         let event_count = events_to_store.len();
 
+        // Look up session integer ID once (not per-event)
+        let session_int_id = session_replay_sessions::Entity::find()
+            .filter(session_replay_sessions::Column::SessionReplayId.eq(&packed_data.session_id))
+            .one(self.db.as_ref())
+            .await?
+            .map(|s| s.id)
+            .unwrap_or(0); // This should exist since we just created it
+
         for event in events_to_store {
             let timestamp = event.get("timestamp").and_then(|t| t.as_i64()).unwrap_or(0);
-
             let event_type = event.get("type").and_then(|t| t.as_i64()).map(|t| t as i32);
-
-            // Need to get the session's integer ID first
-            let session_int_id = session_replay_sessions::Entity::find()
-                .filter(
-                    session_replay_sessions::Column::SessionReplayId.eq(&packed_data.session_id),
-                )
-                .one(self.db.as_ref())
-                .await?
-                .map(|s| s.id)
-                .unwrap_or(0); // This should exist since we just created it
 
             let event_model = session_replay_events::ActiveModel {
                 id: sea_orm::NotSet,
@@ -498,6 +495,12 @@ impl SessionReplayService {
             };
 
             event_model.insert(self.db.as_ref()).await?;
+        }
+
+        // Compute duration from all stored events
+        if event_count > 0 {
+            self.compute_and_update_session_duration(&packed_data.session_id, session_int_id)
+                .await?;
         }
 
         info!(
@@ -609,25 +612,17 @@ impl SessionReplayService {
         let events_to_store = self.extract_events_from_json(&unpacked.events)?;
 
         if !events_to_store.is_empty() {
-            let mut min_timestamp: Option<i64> = None;
-            let mut max_timestamp: Option<i64> = None;
+            // Look up session integer ID once (not per-event)
+            let session_int_id = session_replay_sessions::Entity::find()
+                .filter(session_replay_sessions::Column::SessionReplayId.eq(session_id))
+                .one(self.db.as_ref())
+                .await?
+                .map(|s| s.id)
+                .unwrap_or(0); // This should exist
 
             for event in &events_to_store {
                 let timestamp = event.get("timestamp").and_then(|t| t.as_i64()).unwrap_or(0);
-
-                // Track min/max timestamps for duration calculation
-                min_timestamp = Some(min_timestamp.map_or(timestamp, |min| min.min(timestamp)));
-                max_timestamp = Some(max_timestamp.map_or(timestamp, |max| max.max(timestamp)));
-
                 let event_type = event.get("type").and_then(|t| t.as_i64()).map(|t| t as i32);
-
-                // Get the session's integer ID
-                let session_int_id = session_replay_sessions::Entity::find()
-                    .filter(session_replay_sessions::Column::SessionReplayId.eq(session_id))
-                    .one(self.db.as_ref())
-                    .await?
-                    .map(|s| s.id)
-                    .unwrap_or(0); // This should exist
 
                 let event_model = session_replay_events::ActiveModel {
                     id: sea_orm::NotSet,
@@ -641,12 +636,9 @@ impl SessionReplayService {
                 event_model.insert(self.db.as_ref()).await?;
             }
 
-            // Update session duration if we have timestamps
-            if let (Some(min), Some(max)) = (min_timestamp, max_timestamp) {
-                let duration_ms = (max - min) as i32;
-                self.update_session_duration(session_id, duration_ms)
-                    .await?;
-            }
+            // Recompute duration from ALL stored events (not just this batch)
+            self.compute_and_update_session_duration(session_id, session_int_id)
+                .await?;
 
             info!(
                 "Stored {} events for session {}",
@@ -759,6 +751,10 @@ impl SessionReplayService {
         let mut query = session_replay_sessions::Entity::find()
             .filter(session_replay_sessions::Column::ProjectId.eq(project_id))
             .inner_join(visitor::Entity)
+            .join(
+                sea_orm::JoinType::LeftJoin,
+                visitor::Relation::IpGeolocations.def(),
+            )
             .select_only()
             .columns([
                 session_replay_sessions::Column::Id,
@@ -820,6 +816,26 @@ impl SessionReplayService {
                 Expr::col((visitor::Entity, visitor::Column::CustomData)),
                 "visitor_custom_data",
             )
+            // Geolocation fields from ip_geolocations (LEFT JOIN)
+            .expr_as(
+                Expr::col((ip_geolocations::Entity, ip_geolocations::Column::City)),
+                "visitor_city",
+            )
+            .expr_as(
+                Expr::col((ip_geolocations::Entity, ip_geolocations::Column::Country)),
+                "visitor_country",
+            )
+            .expr_as(
+                Expr::col((
+                    ip_geolocations::Entity,
+                    ip_geolocations::Column::CountryCode,
+                )),
+                "visitor_country_code",
+            )
+            .expr_as(
+                Expr::col((ip_geolocations::Entity, ip_geolocations::Column::Region)),
+                "visitor_region",
+            )
             .order_by_desc(session_replay_sessions::Column::CreatedAt);
 
         if let Some(env_id) = environment_id {
@@ -868,6 +884,11 @@ impl SessionReplayService {
                     visitor_is_crawler: row.visitor_is_crawler,
                     visitor_crawler_name: row.visitor_crawler_name,
                     visitor_custom_data: row.visitor_custom_data,
+                    // Geolocation fields
+                    visitor_city: row.visitor_city,
+                    visitor_country: row.visitor_country,
+                    visitor_country_code: row.visitor_country_code,
+                    visitor_region: row.visitor_region,
                 }
             })
             .collect();
@@ -914,9 +935,14 @@ impl SessionReplayService {
                 v.user_agent as visitor_user_agent,
                 v.is_crawler as visitor_is_crawler,
                 v.crawler_name as visitor_crawler_name,
-                v.custom_data as visitor_custom_data
+                v.custom_data as visitor_custom_data,
+                g.city as visitor_city,
+                g.country as visitor_country,
+                g.country_code as visitor_country_code,
+                g.region as visitor_region
             FROM session_replay_sessions s
             INNER JOIN visitor v ON s.visitor_id = v.id
+            LEFT JOIN ip_geolocations g ON v.ip_address_id = g.id
             WHERE s.visitor_id = $1
             ORDER BY s.created_at DESC
             LIMIT {} OFFSET {}
@@ -959,7 +985,11 @@ impl SessionReplayService {
             pub visitor_user_agent: Option<String>,
             pub visitor_is_crawler: bool,
             pub visitor_crawler_name: Option<String>,
-            pub visitor_custom_data: Option<String>,
+            pub visitor_custom_data: Option<serde_json::Value>,
+            pub visitor_city: Option<String>,
+            pub visitor_country: Option<String>,
+            pub visitor_country_code: Option<String>,
+            pub visitor_region: Option<String>,
         }
 
         let query_results = SessionReplayWithVisitorQueryRow::find_by_statement(statement)
@@ -1000,6 +1030,11 @@ impl SessionReplayService {
                     visitor_is_crawler: row.visitor_is_crawler,
                     visitor_crawler_name: row.visitor_crawler_name,
                     visitor_custom_data: row.visitor_custom_data,
+                    // Geolocation fields
+                    visitor_city: row.visitor_city,
+                    visitor_country: row.visitor_country,
+                    visitor_country_code: row.visitor_country_code,
+                    visitor_region: row.visitor_region,
                 }
             })
             .collect();
@@ -1044,9 +1079,14 @@ impl SessionReplayService {
                 v.user_agent as visitor_user_agent,
                 v.is_crawler as visitor_is_crawler,
                 v.crawler_name as visitor_crawler_name,
-                v.custom_data as visitor_custom_data
+                v.custom_data as visitor_custom_data,
+                g.city as visitor_city,
+                g.country as visitor_country,
+                g.country_code as visitor_country_code,
+                g.region as visitor_region
             FROM session_replay_sessions s
             INNER JOIN visitor v ON s.visitor_id = v.id
+            LEFT JOIN ip_geolocations g ON v.ip_address_id = g.id
             WHERE s.id = $1
         "#;
 
@@ -1157,9 +1197,14 @@ impl SessionReplayService {
                 v.user_agent as visitor_user_agent,
                 v.is_crawler as visitor_is_crawler,
                 v.crawler_name as visitor_crawler_name,
-                v.custom_data as visitor_custom_data
+                v.custom_data as visitor_custom_data,
+                g.city as visitor_city,
+                g.country as visitor_country,
+                g.country_code as visitor_country_code,
+                g.region as visitor_region
             FROM session_replay_sessions s
             INNER JOIN visitor v ON s.visitor_id = v.id
+            LEFT JOIN ip_geolocations g ON v.ip_address_id = g.id
             WHERE s.id = $1
         "#;
 
@@ -1198,7 +1243,11 @@ impl SessionReplayService {
             pub visitor_user_agent: Option<String>,
             pub visitor_is_crawler: bool,
             pub visitor_crawler_name: Option<String>,
-            pub visitor_custom_data: Option<String>,
+            pub visitor_custom_data: Option<serde_json::Value>,
+            pub visitor_city: Option<String>,
+            pub visitor_country: Option<String>,
+            pub visitor_country_code: Option<String>,
+            pub visitor_region: Option<String>,
         }
 
         let row = SessionReplayWithVisitorRow::find_by_statement(statement)
@@ -1237,6 +1286,11 @@ impl SessionReplayService {
             visitor_is_crawler: row.visitor_is_crawler,
             visitor_crawler_name: row.visitor_crawler_name,
             visitor_custom_data: row.visitor_custom_data,
+            // Geolocation fields
+            visitor_city: row.visitor_city,
+            visitor_country: row.visitor_country,
+            visitor_country_code: row.visitor_country_code,
+            visitor_region: row.visitor_region,
         })
     }
 
@@ -1246,6 +1300,45 @@ impl SessionReplayService {
         packed_data: &PackedEvents,
     ) -> Result<UnpackedEvents, SessionReplayError> {
         self.unpack_events(packed_data)
+    }
+
+    /// Compute session duration from all stored events (global min/max timestamps).
+    /// This queries the actual events table to get the true session span,
+    /// not just the span of a single batch.
+    async fn compute_and_update_session_duration(
+        &self,
+        session_replay_id: &str,
+        session_int_id: i32,
+    ) -> Result<(), SessionReplayError> {
+        #[derive(Debug, FromQueryResult)]
+        struct TimestampRange {
+            min_ts: Option<i64>,
+            max_ts: Option<i64>,
+        }
+
+        let statement = sea_orm::Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Postgres,
+            r#"SELECT MIN(timestamp) as min_ts, MAX(timestamp) as max_ts
+               FROM session_replay_events
+               WHERE session_id = $1 AND is_active = true"#,
+            vec![session_int_id.into()],
+        );
+
+        let result = TimestampRange::find_by_statement(statement)
+            .one(self.db.as_ref())
+            .await?;
+
+        if let Some(TimestampRange {
+            min_ts: Some(min),
+            max_ts: Some(max),
+        }) = result
+        {
+            let duration_ms = (max - min) as i32;
+            self.update_session_duration(session_replay_id, duration_ms)
+                .await?;
+        }
+
+        Ok(())
     }
 
     /// Update session duration
@@ -1308,15 +1401,3 @@ impl SessionReplayService {
         Ok(())
     }
 }
-
-// Tests are commented out for now until we can resolve compilation issues
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use serde_json::json;
-//
-//     #[test]
-//     fn test_unpack_events_not_packed() {
-//         // Test implementation would go here
-//     }
-// }

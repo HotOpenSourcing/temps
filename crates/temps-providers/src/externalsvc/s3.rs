@@ -320,6 +320,7 @@ impl S3Service {
                 typ: Some(bollard::models::MountTypeEnum::VOLUME),
                 ..Default::default()
             }]),
+            log_config: Some(crate::utils::default_service_log_config()),
             ..Default::default()
         };
 
@@ -407,9 +408,10 @@ impl S3Service {
     }
 
     async fn wait_for_container_health(&self, docker: &Docker, container_id: &str) -> Result<()> {
-        let mut delay = Duration::from_millis(100);
+        let mut delay = Duration::from_millis(500);
         let mut total_wait = Duration::from_secs(0);
-        let max_wait = Duration::from_secs(60);
+        let max_wait = Duration::from_secs(90);
+        let max_delay = Duration::from_secs(2);
 
         while total_wait < max_wait {
             let info = docker
@@ -422,10 +424,19 @@ impl S3Service {
                 {
                     return Ok(());
                 }
+                if state.status == Some(bollard::models::ContainerStateStatusEnum::EXITED)
+                    || state.status == Some(bollard::models::ContainerStateStatusEnum::DEAD)
+                {
+                    let exit_code = state.exit_code.unwrap_or(-1);
+                    return Err(anyhow::anyhow!(
+                        "MinIO container exited unexpectedly with code {}",
+                        exit_code
+                    ));
+                }
             }
             sleep(delay).await;
             total_wait += delay;
-            delay = delay.mul_f32(1.5);
+            delay = std::cmp::min(delay.mul_f32(1.5), max_delay);
         }
 
         Err(anyhow::anyhow!("MinIO container health check timed out"))
@@ -1716,12 +1727,12 @@ mod tests {
             let field = properties
                 .get(field_name)
                 .and_then(|v| v.as_object())
-                .expect(&format!("{} field should exist", field_name));
+                .unwrap_or_else(|| panic!("{} field should exist", field_name));
 
             let is_editable = field
                 .get("x-editable")
                 .and_then(|v| v.as_bool())
-                .expect(&format!("{} should have x-editable property", field_name));
+                .unwrap_or_else(|| panic!("{} should have x-editable property", field_name));
 
             assert_eq!(
                 is_editable, should_be_editable,
@@ -1874,8 +1885,8 @@ mod tests {
             std::collections::HashMap::new();
         // S3 requires access_key and secret_key
 
-        assert!(credentials.get("access_key").is_none());
-        assert!(credentials.get("secret_key").is_none());
+        assert!(!credentials.contains_key("access_key"));
+        assert!(!credentials.contains_key("secret_key"));
     }
 
     #[test]
@@ -1923,6 +1934,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     async fn test_s3_backup_and_restore_to_s3() {
         use super::super::test_utils::{

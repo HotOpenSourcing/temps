@@ -85,11 +85,14 @@ export function SentryEventDetail({
         function: frame.function,
         lineno: frame.lineno,
         colno: frame.colno,
-        module: frame.module,
         in_app: frame.in_app,
         pre_context: frame.pre_context,
         context_line: frame.context_line,
         post_context: frame.post_context,
+        symbolicated: frame.symbolicated,
+        original_filename: frame.original_filename,
+        original_lineno: frame.original_lineno,
+        original_colno: frame.original_colno,
       })) || []
     )
   }

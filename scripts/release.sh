@@ -180,7 +180,7 @@ echo -e "     ${YELLOW}git push origin main${NC}"
 echo -e "     ${YELLOW}git push origin v${VERSION}${NC}"
 echo ""
 echo "  3. Monitor the release workflow:"
-echo "     https://github.com/YOUR_ORG/temps/actions"
+echo "     https://github.com/gotempsh/temps/actions"
 echo ""
 echo -e "${YELLOW}Push now? (y/N)${NC}"
 read -r PUSH

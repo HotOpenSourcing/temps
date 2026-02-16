@@ -1,7 +1,8 @@
 use crate::traits::Analytics;
 use crate::types::responses::{
-    self, EnrichVisitorResponse, EventCount, SessionDetails, SessionEventsResponse,
-    SessionLogsResponse, VisitorDetails, VisitorSessionsResponse, VisitorsResponse,
+    self, DropOffPoint, EnrichVisitorResponse, EventCount, PageFlowEntry, PageFlowResponse,
+    PageTransition, SessionDetails, SessionEventsResponse, SessionLogsResponse, VisitorDetails,
+    VisitorSessionsResponse, VisitorsResponse,
 };
 use crate::types::{AnalyticsError, Page};
 use async_trait::async_trait;
@@ -287,7 +288,10 @@ impl Analytics for AnalyticsService {
 
         let total_count = count_results.first().map(|r| r.total).unwrap_or(0);
 
-        // Query visitors with geolocation data
+        // Query visitors with geolocation data and most recent page.
+        // The LATERAL join uses idx_events_visitor_timestamp (visitor_id, timestamp DESC)
+        // for an efficient index scan (1 row per visitor) instead of a full hypertable scan.
+        // The visitor listing uses idx_visitor_project_last_seen for ORDER BY last_seen DESC.
         let sql_query = format!(
             r#"
             SELECT
@@ -310,9 +314,17 @@ impl Analytics for AnalyticsService {
                 ig.country,
                 ig.country_code,
                 ig.timezone,
-                ig.is_eu
+                ig.is_eu,
+                last_event.page_path as current_page
             FROM visitor v
             LEFT JOIN ip_geolocations ig ON v.ip_address_id = ig.id
+            LEFT JOIN LATERAL (
+                SELECT e.page_path
+                FROM events e
+                WHERE e.visitor_id = v.id
+                ORDER BY e.timestamp DESC
+                LIMIT 1
+            ) last_event ON true
             WHERE {}
             ORDER BY v.last_seen DESC
             LIMIT ${} OFFSET ${}
@@ -348,6 +360,7 @@ impl Analytics for AnalyticsService {
             country_code: Option<String>,
             timezone: Option<String>,
             is_eu: Option<bool>,
+            current_page: Option<String>,
         }
 
         let results = VisitorResult::find_by_statement(Statement::from_sql_and_values(
@@ -381,6 +394,7 @@ impl Analytics for AnalyticsService {
                 country_code: r.country_code,
                 timezone: r.timezone,
                 is_eu: r.is_eu,
+                current_page: r.current_page,
             })
             .collect();
 
@@ -807,6 +821,342 @@ impl Analytics for AnalyticsService {
             visitor_id: visitor.visitor_id,
             sessions,
             total_sessions,
+        }))
+    }
+
+    /// Get the complete visitor journey: all events across all sessions, grouped by session
+    async fn get_visitor_journey(
+        &self,
+        visitor_id: i32,
+        project_id: i32,
+        limit_sessions: Option<i32>,
+    ) -> Result<Option<crate::types::responses::VisitorJourneyResponse>, AnalyticsError> {
+        // Check if visitor exists
+        let visitor = visitor::Entity::find_by_id(visitor_id)
+            .one(self.db.as_ref())
+            .await?;
+
+        if visitor.is_none() {
+            return Ok(None);
+        }
+
+        let limit_sessions = limit_sessions.unwrap_or(50).min(100) as i64;
+
+        // Step 1: Get sessions with traffic source context (newest first)
+        let sessions_sql = r#"
+            WITH session_data AS (
+                SELECT
+                    rs.id as session_id,
+                    MIN(e.timestamp) as started_at,
+                    MAX(e.timestamp) as ended_at,
+                    EXTRACT(EPOCH FROM (MAX(e.timestamp) - MIN(e.timestamp)))::bigint as duration_seconds,
+                    COUNT(*) FILTER (WHERE e.event_type = 'page_view') as page_views,
+                    COUNT(*) as events_count,
+                    (ARRAY_AGG(e.page_path ORDER BY e.timestamp ASC)  FILTER (WHERE e.event_type = 'page_view'))[1] as entry_path,
+                    (ARRAY_AGG(e.page_path ORDER BY e.timestamp DESC) FILTER (WHERE e.event_type = 'page_view'))[1] as exit_path,
+                    rs.referrer,
+                    rs.referrer_hostname,
+                    rs.channel,
+                    rs.utm_source,
+                    rs.utm_medium,
+                    rs.utm_campaign,
+                    BOOL_OR(e.is_bounce) as is_bounced,
+                    COUNT(*) FILTER (WHERE e.event_type NOT IN ('page_view', 'page_leave', 'heartbeat', 'web_vitals')) > 0 as is_engaged
+                FROM events e
+                JOIN request_sessions rs ON rs.session_id = e.session_id
+                WHERE e.visitor_id = $1
+                  AND e.project_id = $2
+                  AND e.session_id IS NOT NULL
+                GROUP BY rs.id, rs.referrer, rs.referrer_hostname, rs.channel,
+                         rs.utm_source, rs.utm_medium, rs.utm_campaign
+            )
+            SELECT
+                session_id,
+                started_at,
+                ended_at,
+                COALESCE(duration_seconds, 0) as duration_seconds,
+                page_views,
+                events_count,
+                entry_path,
+                exit_path,
+                referrer,
+                referrer_hostname,
+                channel,
+                utm_source,
+                utm_medium,
+                utm_campaign,
+                is_bounced,
+                is_engaged,
+                COUNT(*) OVER() as total_sessions
+            FROM session_data
+            ORDER BY started_at DESC
+            LIMIT $3
+        "#;
+
+        #[derive(FromQueryResult)]
+        struct JourneySessionRow {
+            session_id: i32,
+            started_at: UtcDateTime,
+            ended_at: Option<UtcDateTime>,
+            duration_seconds: i64,
+            page_views: i64,
+            events_count: i64,
+            entry_path: Option<String>,
+            exit_path: Option<String>,
+            referrer: Option<String>,
+            referrer_hostname: Option<String>,
+            channel: Option<String>,
+            utm_source: Option<String>,
+            utm_medium: Option<String>,
+            utm_campaign: Option<String>,
+            is_bounced: bool,
+            is_engaged: bool,
+            total_sessions: i64,
+        }
+
+        let session_rows = JourneySessionRow::find_by_statement(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            sessions_sql,
+            vec![visitor_id.into(), project_id.into(), limit_sessions.into()],
+        ))
+        .all(self.db.as_ref())
+        .await?;
+
+        if session_rows.is_empty() {
+            return Ok(Some(crate::types::responses::VisitorJourneyResponse {
+                visitor_id,
+                total_sessions: 0,
+                total_events: 0,
+                sessions: vec![],
+            }));
+        }
+
+        let total_sessions = session_rows.first().map(|r| r.total_sessions).unwrap_or(0);
+
+        // Step 2: Collect all session IDs, then fetch events for all sessions in one query
+        let session_ids: Vec<i32> = session_rows.iter().map(|r| r.session_id).collect();
+
+        // Build the session_id placeholders for IN clause
+        let session_id_placeholders: Vec<String> = session_ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("${}", i + 3))
+            .collect();
+        let in_clause = session_id_placeholders.join(", ");
+
+        // Build events query with computed time_on_page.
+        // Materialize all session events in a CTE, then use self-joins (merge joins)
+        // instead of correlated subqueries to preserve exact 3-priority logic:
+        //   Priority 1: next page_leave for same session+page within 30 min
+        //   Priority 2: next page_view in same session (any page)
+        //   Priority 3: fallback 30 seconds
+        let events_sql = format!(
+            r#"
+            WITH all_session_events AS MATERIALIZED (
+                -- Materialize ALL events for these sessions into a small CTE
+                SELECT
+                    e.id,
+                    e.event_type,
+                    COALESCE(e.event_name, e.event_type) as event_name,
+                    e.timestamp as occurred_at,
+                    e.page_path,
+                    e.page_title,
+                    e.referrer,
+                    e.is_entry,
+                    e.is_exit,
+                    e.is_bounce,
+                    e.session_page_number,
+                    e.scroll_depth,
+                    e.session_id,
+                    COALESCE(e.props, e.event_data::jsonb, '{{}}'::jsonb) as event_data,
+                    rs.id as rs_id
+                FROM events e
+                JOIN request_sessions rs ON rs.session_id = e.session_id
+                WHERE e.visitor_id = $1
+                  AND e.project_id = $2
+                  AND rs.id IN ({in_clause})
+            ),
+            -- Pre-compute time_on_page for page_view events using self-joins
+            -- Priority 1: next page_leave for same session+page within 30 min
+            p1 AS (
+                SELECT
+                    pv.id as event_id,
+                    pv.session_id,
+                    pv.occurred_at as pv_ts,
+                    MIN(pl.occurred_at) as next_page_leave_ts
+                FROM all_session_events pv
+                LEFT JOIN all_session_events pl
+                    ON pl.session_id = pv.session_id
+                    AND pl.event_type = 'page_leave'
+                    AND pl.page_path = pv.page_path
+                    AND pl.occurred_at > pv.occurred_at
+                    AND pl.occurred_at <= pv.occurred_at + INTERVAL '30 minutes'
+                WHERE pv.event_type = 'page_view'
+                GROUP BY pv.id, pv.session_id, pv.occurred_at
+            ),
+            -- Priority 2: next page_view in same session (any page)
+            p2 AS (
+                SELECT
+                    pv.id as event_id,
+                    pv.session_id,
+                    pv.occurred_at as pv_ts,
+                    MIN(npv.occurred_at) as next_page_view_ts
+                FROM all_session_events pv
+                LEFT JOIN all_session_events npv
+                    ON npv.session_id = pv.session_id
+                    AND npv.event_type = 'page_view'
+                    AND npv.occurred_at > pv.occurred_at
+                WHERE pv.event_type = 'page_view'
+                GROUP BY pv.id, pv.session_id, pv.occurred_at
+            )
+            SELECT
+                ase.id,
+                ase.event_type,
+                ase.event_name,
+                ase.occurred_at,
+                ase.page_path,
+                ase.page_title,
+                ase.referrer,
+                CASE
+                    WHEN ase.event_type = 'page_view' THEN
+                        EXTRACT(EPOCH FROM (
+                            COALESCE(
+                                p1.next_page_leave_ts,
+                                p2.next_page_view_ts,
+                                ase.occurred_at + INTERVAL '30 seconds'
+                            ) - ase.occurred_at
+                        ))::int
+                    ELSE NULL
+                END as computed_time_on_page,
+                ase.is_entry,
+                ase.is_exit,
+                ase.is_bounce,
+                ase.session_page_number,
+                ase.scroll_depth,
+                ase.event_data,
+                ase.rs_id
+            FROM all_session_events ase
+            LEFT JOIN p1 ON ase.id = p1.event_id
+            LEFT JOIN p2 ON ase.id = p2.event_id
+            WHERE ase.event_type NOT IN ('heartbeat', 'web_vitals', 'page_leave')
+            ORDER BY ase.rs_id, ase.occurred_at ASC
+            "#,
+            in_clause = in_clause
+        );
+
+        #[derive(FromQueryResult)]
+        struct JourneyEventRow {
+            id: i64,
+            event_type: String,
+            event_name: String,
+            occurred_at: UtcDateTime,
+            page_path: Option<String>,
+            page_title: Option<String>,
+            referrer: Option<String>,
+            computed_time_on_page: Option<i32>,
+            is_entry: bool,
+            is_exit: bool,
+            is_bounce: bool,
+            session_page_number: Option<i32>,
+            scroll_depth: Option<i32>,
+            event_data: serde_json::Value,
+            rs_id: i32,
+        }
+
+        let mut event_values: Vec<sea_orm::Value> = vec![visitor_id.into(), project_id.into()];
+        for id in &session_ids {
+            event_values.push((*id).into());
+        }
+
+        let event_rows = JourneyEventRow::find_by_statement(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            &events_sql,
+            event_values,
+        ))
+        .all(self.db.as_ref())
+        .await?;
+
+        // Step 3: Group events by session_id
+        let mut events_by_session: std::collections::HashMap<
+            i32,
+            Vec<crate::types::responses::JourneyEvent>,
+        > = std::collections::HashMap::new();
+
+        let mut total_events: i64 = 0;
+        for row in event_rows {
+            total_events += 1;
+            let time_on_page =
+                if row.event_type == "page_view" {
+                    row.computed_time_on_page.and_then(|t| {
+                        if t > 0 && t < 1800 {
+                            Some(t)
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                };
+
+            let event_data = if row.event_data == serde_json::json!({}) {
+                None
+            } else {
+                Some(row.event_data)
+            };
+
+            events_by_session.entry(row.rs_id).or_default().push(
+                crate::types::responses::JourneyEvent {
+                    id: row.id,
+                    event_type: row.event_type,
+                    event_name: row.event_name,
+                    occurred_at: row.occurred_at,
+                    page_path: row.page_path,
+                    page_title: row.page_title,
+                    referrer: row.referrer,
+                    time_on_page,
+                    is_entry: row.is_entry,
+                    is_exit: row.is_exit,
+                    is_bounce: row.is_bounce,
+                    session_page_number: row.session_page_number,
+                    scroll_depth: row.scroll_depth,
+                    event_data,
+                },
+            );
+        }
+
+        // Step 4: Build the response - sessions ordered newest first with their events
+        let sessions = session_rows
+            .into_iter()
+            .map(|s| {
+                let events = events_by_session.remove(&s.session_id).unwrap_or_default();
+
+                crate::types::responses::JourneySession {
+                    session_id: s.session_id,
+                    started_at: s.started_at,
+                    ended_at: s.ended_at,
+                    duration_seconds: s.duration_seconds,
+                    page_views: s.page_views,
+                    events_count: s.events_count,
+                    entry_path: s.entry_path,
+                    exit_path: s.exit_path,
+                    referrer: s.referrer,
+                    referrer_hostname: s.referrer_hostname,
+                    channel: s.channel,
+                    utm_source: s.utm_source,
+                    utm_medium: s.utm_medium,
+                    utm_campaign: s.utm_campaign,
+                    is_bounced: s.is_bounced,
+                    is_engaged: s.is_engaged,
+                    events,
+                }
+            })
+            .collect();
+
+        Ok(Some(crate::types::responses::VisitorJourneyResponse {
+            visitor_id,
+            total_sessions,
+            total_events,
+            sessions,
         }))
     }
 
@@ -1318,32 +1668,85 @@ impl Analytics for AnalyticsService {
         let limit_val = limit.unwrap_or(100).min(1000);
         let where_clause = where_conditions.join(" AND ");
 
+        // Materialize session events in a CTE, then use self-joins (merge joins)
+        // instead of correlated subqueries to preserve exact 3-priority time_on_page logic:
+        //   Priority 1: next page_leave for same session+page within 30 min
+        //   Priority 2: next page_view in same session (any page)
+        //   Priority 3: fallback 30 seconds
+        // Self-joins allow PostgreSQL to use merge joins on the sorted CTE data,
+        // which is O(N log N) vs O(N*S) for correlated subquery CTE scans.
         let sql_query = format!(
             r#"
-            WITH page_durations AS (
+            WITH session_events AS MATERIALIZED (
+                -- Materialize all page_view and page_leave events for matching sessions
                 SELECT
-                    pv.page_path,
+                    e.id as event_id,
+                    e.session_id,
+                    e.event_type,
+                    e.page_path,
+                    e.timestamp
+                FROM events e
+                WHERE e.session_id IN (
+                    SELECT DISTINCT pv.session_id
+                    FROM events pv
+                    WHERE {where_clause}
+                )
+                AND e.event_type IN ('page_view', 'page_leave')
+            ),
+            -- Priority 1: for each page_view, find the min page_leave timestamp
+            -- for same session+page_path within 30 min (via self-join + GROUP BY)
+            p1 AS (
+                SELECT
+                    pv.event_id,
                     pv.session_id,
-                    pv.timestamp as first_seen_ts,
+                    pv.page_path,
+                    pv.timestamp as pv_ts,
+                    MIN(pl.timestamp) as next_page_leave_ts
+                FROM session_events pv
+                LEFT JOIN session_events pl
+                    ON pl.session_id = pv.session_id
+                    AND pl.event_type = 'page_leave'
+                    AND pl.page_path = pv.page_path
+                    AND pl.timestamp > pv.timestamp
+                    AND pl.timestamp <= pv.timestamp + INTERVAL '30 minutes'
+                WHERE pv.event_type = 'page_view'
+                  AND pv.page_path IS NOT NULL
+                  AND pv.page_path != ''
+                GROUP BY pv.event_id, pv.session_id, pv.page_path, pv.timestamp
+            ),
+            -- Priority 2: for each page_view, find the next page_view timestamp
+            -- in the same session (any page, no time cap)
+            p2 AS (
+                SELECT
+                    pv.event_id,
+                    pv.session_id,
+                    pv.page_path,
+                    pv.timestamp as pv_ts,
+                    MIN(npv.timestamp) as next_page_view_ts
+                FROM session_events pv
+                LEFT JOIN session_events npv
+                    ON npv.session_id = pv.session_id
+                    AND npv.event_type = 'page_view'
+                    AND npv.timestamp > pv.timestamp
+                WHERE pv.event_type = 'page_view'
+                  AND pv.page_path IS NOT NULL
+                  AND pv.page_path != ''
+                GROUP BY pv.event_id, pv.session_id, pv.page_path, pv.timestamp
+            ),
+            page_durations AS (
+                SELECT
+                    p1.page_path,
+                    p1.session_id,
+                    p1.pv_ts as first_seen_ts,
                     EXTRACT(EPOCH FROM (
                         COALESCE(
-                            (SELECT MIN(timestamp)
-                             FROM events
-                             WHERE session_id = pv.session_id
-                             AND event_type = 'page_leave'
-                             AND page_path = pv.page_path
-                             AND timestamp > pv.timestamp
-                             AND timestamp <= pv.timestamp + INTERVAL '30 minutes'),
-                            (SELECT MIN(timestamp)
-                             FROM events
-                             WHERE session_id = pv.session_id
-                             AND event_type = 'page_view'
-                             AND timestamp > pv.timestamp),
-                            pv.timestamp + INTERVAL '30 seconds'
-                        ) - pv.timestamp
+                            p1.next_page_leave_ts,
+                            p2.next_page_view_ts,
+                            p1.pv_ts + INTERVAL '30 seconds'
+                        ) - p1.pv_ts
                     )) as time_on_page_seconds
-                FROM events pv
-                WHERE {}
+                FROM p1
+                JOIN p2 ON p1.event_id = p2.event_id
             )
             SELECT
                 page_path,
@@ -1360,9 +1763,10 @@ impl Analytics for AnalyticsService {
             FROM page_durations
             GROUP BY page_path
             ORDER BY page_view_count DESC
-            LIMIT ${}
+            LIMIT ${param_index}
             "#,
-            where_clause, param_index
+            where_clause = where_clause,
+            param_index = param_index
         );
 
         // Add LIMIT as parameter
@@ -1547,6 +1951,144 @@ WHERE project_id = $1
             count,
             window_minutes: window,
         })
+    }
+
+    /// Get sparkline data for multiple page paths in a single query.
+    /// This avoids the N+1 problem where each page path in the list view
+    /// would otherwise trigger its own query with ~150ms planning overhead.
+    async fn get_page_paths_sparklines(
+        &self,
+        project_id: i32,
+        page_paths: &[String],
+        start_date: UtcDateTime,
+        end_date: UtcDateTime,
+        environment_id: Option<i32>,
+    ) -> Result<crate::types::responses::PagePathsSparklineResponse, AnalyticsError> {
+        if page_paths.is_empty() {
+            return Ok(crate::types::responses::PagePathsSparklineResponse { sparklines: vec![] });
+        }
+
+        // Build page_path placeholders: $5, $6, ... (first 4 params are start, end, project, env)
+        let mut values: Vec<sea_orm::Value> =
+            vec![start_date.into(), end_date.into(), project_id.into()];
+        let mut param_index = 4;
+
+        let env_filter = if let Some(env_id) = environment_id {
+            values.push(env_id.into());
+            let filter = format!("AND e.environment_id = ${}", param_index);
+            param_index += 1;
+            filter
+        } else {
+            String::new()
+        };
+
+        let path_placeholders: Vec<String> = page_paths
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                let placeholder = format!("${}", param_index + i);
+                placeholder
+            })
+            .collect();
+        let in_clause = path_placeholders.join(", ");
+
+        for path in page_paths {
+            values.push(path.clone().into());
+        }
+
+        // Determine bucket interval based on date range
+        let duration = end_date - start_date;
+        let (interval_str, date_trunc_unit) = if duration.num_days() <= 2 {
+            ("1 hour", "hour")
+        } else if duration.num_days() <= 31 {
+            ("1 day", "day")
+        } else if duration.num_days() <= 180 {
+            ("1 week", "week")
+        } else {
+            ("1 month", "month")
+        };
+
+        // Single query for all page paths: one planning pass instead of N
+        let sql = format!(
+            r#"
+            WITH time_buckets AS (
+                SELECT generate_series(
+                    date_trunc('{date_trunc}', $1::timestamp),
+                    date_trunc('{date_trunc}', $2::timestamp),
+                    '{interval}'::interval
+                ) AS time_bucket
+            ),
+            session_stats AS (
+                SELECT
+                    e.page_path,
+                    date_trunc('{date_trunc}', e.timestamp) as time_bucket,
+                    COUNT(DISTINCT e.session_id) as session_count
+                FROM events e
+                WHERE e.project_id = $3
+                    AND e.page_path IN ({in_clause})
+                    AND e.event_type = 'page_view'
+                    AND e.timestamp >= $1::timestamp
+                    AND e.timestamp <= $2::timestamp
+                    AND e.session_id IS NOT NULL
+                    {env_filter}
+                GROUP BY e.page_path, date_trunc('{date_trunc}', e.timestamp)
+            )
+            SELECT
+                ss.page_path,
+                to_char(tb.time_bucket, 'YYYY-MM-DD HH24:MI:SS') as timestamp,
+                COALESCE(ss.session_count, 0) as session_count
+            FROM time_buckets tb
+            LEFT JOIN session_stats ss ON tb.time_bucket = ss.time_bucket
+            WHERE ss.page_path IS NOT NULL
+            ORDER BY ss.page_path, tb.time_bucket
+            "#,
+            date_trunc = date_trunc_unit,
+            interval = interval_str,
+            in_clause = in_clause,
+            env_filter = env_filter,
+        );
+
+        #[derive(FromQueryResult)]
+        struct SparklineRow {
+            page_path: String,
+            timestamp: String,
+            session_count: i64,
+        }
+
+        let rows = SparklineRow::find_by_statement(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            &sql,
+            values,
+        ))
+        .all(self.db.as_ref())
+        .await?;
+
+        // Group by page_path
+        let mut sparkline_map: std::collections::HashMap<
+            String,
+            Vec<crate::types::responses::PagePathSparklinePoint>,
+        > = std::collections::HashMap::new();
+
+        for row in rows {
+            sparkline_map
+                .entry(row.page_path.clone())
+                .or_default()
+                .push(crate::types::responses::PagePathSparklinePoint {
+                    timestamp: row.timestamp,
+                    session_count: row.session_count,
+                });
+        }
+
+        // Preserve the order of page_paths from the request
+        let sparklines = page_paths
+            .iter()
+            .map(|path| crate::types::responses::PagePathSparkline {
+                page_path: path.clone(),
+                points: sparkline_map.remove(path.as_str()).unwrap_or_default(),
+            })
+            .collect();
+
+        Ok(crate::types::responses::PagePathsSparklineResponse { sparklines })
     }
 
     /// Get hourly session statistics for a specific page
@@ -1784,9 +2326,17 @@ WHERE project_id = $1
                 ig.country,
                 ig.country_code,
                 ig.timezone,
-                ig.is_eu
+                ig.is_eu,
+                last_event.page_path as current_page
             FROM visitor v
             LEFT JOIN ip_geolocations ig ON v.ip_address_id = ig.id
+            LEFT JOIN LATERAL (
+                SELECT e.page_path
+                FROM events e
+                WHERE e.visitor_id = v.id
+                ORDER BY e.timestamp DESC
+                LIMIT 1
+            ) last_event ON true
             WHERE v.project_id = $1
               AND ($2::int IS NULL OR v.environment_id = $2)
               AND v.last_seen >= NOW() - INTERVAL '1 minute' * $3
@@ -1815,6 +2365,7 @@ WHERE project_id = $1
             country_code: Option<String>,
             timezone: Option<String>,
             is_eu: Option<bool>,
+            current_page: Option<String>,
         }
 
         let rows = LiveVisitorRow::find_by_statement(Statement::from_sql_and_values(
@@ -1852,6 +2403,7 @@ WHERE project_id = $1
                 country_code: row.country_code,
                 timezone: row.timezone,
                 is_eu: row.is_eu,
+                current_page: row.current_page,
             })
             .collect();
 
@@ -1931,6 +2483,71 @@ WHERE project_id = $1
             avg_engagement_rate: 0.0,
         });
 
+        // Query previous period for trend comparison (same duration, shifted back)
+        let period_duration = end_date - start_date;
+        let prev_start = start_date - period_duration;
+        let prev_end = start_date;
+
+        // Lightweight previous-period query: only visitors and page views
+        // Uses events_hourly continuous aggregate for speed
+        let prev_stats_sql = r#"
+            SELECT
+                COALESCE(SUM(unique_visitors), 0)::bigint AS prev_visitors,
+                COALESCE(SUM(page_views), 0)::bigint AS prev_page_views
+            FROM events_hourly
+            WHERE bucket >= $1 AND bucket < $2
+        "#;
+
+        #[derive(FromQueryResult)]
+        struct PrevStatsResult {
+            prev_visitors: i64,
+            prev_page_views: i64,
+        }
+
+        let prev_stats = PrevStatsResult::find_by_statement(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            prev_stats_sql,
+            vec![prev_start.into(), prev_end.into()],
+        ))
+        .one(self.db.as_ref())
+        .await?;
+
+        let (previous_unique_visitors, previous_page_views, visitors_trend, page_views_trend) =
+            if let Some(prev) = prev_stats {
+                let visitors_trend = if prev.prev_visitors > 0 {
+                    Some(
+                        ((total_stats.unique_visitors - prev.prev_visitors) as f64
+                            / prev.prev_visitors as f64)
+                            * 100.0,
+                    )
+                } else if total_stats.unique_visitors > 0 {
+                    Some(100.0)
+                } else {
+                    None
+                };
+
+                let pv_trend = if prev.prev_page_views > 0 {
+                    Some(
+                        ((total_stats.total_page_views - prev.prev_page_views) as f64
+                            / prev.prev_page_views as f64)
+                            * 100.0,
+                    )
+                } else if total_stats.total_page_views > 0 {
+                    Some(100.0)
+                } else {
+                    None
+                };
+
+                (
+                    Some(prev.prev_visitors),
+                    Some(prev.prev_page_views),
+                    visitors_trend,
+                    pv_trend,
+                )
+            } else {
+                (None, None, None, None)
+            };
+
         Ok(crate::types::responses::GeneralStatsResponse {
             total_unique_visitors: total_stats.unique_visitors,
             total_visits: total_stats.total_visits,
@@ -1939,8 +2556,382 @@ WHERE project_id = $1
             total_projects: total_stats.total_projects,
             avg_bounce_rate: total_stats.avg_bounce_rate,
             avg_engagement_rate: total_stats.avg_engagement_rate,
+            previous_unique_visitors,
+            previous_page_views,
+            visitors_trend_percentage: visitors_trend,
+            page_views_trend_percentage: page_views_trend,
             project_breakdown: Vec::new(),
         })
+    }
+
+    /// Get individual visitor sessions for a specific page path
+    async fn get_page_path_visitors(
+        &self,
+        project_id: i32,
+        page_path: &str,
+        start_date: UtcDateTime,
+        end_date: UtcDateTime,
+        environment_id: Option<i32>,
+        page: u64,
+        per_page: u64,
+    ) -> Result<crate::types::responses::PagePathVisitorsResponse, AnalyticsError> {
+        let per_page = per_page.min(100);
+        let offset = (page.saturating_sub(1)) * per_page;
+
+        // Count total matching rows
+        let env_filter = if let Some(env_id) = environment_id {
+            format!("AND e.environment_id = {}", env_id)
+        } else {
+            String::new()
+        };
+
+        let count_query = format!(
+            r#"
+            SELECT COUNT(*) as count
+            FROM events e
+            WHERE e.project_id = $1
+              AND e.page_path = $2
+              AND e.event_type = 'page_view'
+              AND e.timestamp >= $3
+              AND e.timestamp <= $4
+              AND e.is_crawler = false
+              {}
+            "#,
+            env_filter
+        );
+
+        let count_stmt = sea_orm::Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Postgres,
+            &count_query,
+            vec![
+                project_id.into(),
+                page_path.into(),
+                start_date.into(),
+                end_date.into(),
+            ],
+        );
+
+        #[derive(Debug, sea_orm::FromQueryResult)]
+        struct CountRow {
+            count: i64,
+        }
+
+        let total_count = CountRow::find_by_statement(count_stmt)
+            .one(self.db.as_ref())
+            .await
+            .map_err(AnalyticsError::DatabaseError)?
+            .map(|r| r.count)
+            .unwrap_or(0);
+
+        // Fetch visitor sessions with geolocation data.
+        // Compute time_on_page by materializing session events in a CTE, then using
+        // self-joins (merge joins) instead of correlated subqueries to preserve the
+        // exact 3-priority COALESCE logic:
+        //   Priority 1: next page_leave for same session+page within 30 min
+        //   Priority 2: next page_view in same session (any page)
+        //   Priority 3: fallback 30 seconds
+        let data_query = format!(
+            r#"
+            WITH session_events AS MATERIALIZED (
+                -- Materialize all page_view and page_leave events for matching sessions.
+                SELECT
+                    e.id as event_id,
+                    e.session_id,
+                    e.event_type,
+                    e.page_path,
+                    e.timestamp,
+                    e.visitor_id,
+                    e.is_entry,
+                    e.is_exit,
+                    e.is_bounce,
+                    e.session_page_number,
+                    e.referrer,
+                    e.browser,
+                    e.operating_system,
+                    e.device_type,
+                    e.ip_geolocation_id
+                FROM events e
+                WHERE e.session_id IN (
+                    SELECT DISTINCT session_id
+                    FROM events
+                    WHERE project_id = $1
+                      AND page_path = $2
+                      AND event_type = 'page_view'
+                      AND timestamp >= $3
+                      AND timestamp <= $4
+                      AND is_crawler = false
+                      {env_filter}
+                )
+                AND e.event_type IN ('page_view', 'page_leave')
+            ),
+            -- Priority 1: next page_leave for same session+page within 30 min
+            p1 AS (
+                SELECT
+                    pv.event_id,
+                    pv.session_id,
+                    pv.timestamp as pv_ts,
+                    MIN(pl.timestamp) as next_page_leave_ts
+                FROM session_events pv
+                LEFT JOIN session_events pl
+                    ON pl.session_id = pv.session_id
+                    AND pl.event_type = 'page_leave'
+                    AND pl.page_path = pv.page_path
+                    AND pl.timestamp > pv.timestamp
+                    AND pl.timestamp <= pv.timestamp + INTERVAL '30 minutes'
+                WHERE pv.event_type = 'page_view'
+                  AND pv.page_path = $2
+                  AND pv.timestamp >= $3
+                  AND pv.timestamp <= $4
+                GROUP BY pv.event_id, pv.session_id, pv.timestamp
+            ),
+            -- Priority 2: next page_view in same session (any page)
+            p2 AS (
+                SELECT
+                    pv.event_id,
+                    pv.session_id,
+                    pv.timestamp as pv_ts,
+                    MIN(npv.timestamp) as next_page_view_ts
+                FROM session_events pv
+                LEFT JOIN session_events npv
+                    ON npv.session_id = pv.session_id
+                    AND npv.event_type = 'page_view'
+                    AND npv.timestamp > pv.timestamp
+                WHERE pv.event_type = 'page_view'
+                  AND pv.page_path = $2
+                  AND pv.timestamp >= $3
+                  AND pv.timestamp <= $4
+                GROUP BY pv.event_id, pv.session_id, pv.timestamp
+            ),
+            page_views_with_duration AS (
+                SELECT
+                    se.visitor_id,
+                    COALESCE(v.visitor_id, '') as visitor_uuid,
+                    p1.session_id,
+                    p1.pv_ts as viewed_at,
+                    EXTRACT(EPOCH FROM (
+                        COALESCE(
+                            p1.next_page_leave_ts,
+                            p2.next_page_view_ts,
+                            p1.pv_ts + INTERVAL '30 seconds'
+                        ) - p1.pv_ts
+                    ))::int as computed_time_on_page,
+                    se.is_entry,
+                    se.is_exit,
+                    se.is_bounce,
+                    se.session_page_number,
+                    se.referrer,
+                    se.browser,
+                    se.operating_system,
+                    se.device_type,
+                    g.city,
+                    g.country,
+                    g.country_code
+                FROM p1
+                JOIN p2 ON p1.event_id = p2.event_id
+                JOIN session_events se ON se.event_id = p1.event_id
+                LEFT JOIN visitor v ON se.visitor_id = v.id
+                LEFT JOIN ip_geolocations g ON se.ip_geolocation_id = g.id
+            )
+            SELECT
+                visitor_id,
+                visitor_uuid,
+                session_id,
+                viewed_at,
+                CASE
+                    WHEN computed_time_on_page > 0 AND computed_time_on_page < 1800
+                    THEN computed_time_on_page
+                    ELSE NULL
+                END as time_on_page,
+                is_entry,
+                is_exit,
+                is_bounce,
+                session_page_number,
+                referrer,
+                browser,
+                operating_system,
+                device_type,
+                city,
+                country,
+                country_code
+            FROM page_views_with_duration
+            ORDER BY viewed_at DESC
+            LIMIT {per_page} OFFSET {offset}
+            "#,
+            env_filter = env_filter,
+            per_page = per_page,
+            offset = offset
+        );
+
+        let data_stmt = sea_orm::Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Postgres,
+            &data_query,
+            vec![
+                project_id.into(),
+                page_path.into(),
+                start_date.into(),
+                end_date.into(),
+            ],
+        );
+
+        #[derive(Debug, sea_orm::FromQueryResult)]
+        struct PageVisitorRow {
+            visitor_id: Option<i32>,
+            visitor_uuid: String,
+            session_id: Option<String>,
+            viewed_at: UtcDateTime,
+            time_on_page: Option<i32>,
+            is_entry: bool,
+            is_exit: bool,
+            is_bounce: bool,
+            session_page_number: Option<i32>,
+            referrer: Option<String>,
+            browser: Option<String>,
+            operating_system: Option<String>,
+            device_type: Option<String>,
+            city: Option<String>,
+            country: Option<String>,
+            country_code: Option<String>,
+        }
+
+        let rows = PageVisitorRow::find_by_statement(data_stmt)
+            .all(self.db.as_ref())
+            .await
+            .map_err(AnalyticsError::DatabaseError)?;
+
+        let sessions = rows
+            .into_iter()
+            .map(|row| crate::types::responses::PageVisitorSession {
+                visitor_id: row.visitor_id.unwrap_or(0),
+                visitor_uuid: row.visitor_uuid,
+                session_id: row.session_id,
+                viewed_at: row.viewed_at,
+                time_on_page: row.time_on_page,
+                is_entry: row.is_entry,
+                is_exit: row.is_exit,
+                is_bounce: row.is_bounce,
+                session_page_number: row.session_page_number,
+                referrer: row.referrer,
+                browser: row.browser,
+                operating_system: row.operating_system,
+                device_type: row.device_type,
+                city: row.city,
+                country: row.country,
+                country_code: row.country_code,
+            })
+            .collect();
+
+        Ok(crate::types::responses::PagePathVisitorsResponse {
+            page_path: page_path.to_string(),
+            total_count,
+            page,
+            per_page,
+            sessions,
+        })
+    }
+
+    async fn get_recent_activity(
+        &self,
+        project_id: i32,
+        environment_id: Option<i32>,
+        since_id: Option<i64>,
+        limit: Option<i32>,
+    ) -> Result<crate::types::responses::RecentActivityResponse, AnalyticsError> {
+        let limit = std::cmp::min(limit.unwrap_or(50), 100);
+
+        // If since_id is provided, fetch events newer than that ID.
+        // Otherwise, fetch the most recent events from the last 60 seconds.
+        let sql = r#"
+            SELECT
+                e.id,
+                e.timestamp,
+                e.event_type,
+                e.event_name,
+                e.page_path,
+                e.page_title,
+                e.visitor_id,
+                e.browser,
+                e.operating_system,
+                e.device_type,
+                e.referrer,
+                e.is_crawler,
+                ig.city,
+                ig.country,
+                ig.country_code,
+                ig.latitude,
+                ig.longitude
+            FROM events e
+            LEFT JOIN ip_geolocations ig ON e.ip_geolocation_id = ig.id
+            WHERE e.project_id = $1
+              AND ($2::int IS NULL OR e.environment_id = $2)
+              AND (
+                  ($3::bigint IS NOT NULL AND e.id > $3)
+                  OR
+                  ($3::bigint IS NULL AND e.timestamp >= NOW() - INTERVAL '60 seconds')
+              )
+            ORDER BY e.id DESC
+            LIMIT $4
+        "#;
+
+        #[derive(FromQueryResult)]
+        struct ActivityRow {
+            id: i64,
+            timestamp: UtcDateTime,
+            event_type: String,
+            event_name: Option<String>,
+            page_path: String,
+            page_title: Option<String>,
+            visitor_id: Option<i32>,
+            browser: Option<String>,
+            operating_system: Option<String>,
+            device_type: Option<String>,
+            referrer: Option<String>,
+            is_crawler: bool,
+            city: Option<String>,
+            country: Option<String>,
+            country_code: Option<String>,
+            latitude: Option<f64>,
+            longitude: Option<f64>,
+        }
+
+        let rows = ActivityRow::find_by_statement(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            sql,
+            vec![
+                project_id.into(),
+                environment_id.into(),
+                since_id.into(),
+                (limit as i64).into(),
+            ],
+        ))
+        .all(self.db.as_ref())
+        .await?;
+
+        let events = rows
+            .into_iter()
+            .map(|row| crate::types::responses::ActivityEvent {
+                id: row.id,
+                timestamp: row.timestamp,
+                event_type: row.event_type,
+                event_name: row.event_name,
+                page_path: row.page_path,
+                page_title: row.page_title,
+                visitor_id: row.visitor_id,
+                browser: row.browser,
+                operating_system: row.operating_system,
+                device_type: row.device_type,
+                referrer: row.referrer,
+                city: row.city,
+                country: row.country,
+                country_code: row.country_code,
+                latitude: row.latitude,
+                longitude: row.longitude,
+                is_crawler: row.is_crawler,
+            })
+            .collect::<Vec<_>>();
+
+        let count = events.len();
+
+        Ok(crate::types::responses::RecentActivityResponse { events, count })
     }
 
     /// Get detailed analytics for a specific page path
@@ -1981,25 +2972,91 @@ WHERE project_id = $1
             .unwrap_or_default();
 
         // 1. Get overall page stats
+        // Materialize session events in a CTE, then use self-joins (merge joins)
+        // instead of correlated subqueries to preserve exact 3-priority time_on_page logic.
         let stats_sql = format!(
             r#"
-            WITH page_events AS (
+            WITH session_events AS MATERIALIZED (
+                -- Materialize all events for sessions that viewed this page in the time range
                 SELECT
-                    e.visitor_id,
+                    e.id as event_id,
                     e.session_id,
+                    e.event_type,
+                    e.page_path,
                     e.timestamp,
+                    e.visitor_id,
                     e.is_bounce,
-                    e.time_on_page,
-                    e.referrer,
-                    ROW_NUMBER() OVER (PARTITION BY e.session_id ORDER BY e.timestamp ASC) as event_order_asc,
-                    ROW_NUMBER() OVER (PARTITION BY e.session_id ORDER BY e.timestamp DESC) as event_order_desc
+                    e.referrer
                 FROM events e
-                WHERE e.project_id = $1
-                  AND e.page_path = $2
-                  AND e.event_type = 'page_view'
-                  AND e.timestamp >= $3
-                  AND e.timestamp < $4
-                  {}
+                WHERE e.session_id IN (
+                    SELECT DISTINCT session_id
+                    FROM events
+                    WHERE project_id = $1
+                      AND page_path = $2
+                      AND event_type = 'page_view'
+                      AND timestamp >= $3
+                      AND timestamp < $4
+                      {env_filter}
+                )
+                AND e.event_type IN ('page_view', 'page_leave')
+            ),
+            -- Priority 1: next page_leave for same session+page within 30 min
+            p1 AS (
+                SELECT
+                    pv.event_id,
+                    pv.session_id,
+                    pv.timestamp as pv_ts,
+                    MIN(pl.timestamp) as next_page_leave_ts
+                FROM session_events pv
+                LEFT JOIN session_events pl
+                    ON pl.session_id = pv.session_id
+                    AND pl.event_type = 'page_leave'
+                    AND pl.page_path = pv.page_path
+                    AND pl.timestamp > pv.timestamp
+                    AND pl.timestamp <= pv.timestamp + INTERVAL '30 minutes'
+                WHERE pv.event_type = 'page_view'
+                  AND pv.page_path = $2
+                  AND pv.timestamp >= $3
+                  AND pv.timestamp < $4
+                GROUP BY pv.event_id, pv.session_id, pv.timestamp
+            ),
+            -- Priority 2: next page_view in same session (any page)
+            p2 AS (
+                SELECT
+                    pv.event_id,
+                    pv.session_id,
+                    pv.timestamp as pv_ts,
+                    MIN(npv.timestamp) as next_page_view_ts
+                FROM session_events pv
+                LEFT JOIN session_events npv
+                    ON npv.session_id = pv.session_id
+                    AND npv.event_type = 'page_view'
+                    AND npv.timestamp > pv.timestamp
+                WHERE pv.event_type = 'page_view'
+                  AND pv.page_path = $2
+                  AND pv.timestamp >= $3
+                  AND pv.timestamp < $4
+                GROUP BY pv.event_id, pv.session_id, pv.timestamp
+            ),
+            page_events AS (
+                SELECT
+                    se.visitor_id,
+                    p1.session_id,
+                    p1.pv_ts as timestamp,
+                    se.is_bounce,
+                    se.referrer,
+                    EXTRACT(EPOCH FROM (
+                        COALESCE(
+                            p1.next_page_leave_ts,
+                            p2.next_page_view_ts,
+                            p1.pv_ts + INTERVAL '30 seconds'
+                        ) - p1.pv_ts
+                    )) as time_on_page_seconds,
+                    ROW_NUMBER() OVER (PARTITION BY p1.session_id ORDER BY p1.pv_ts ASC) as event_order_asc,
+                    ROW_NUMBER() OVER (PARTITION BY p1.session_id ORDER BY p1.pv_ts DESC) as event_order_desc
+                FROM p1
+                JOIN p2 ON p1.event_id = p2.event_id
+                JOIN session_events se ON se.event_id = p1.event_id
             ),
             session_stats AS (
                 SELECT
@@ -2011,7 +3068,12 @@ WHERE project_id = $1
             SELECT
                 COUNT(DISTINCT pe.visitor_id) as unique_visitors,
                 COUNT(*) as total_page_views,
-                COALESCE(AVG(NULLIF(pe.time_on_page, 0)), 0)::float8 as avg_time_on_page,
+                COALESCE(AVG(
+                    CASE
+                        WHEN pe.time_on_page_seconds > 0 AND pe.time_on_page_seconds < 1800
+                        THEN pe.time_on_page_seconds
+                    END
+                ), 0)::float8 as avg_time_on_page,
                 CASE WHEN COUNT(*) > 0
                      THEN (COUNT(*) FILTER (WHERE pe.is_bounce = true))::float / COUNT(*)::float * 100
                      ELSE 0 END as bounce_rate,
@@ -2025,7 +3087,7 @@ WHERE project_id = $1
             CROSS JOIN session_stats ss
             GROUP BY ss.total_sessions, ss.entry_count, ss.exit_count
             "#,
-            env_filter
+            env_filter = env_filter
         );
 
         #[derive(FromQueryResult)]
@@ -2277,6 +3339,246 @@ WHERE project_id = $1
             countries,
             referrers,
             bucket_interval: interval.to_string(),
+        })
+    }
+
+    /// Get page flow analytics: entry pages, exit pages, drop-off points, and transitions
+    async fn get_page_flow(
+        &self,
+        project_id: i32,
+        start_date: UtcDateTime,
+        end_date: UtcDateTime,
+        environment_id: Option<i32>,
+        limit: Option<i32>,
+        transitions_limit: Option<i32>,
+        min_views_for_dropoff: Option<i32>,
+    ) -> Result<PageFlowResponse, AnalyticsError> {
+        let limit = limit.unwrap_or(20).min(100) as i64;
+        let transitions_limit = transitions_limit.unwrap_or(50).min(200) as i64;
+        let min_views = min_views_for_dropoff.unwrap_or(5) as i64;
+
+        // Build WHERE clause
+        let mut where_conditions = vec![
+            "e.project_id = $1".to_string(),
+            "e.timestamp >= $2".to_string(),
+            "e.timestamp <= $3".to_string(),
+            "e.event_type = 'page_view'".to_string(),
+        ];
+        let mut values: Vec<sea_orm::Value> =
+            vec![project_id.into(), start_date.into(), end_date.into()];
+        let mut param_index = 4;
+
+        if let Some(env_id) = environment_id {
+            where_conditions.push(format!("e.environment_id = ${}", param_index));
+            values.push(env_id.into());
+            param_index += 1;
+        }
+
+        let where_clause = where_conditions.join(" AND ");
+
+        // Query 1: Page-level stats (entry, exit, bounce, views, avg time)
+        let page_stats_sql = format!(
+            r#"
+            SELECT
+                e.page_path,
+                COUNT(*) as total_views,
+                COUNT(*) FILTER (WHERE e.is_entry = true) as entry_count,
+                COUNT(*) FILTER (WHERE e.is_exit = true) as exit_count,
+                COUNT(*) FILTER (WHERE e.is_bounce = true) as bounce_count,
+                (AVG(e.time_on_page) FILTER (WHERE e.time_on_page IS NOT NULL AND e.time_on_page > 0))::float8 as avg_time_on_page
+            FROM events e
+            WHERE {}
+            GROUP BY e.page_path
+            ORDER BY total_views DESC
+            "#,
+            where_clause
+        );
+
+        #[derive(FromQueryResult)]
+        struct PageStats {
+            page_path: String,
+            total_views: i64,
+            entry_count: i64,
+            exit_count: i64,
+            bounce_count: i64,
+            avg_time_on_page: Option<f64>,
+        }
+
+        let page_stats = PageStats::find_by_statement(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            &page_stats_sql,
+            values.clone(),
+        ))
+        .all(self.db.as_ref())
+        .await?;
+
+        let total_pages = page_stats.len() as i64;
+
+        // Build PageFlowEntry list
+        let all_entries: Vec<PageFlowEntry> = page_stats
+            .iter()
+            .map(|p| {
+                let entry_rate = if p.total_views > 0 {
+                    p.entry_count as f64 / p.total_views as f64
+                } else {
+                    0.0
+                };
+                let exit_rate = if p.total_views > 0 {
+                    p.exit_count as f64 / p.total_views as f64
+                } else {
+                    0.0
+                };
+                let bounce_rate = if p.entry_count > 0 {
+                    p.bounce_count as f64 / p.entry_count as f64
+                } else {
+                    0.0
+                };
+                PageFlowEntry {
+                    page_path: p.page_path.clone(),
+                    entry_count: p.entry_count,
+                    exit_count: p.exit_count,
+                    bounce_count: p.bounce_count,
+                    total_views: p.total_views,
+                    avg_time_on_page: p.avg_time_on_page,
+                    entry_rate,
+                    exit_rate,
+                    bounce_rate,
+                }
+            })
+            .collect();
+
+        // Top entry pages (sorted by entry_count DESC)
+        let mut top_entry_pages = all_entries.clone();
+        top_entry_pages.sort_by(|a, b| b.entry_count.cmp(&a.entry_count));
+        top_entry_pages.truncate(limit as usize);
+        // Remove pages with 0 entries
+        top_entry_pages.retain(|p| p.entry_count > 0);
+
+        // Top exit pages (sorted by exit_count DESC)
+        let mut top_exit_pages = all_entries.clone();
+        top_exit_pages.sort_by(|a, b| b.exit_count.cmp(&a.exit_count));
+        top_exit_pages.truncate(limit as usize);
+        top_exit_pages.retain(|p| p.exit_count > 0);
+
+        // Drop-off points: pages with high exit rates and meaningful traffic
+        let mut drop_off_points: Vec<DropOffPoint> = all_entries
+            .iter()
+            .filter(|p| p.total_views >= min_views && p.exit_count > 0)
+            .map(|p| DropOffPoint {
+                page_path: p.page_path.clone(),
+                exit_count: p.exit_count,
+                total_views: p.total_views,
+                exit_rate: p.exit_rate,
+            })
+            .collect();
+        drop_off_points.sort_by(|a, b| {
+            b.exit_rate
+                .partial_cmp(&a.exit_rate)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        drop_off_points.truncate(limit as usize);
+
+        // Query 2: Page-to-page transitions using session_page_number
+        let transitions_sql = format!(
+            r#"
+            WITH page_sequence AS (
+                SELECT
+                    e.session_id,
+                    e.page_path,
+                    e.session_page_number,
+                    LEAD(e.page_path) OVER (
+                        PARTITION BY e.session_id
+                        ORDER BY COALESCE(e.session_page_number, 0), e.timestamp
+                    ) as next_page
+                FROM events e
+                WHERE {}
+            )
+            SELECT
+                page_path as from_page,
+                next_page as to_page,
+                COUNT(*) as transition_count
+            FROM page_sequence
+            WHERE next_page IS NOT NULL
+              AND page_path != next_page
+            GROUP BY page_path, next_page
+            ORDER BY transition_count DESC
+            LIMIT ${}
+            "#,
+            where_clause, param_index
+        );
+
+        let mut transition_values = values.clone();
+        transition_values.push(transitions_limit.into());
+
+        #[derive(FromQueryResult)]
+        struct TransitionResult {
+            from_page: String,
+            to_page: String,
+            transition_count: i64,
+        }
+
+        let transition_results =
+            TransitionResult::find_by_statement(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                &transitions_sql,
+                transition_values,
+            ))
+            .all(self.db.as_ref())
+            .await?;
+
+        // Calculate percentage of transitions from each source page
+        // Build a map of total outgoing transitions per from_page
+        let mut from_page_totals: std::collections::HashMap<String, i64> =
+            std::collections::HashMap::new();
+        for t in &transition_results {
+            *from_page_totals.entry(t.from_page.clone()).or_insert(0) += t.transition_count;
+        }
+
+        let transitions: Vec<PageTransition> = transition_results
+            .into_iter()
+            .map(|t| {
+                let total = from_page_totals.get(&t.from_page).copied().unwrap_or(1);
+                PageTransition {
+                    from_page: t.from_page,
+                    to_page: t.to_page,
+                    transition_count: t.transition_count,
+                    percentage: (t.transition_count as f64 / total as f64) * 100.0,
+                }
+            })
+            .collect();
+
+        // Query 3: Total sessions count
+        let sessions_sql = format!(
+            r#"
+            SELECT COUNT(DISTINCT e.session_id) as total_sessions
+            FROM events e
+            WHERE {}
+            "#,
+            where_clause
+        );
+
+        #[derive(FromQueryResult)]
+        struct SessionCount {
+            total_sessions: i64,
+        }
+
+        let session_count = SessionCount::find_by_statement(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            &sessions_sql,
+            values,
+        ))
+        .one(self.db.as_ref())
+        .await?;
+
+        let total_sessions = session_count.map(|s| s.total_sessions).unwrap_or(0);
+
+        Ok(PageFlowResponse {
+            top_entry_pages,
+            top_exit_pages,
+            drop_off_points,
+            transitions,
+            total_pages,
+            total_sessions,
         })
     }
 }

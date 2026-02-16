@@ -6,7 +6,7 @@ use chrono::Utc;
 use sea_orm::*;
 use std::net::IpAddr;
 use temps_entities::custom_routes::RouteType;
-use tracing::{error, info};
+use tracing::info;
 
 #[derive(Error, Debug)]
 pub enum LbServiceError {

@@ -7,8 +7,9 @@ mod commands;
 
 use clap::{Parser, Subcommand};
 use commands::{
-    ApiKeyCommand, BackupCommand, BuildCommand, DeployCommand, DomainCommand, ProxyCommand,
-    ResetPasswordCommand, ServeCommand, ServicesCommand, SetupCommand,
+    ApiKeyCommand, BackupCommand, BuildCommand, DeployCommand, DoctorCommand, DomainCommand,
+    ProxyCommand, ResetPasswordCommand, ServeCommand, ServicesCommand, SetupCommand,
+    UpgradeCommand,
 };
 use tracing_subscriber::{layer::SubscriberExt, Layer};
 
@@ -45,7 +46,7 @@ enum Commands {
     Proxy(ProxyCommand),
     /// Initial setup: create admin user, configure DNS/Git providers, and domain
     #[command(alias = "init")]
-    Setup(SetupCommand),
+    Setup(Box<SetupCommand>),
     /// Reset admin user password
     ResetAdminPassword(ResetPasswordCommand),
     /// Create an API key with a specified role
@@ -61,6 +62,11 @@ enum Commands {
     Build(BuildCommand),
     /// Deploy pre-built images or static files to environments
     Deploy(DeployCommand),
+    /// Self-upgrade temps to the latest version
+    #[command(alias = "self-update")]
+    Upgrade(UpgradeCommand),
+    /// Diagnose the temps installation and check system health
+    Doctor(DoctorCommand),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -159,5 +165,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Domain(domain_cmd) => domain_cmd.execute(),
         Commands::Build(build_cmd) => build_cmd.execute(),
         Commands::Deploy(deploy_cmd) => deploy_cmd.execute(),
+        Commands::Upgrade(upgrade_cmd) => upgrade_cmd.execute(),
+        Commands::Doctor(doctor_cmd) => doctor_cmd.execute(),
     }
 }

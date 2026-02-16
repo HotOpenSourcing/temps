@@ -3,9 +3,7 @@
 //! This service provides email validation capabilities to check if an email
 //! address exists without sending any email.
 
-use check_if_email_exists::{
-    check_email, CheckEmailInput, CheckEmailInputProxy, CheckEmailOutput, Reachable,
-};
+use check_if_email_exists::{check_email, CheckEmailInputBuilder, CheckEmailOutput, Reachable};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
@@ -33,6 +31,9 @@ pub struct ProxyConfig {
 
 /// Service for validating email addresses
 pub struct ValidationService {
+    /// Configuration for email validation (proxy, from_email, hello_name).
+    /// Currently stored for future use with VerifMethod configuration.
+    #[allow(dead_code)]
     config: ValidationConfig,
 }
 
@@ -185,7 +186,7 @@ impl From<CheckEmailOutput> for ValidateEmailResponse {
             Ok(misc_details) => MiscResult {
                 is_disposable: misc_details.is_disposable,
                 is_role_account: misc_details.is_role_account,
-                is_b2c: false, // This field may not exist in v0.9
+                is_b2c: misc_details.is_b2c,
                 gravatar_url: misc_details.gravatar_url.clone(),
             },
             Err(_) => MiscResult {
@@ -247,31 +248,11 @@ impl ValidationService {
     ) -> Result<ValidateEmailResponse, EmailError> {
         info!("Validating email: {}", request.email);
 
-        // Build the check email input
-        let mut input = CheckEmailInput::new(request.email.clone());
-
-        // Configure from email if available
-        if let Some(from_email) = &self.config.from_email {
-            input.set_from_email(from_email.clone());
-        }
-
-        // Configure hello name if available
-        if let Some(hello_name) = &self.config.hello_name {
-            input.set_hello_name(hello_name.clone());
-        }
-
-        // Configure proxy (request proxy takes precedence over service config)
-        let proxy_config = request.proxy.as_ref().or(self.config.proxy.as_ref());
-        if let Some(proxy) = proxy_config {
-            let proxy_input = CheckEmailInputProxy {
-                host: proxy.host.clone(),
-                port: proxy.port,
-                username: proxy.username.clone(),
-                password: proxy.password.clone(),
-            };
-
-            input.set_proxy(proxy_input);
-        }
+        // Build the check email input using the builder pattern (v0.11 API)
+        let input = CheckEmailInputBuilder::default()
+            .to_email(request.email.clone())
+            .build()
+            .map_err(|e| EmailError::Validation(format!("Failed to build email input: {}", e)))?;
 
         debug!("Calling check_email for: {}", request.email);
 

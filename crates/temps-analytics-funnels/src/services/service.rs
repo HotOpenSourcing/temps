@@ -744,7 +744,7 @@ impl FunnelService {
         let aggregation = self.build_aggregation_select(steps_data.len());
 
         let query = format!(
-            "WITH {ctes}\n{funnel_join}\n{aggregation}",
+            "WITH {ctes},\n{funnel_join}\n{aggregation}",
             ctes = ctes.join(",\n"),
             funnel_join = funnel_join,
             aggregation = aggregation
@@ -960,10 +960,15 @@ impl FunnelService {
                 .unwrap_or(0);
             let completions = completions as u64;
 
-            // Step 1 has no conversion rate (nothing to convert FROM)
-            // Subsequent steps show conversion from previous step
+            // Step 1: conversion rate = completions / total_entries (how many entries completed step 1)
+            // Subsequent steps: conversion rate = completions / previous_step_completions
             let (conversion_rate, drop_off_rate) = if step_num == 1 {
-                (0.0, 0.0) // N/A for entry step
+                if total_entries > 0 {
+                    let rate = (completions as f64 / total_entries as f64) * 100.0;
+                    (rate, 100.0 - rate)
+                } else {
+                    (0.0, 0.0)
+                }
             } else if previous_completions > 0 {
                 let rate = (completions as f64 / previous_completions as f64) * 100.0;
                 (rate, 100.0 - rate)

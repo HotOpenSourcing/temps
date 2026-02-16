@@ -1,5 +1,5 @@
 import { getProjectSessionReplaysOptions } from '@/api/client/@tanstack/react-query.gen'
-import { ProjectResponse } from '@/api/client/types.gen'
+import { ProjectResponse, SessionReplayWithVisitorDto } from '@/api/client/types.gen'
 import { Button } from '@/components/ui/button'
 import {
   Card,
@@ -16,12 +16,18 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
 import { useQuery } from '@tanstack/react-query'
 import { format } from 'date-fns'
 import {
   Calendar,
   Clock,
   ExternalLink,
+  Globe,
   Loader2,
   Monitor,
   Play,
@@ -30,6 +36,34 @@ import {
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { TimeAgo } from '../utils/TimeAgo'
+
+function formatLocation(replay: SessionReplayWithVisitorDto): string | null {
+  const parts: string[] = []
+  if (replay.visitor_city) parts.push(replay.visitor_city)
+  if (replay.visitor_country) parts.push(replay.visitor_country)
+  return parts.length > 0 ? parts.join(', ') : null
+}
+
+function formatBrowserInfo(replay: SessionReplayWithVisitorDto): string | null {
+  if (!replay.browser) return null
+  return replay.browser
+}
+
+function formatOsInfo(replay: SessionReplayWithVisitorDto): string | null {
+  if (!replay.operating_system) return null
+  return replay.operating_system
+}
+
+function formatDuration(ms: number): string {
+  const seconds = Math.floor(ms / 1000)
+  if (seconds < 60) return `${seconds}s`
+  const mins = Math.floor(seconds / 60)
+  const secs = seconds % 60
+  if (mins < 60) return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`
+  const hrs = Math.floor(mins / 60)
+  const remainMins = mins % 60
+  return remainMins > 0 ? `${hrs}h ${remainMins}m` : `${hrs}h`
+}
 
 interface SessionReplaysProps {
   project: ProjectResponse
@@ -146,6 +180,8 @@ export function SessionReplays({
               <TableHeader>
                 <TableRow>
                   <TableHead>Visitor</TableHead>
+                  <TableHead>Browser / OS</TableHead>
+                  <TableHead>Location</TableHead>
                   <TableHead>Duration</TableHead>
                   <TableHead>Viewport</TableHead>
                   <TableHead>Created</TableHead>
@@ -156,23 +192,70 @@ export function SessionReplays({
                 {replaysData.sessions.map((replay) => (
                   <TableRow key={replay.id}>
                     <TableCell>
-                      <div className="flex items-center gap-1">
-                        <User className="h-3 w-3 text-muted-foreground" />
-                        <span className="text-sm">{replay.visitor_id}</span>
+                      <div className="flex items-center gap-1.5">
+                        <User className="h-3 w-3 text-muted-foreground shrink-0" />
+                        <span className="text-sm font-medium">{replay.visitor_id}</span>
                       </div>
+                    </TableCell>
+                    <TableCell>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <div className="flex flex-col gap-0.5">
+                            {formatBrowserInfo(replay) ? (
+                              <>
+                                <span className="text-sm">{formatBrowserInfo(replay)}</span>
+                                {formatOsInfo(replay) && (
+                                  <span className="text-xs text-muted-foreground">{formatOsInfo(replay)}</span>
+                                )}
+                              </>
+                            ) : (
+                              <span className="text-xs text-muted-foreground">-</span>
+                            )}
+                          </div>
+                        </TooltipTrigger>
+                        {(replay.browser || replay.operating_system || replay.device_type) && (
+                          <TooltipContent>
+                            <div className="text-xs space-y-0.5">
+                              {replay.browser && <div>Browser: {replay.browser} {replay.browser_version}</div>}
+                              {replay.operating_system && <div>OS: {replay.operating_system} {replay.operating_system_version}</div>}
+                              {replay.device_type && <div>Device: {replay.device_type}</div>}
+                            </div>
+                          </TooltipContent>
+                        )}
+                      </Tooltip>
+                    </TableCell>
+                    <TableCell>
+                      {formatLocation(replay) ? (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <div className="flex items-center gap-1.5">
+                              <Globe className="h-3 w-3 text-muted-foreground shrink-0" />
+                              <span className="text-sm">{formatLocation(replay)}</span>
+                            </div>
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            <div className="text-xs space-y-0.5">
+                              {replay.visitor_city && <div>City: {replay.visitor_city}</div>}
+                              {replay.visitor_region && <div>Region: {replay.visitor_region}</div>}
+                              {replay.visitor_country && <div>Country: {replay.visitor_country}</div>}
+                            </div>
+                          </TooltipContent>
+                        </Tooltip>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">-</span>
+                      )}
                     </TableCell>
                     <TableCell>
                       <div className="flex items-center gap-1">
                         <Clock className="h-3 w-3 text-muted-foreground" />
-                        <span className="text-sm">{replay.duration || 0}s</span>
+                        <span className="text-sm">{formatDuration(replay.duration || 0)}</span>
                       </div>
                     </TableCell>
-
                     <TableCell>
                       <div className="flex items-center gap-1">
                         <Monitor className="h-3 w-3 text-muted-foreground" />
                         <span className="text-xs text-muted-foreground">
-                          {replay.viewport_width}×{replay.viewport_height}
+                          {replay.viewport_width}x{replay.viewport_height}
                         </span>
                       </div>
                     </TableCell>

@@ -199,22 +199,12 @@ export function ServiceDataBrowser() {
       // If level not found, use the last level configuration
       const lastLevel =
         explorerSupport.hierarchy[explorerSupport.hierarchy.length - 1]
-      console.warn(
-        `Hierarchy level ${level} not found, using last level:`,
-        lastLevel
-      )
       return {
         can_list_containers: lastLevel.can_list_containers,
         can_list_entities: lastLevel.can_list_entities,
         container_type: lastLevel.container_type,
       }
     }
-
-    console.debug(`Hierarchy capabilities for level ${level}:`, {
-      can_list_containers: hierarchyLevel.can_list_containers,
-      can_list_entities: hierarchyLevel.can_list_entities,
-      container_type: hierarchyLevel.container_type,
-    })
 
     return {
       can_list_containers: hierarchyLevel.can_list_containers,
@@ -634,21 +624,9 @@ export function ServiceDataBrowser() {
             // "small" or null means we can show in tree
             const shouldShowEntitiesInTable = node.entityCountHint === 'large'
 
-            console.log('Loading children for node:', {
-              path: nodePath,
-              canContainEntities: node.canContainEntities,
-              canContainContainers: node.canContainContainers,
-              entityCountHint: node.entityCountHint,
-              shouldShowEntitiesInTable,
-            })
-
             if (shouldShowEntitiesInTable) {
               // Mark as loaded but don't add children to tree
               // Children will be displayed in ContainerEntitiesView instead
-              console.log(
-                'Skipping tree children (large entity count):',
-                nodePath
-              )
               return {
                 ...node,
                 isLoaded: true,
@@ -935,14 +913,6 @@ export function ServiceDataBrowser() {
 
     const selectedNode = findSelectedNode(treeNodes, selectedPath)
 
-    console.log('renderContainerContent:', {
-      selectedPath,
-      selectedNode,
-      canContainEntities: selectedNode?.canContainEntities,
-      canContainContainers: selectedNode?.canContainContainers,
-      entityCountHint: selectedNode?.entityCountHint,
-    })
-
     // Show entities table if:
     // 1. entity_count_hint is "large" (show in paginated table)
     // 2. OR it's a leaf container (can_contain_entities=true AND can_contain_containers=false)
@@ -951,13 +921,6 @@ export function ServiceDataBrowser() {
       (selectedNode.entityCountHint === 'large' ||
         (selectedNode.canContainEntities === true &&
           selectedNode.canContainContainers === false))
-
-    console.log('shouldShowEntitiesTable check:', {
-      shouldShowEntitiesTable,
-      entityCountHint: selectedNode?.entityCountHint,
-      selectedNode: selectedNode?.name,
-      path: selectedPath,
-    })
 
     if (shouldShowEntitiesTable) {
       // Show entities table for leaf containers (like S3 buckets or database tables)

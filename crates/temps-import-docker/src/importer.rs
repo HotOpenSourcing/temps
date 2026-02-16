@@ -7,10 +7,10 @@ use bollard::{
 };
 use std::{collections::HashMap, sync::Arc};
 use temps_import_types::{
-    CreatedResource, ImportContext, ImportOutcome, ImportPlan, ImportResult, ImportSelector,
-    ImportServiceProvider, ImportSource, ImportValidationRule, ImporterCapabilities, NetworkInfo,
-    NetworkMode, ResourceInfo, VolumeMount, WorkloadDescriptor, WorkloadId, WorkloadImporter,
-    WorkloadSnapshot, WorkloadStatus, WorkloadType,
+    CreatedResource, ImportContext, ImportCredentials, ImportOutcome, ImportPlan, ImportResult,
+    ImportSelector, ImportServiceProvider, ImportSource, ImportValidationRule,
+    ImporterCapabilities, NetworkInfo, NetworkMode, ResourceInfo, VolumeMount, WorkloadDescriptor,
+    WorkloadId, WorkloadImporter, WorkloadSnapshot, WorkloadStatus, WorkloadType,
 };
 use tracing::{debug, info};
 
@@ -72,7 +72,11 @@ impl WorkloadImporter for DockerImporter {
         }
     }
 
-    async fn discover(&self, selector: ImportSelector) -> ImportResult<Vec<WorkloadDescriptor>> {
+    async fn discover(
+        &self,
+        _credentials: &ImportCredentials,
+        selector: ImportSelector,
+    ) -> ImportResult<Vec<WorkloadDescriptor>> {
         debug!(
             "Discovering Docker containers with selector: {:?}",
             selector
@@ -174,7 +178,11 @@ impl WorkloadImporter for DockerImporter {
         Ok(descriptors)
     }
 
-    async fn describe(&self, workload_id: &WorkloadId) -> ImportResult<WorkloadSnapshot> {
+    async fn describe(
+        &self,
+        _credentials: &ImportCredentials,
+        workload_id: &WorkloadId,
+    ) -> ImportResult<WorkloadSnapshot> {
         debug!("Describing Docker container: {}", workload_id);
 
         let inspect = self
@@ -273,6 +281,7 @@ impl WorkloadImporter for DockerImporter {
                         v.clone()
                     },
                     is_secret,
+                    source_description: None,
                 }
             })
             .collect();
@@ -388,6 +397,9 @@ impl WorkloadImporter for DockerImporter {
             }
         });
 
+        // Capture count before env_vars is moved into deployment
+        let env_var_count = env_vars.len();
+
         // Build deployment configuration
         let deployment = DeploymentConfiguration {
             image: snapshot.image.clone().unwrap_or_default(),
@@ -457,13 +469,98 @@ impl WorkloadImporter for DockerImporter {
             warnings,
         };
 
+        // Build migration steps for transparency
+        let mut steps = vec![
+            temps_import_types::MigrationStep {
+                order: 1,
+                id: "create-project".to_string(),
+                title: format!("Create project '{}'", project.name),
+                description: format!(
+                    "Creates a new project '{}' with the '{}' type in Temps.",
+                    project.name, "docker"
+                ),
+                resource_type: temps_import_types::StepResourceType::Project,
+                risk: temps_import_types::RiskLevel::Low,
+                data_implications: vec![],
+                pre_conditions: vec![],
+                post_conditions: vec!["Verify project appears in dashboard".to_string()],
+                skippable: false,
+                skipped: false,
+                reversible: true,
+                estimated_duration: Some("< 1 second".to_string()),
+            },
+            temps_import_types::MigrationStep {
+                order: 2,
+                id: "set-env-vars".to_string(),
+                title: format!("Set {} environment variables", env_var_count),
+                description: format!(
+                    "Copies {} environment variables to the production environment. Secrets are imported as encrypted values.",
+                    env_var_count
+                ),
+                resource_type: temps_import_types::StepResourceType::EnvironmentVariable,
+                risk: temps_import_types::RiskLevel::Low,
+                data_implications: vec![],
+                pre_conditions: vec![],
+                post_conditions: vec!["Verify environment variables in project settings".to_string()],
+                skippable: true,
+                skipped: false,
+                reversible: true,
+                estimated_duration: Some("< 1 second".to_string()),
+            },
+            temps_import_types::MigrationStep {
+                order: 3,
+                id: "create-deployment".to_string(),
+                title: format!("Create deployment from image '{}'", deployment.image),
+                description: "Records a deployment entry pointing to the existing Docker image. No new container is started.".to_string(),
+                resource_type: temps_import_types::StepResourceType::Deployment,
+                risk: temps_import_types::RiskLevel::None,
+                data_implications: vec![],
+                pre_conditions: vec![],
+                post_conditions: vec!["Verify deployment shows as 'completed' in dashboard".to_string()],
+                skippable: false,
+                skipped: false,
+                reversible: true,
+                estimated_duration: Some("< 1 second".to_string()),
+            },
+        ];
+
+        // Renumber steps
+        for (i, step) in steps.iter_mut().enumerate() {
+            step.order = i + 1;
+        }
+
+        // Build summary
+        let summary = temps_import_types::MigrationSummary {
+            headline: format!(
+                "Import Docker container '{}' as project in Temps",
+                project.name
+            ),
+            overall_risk: temps_import_types::RiskLevel::Low,
+            resource_counts: temps_import_types::ResourceCounts {
+                projects: 1,
+                environments: 1,
+                deployments: 1,
+                environment_variables: env_var_count,
+                services: 0,
+                domains: 0,
+            },
+            critical_warnings: vec![],
+            manual_actions_required: vec![],
+            unsupported_features: vec![],
+        };
+
         Ok(ImportPlan {
             version: "1.0".to_string(),
             source: "docker".to_string(),
-            source_container_id: snapshot.id.to_string(),
+            source_id: snapshot.id.to_string(),
             project,
             environment,
             deployment,
+            services: vec![],
+            domains: vec![],
+            additional_deployments: vec![],
+            steps,
+            summary,
             metadata,
         })
     }
@@ -508,6 +605,7 @@ impl WorkloadImporter for DockerImporter {
                 warnings: vec![],
                 errors: vec![],
                 created_resources: vec![],
+                step_results: vec![],
                 duration_seconds: start_time.elapsed().as_secs_f64(),
             });
         }
@@ -684,7 +782,7 @@ impl WorkloadImporter for DockerImporter {
 
             let deployment_container = deployment_containers::ActiveModel {
                 deployment_id: Set(deployment.id),
-                container_id: Set(plan.source_container_id.clone()),
+                container_id: Set(plan.source_id.clone()),
                 container_name: Set(container_name.clone()),
                 container_port: Set(port_mapping.container_port as i32),
                 host_port: Set(port_mapping.host_port.map(|p| p as i32)),
@@ -772,6 +870,7 @@ impl WorkloadImporter for DockerImporter {
             warnings,
             errors: vec![],
             created_resources,
+            step_results: vec![],
             duration_seconds: duration,
         })
     }
@@ -782,8 +881,11 @@ impl WorkloadImporter for DockerImporter {
             supports_networks: true,
             supports_health_checks: true,
             supports_resource_limits: true,
-            supports_build: false,  // Docker containers are pre-built
-            supports_stacks: false, // Phase 1: single containers only
+            supports_build: false,            // Docker containers are pre-built
+            supports_stacks: false,           // Phase 1: single containers only
+            supports_services: false,         // Docker doesn't have managed services
+            supports_domains: false,          // Docker doesn't have managed domains
+            supports_project_snapshot: false, // Docker uses workload-level snapshots
         }
     }
 }
@@ -1050,7 +1152,7 @@ mod tests {
         // Verify plan structure
         assert_eq!(plan.version, "1.0");
         assert_eq!(plan.source, "docker");
-        assert_eq!(plan.source_container_id, "abc123");
+        assert_eq!(plan.source_id, "abc123");
 
         // Verify project configuration
         assert_eq!(plan.project.name, "my-web-app");
@@ -1228,6 +1330,7 @@ mod tests {
             git_provider_connection_id: None,
             repo_owner: None,
             repo_name: None,
+            credentials: ImportCredentials::none(),
             metadata: std::collections::HashMap::new(),
         };
 
@@ -1281,6 +1384,7 @@ mod tests {
             git_provider_connection_id: None,
             repo_owner: None,
             repo_name: None,
+            credentials: ImportCredentials::none(),
             metadata: std::collections::HashMap::new(),
         };
 
@@ -1321,6 +1425,7 @@ mod tests {
             git_provider_connection_id: None,
             repo_owner: None,
             repo_name: None,
+            credentials: ImportCredentials::none(),
             metadata: std::collections::HashMap::new(),
         };
 
@@ -1390,6 +1495,7 @@ mod tests {
             git_provider_connection_id: None,
             repo_owner: None,
             repo_name: None,
+            credentials: ImportCredentials::none(),
             metadata: std::collections::HashMap::new(),
         };
 
@@ -1424,6 +1530,7 @@ mod tests {
             git_provider_connection_id: None,
             repo_owner: None,
             repo_name: None,
+            credentials: ImportCredentials::none(),
             metadata: std::collections::HashMap::new(),
         };
 
@@ -1465,7 +1572,7 @@ mod tests {
         ImportPlan {
             version: "1.0".to_string(),
             source: "docker".to_string(),
-            source_container_id: "test-container-123".to_string(),
+            source_id: "test-container-123".to_string(),
             project: ProjectConfiguration {
                 name: "test-project".to_string(),
                 slug: "test-project".to_string(),
@@ -1504,6 +1611,18 @@ mod tests {
                 entrypoint: None,
                 working_dir: None,
                 health_check: None,
+            },
+            services: vec![],
+            domains: vec![],
+            additional_deployments: vec![],
+            steps: vec![],
+            summary: MigrationSummary {
+                headline: "Test Docker import".to_string(),
+                overall_risk: RiskLevel::Low,
+                resource_counts: ResourceCounts::default(),
+                critical_warnings: vec![],
+                manual_actions_required: vec![],
+                unsupported_features: vec![],
             },
             metadata: PlanMetadata {
                 generated_at: chrono::Utc::now(),

@@ -68,6 +68,7 @@ pub mod visitor;
 pub mod error_events;
 pub mod error_groups;
 pub mod project_dsns;
+pub mod source_maps;
 pub mod tokenizer;
 
 // Status page entities

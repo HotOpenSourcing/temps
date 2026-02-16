@@ -293,6 +293,7 @@ mod tests {
                 created_at: now,
                 updated_at: now,
                 created_by: Some(1),
+                encrypted_token: None,
             }]])
             .into_connection();
 
@@ -331,6 +332,7 @@ mod tests {
                 created_at: now,
                 updated_at: now,
                 created_by: Some(1),
+                encrypted_token: None,
             }]])
             .into_connection();
 
@@ -369,6 +371,7 @@ mod tests {
                 created_at: now,
                 updated_at: now,
                 created_by: Some(1),
+                encrypted_token: None,
             }]])
             // For finding token again to update last_used_at
             .append_query_results(vec![vec![temps_entities::deployment_tokens::Model {
@@ -385,6 +388,7 @@ mod tests {
                 created_at: now,
                 updated_at: now,
                 created_by: Some(1),
+                encrypted_token: None,
             }]])
             // For the update
             .append_exec_results(vec![MockExecResult {
@@ -432,6 +436,7 @@ mod tests {
                 created_at: now,
                 updated_at: now,
                 created_by: Some(1),
+                encrypted_token: None,
             }]])
             // For finding token again to update last_used_at
             .append_query_results(vec![vec![temps_entities::deployment_tokens::Model {
@@ -448,6 +453,7 @@ mod tests {
                 created_at: now,
                 updated_at: now,
                 created_by: Some(1),
+                encrypted_token: None,
             }]])
             // For the update
             .append_exec_results(vec![MockExecResult {
@@ -496,6 +502,7 @@ mod tests {
                 created_at: now,
                 updated_at: now,
                 created_by: Some(1),
+                encrypted_token: None,
             }]])
             // For finding token again to update last_used_at
             .append_query_results(vec![vec![temps_entities::deployment_tokens::Model {
@@ -512,6 +519,7 @@ mod tests {
                 created_at: now,
                 updated_at: now,
                 created_by: Some(1),
+                encrypted_token: None,
             }]])
             // For the update
             .append_exec_results(vec![MockExecResult {

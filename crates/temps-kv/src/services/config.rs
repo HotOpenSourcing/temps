@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn test_version_extraction() {
         let tests = vec![
-            ("redis:8-alpine", "7"),
+            ("redis:8-alpine", "8"),
             ("redis:7.2-alpine", "7.2"),
             ("redis:7.2.4", "7.2.4"),
             ("redis:latest", "latest"),

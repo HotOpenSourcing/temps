@@ -93,7 +93,7 @@ impl ErrorAnalyticsService {
                 count
             FROM (
                 SELECT
-                    time_bucket_gapfill($1, timestamp, $2::timestamptz, $3::timestamptz) as bucket,
+                    time_bucket_gapfill($1::interval, timestamp, $2::timestamptz, $3::timestamptz) as bucket,
                     COALESCE(COUNT(*), 0) as count
                 FROM error_events
                 WHERE project_id = $4

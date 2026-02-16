@@ -7,22 +7,18 @@ use temps_core::DBDateTime;
 /// Route type determines how the proxy matches incoming requests
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "String", db_type = "String(StringLen::N(10))")]
+#[derive(Default)]
 pub enum RouteType {
     /// Match on HTTP Host header (Layer 7) - default
     /// Works for both HTTP and HTTPS (uses Host header after TLS termination)
     #[sea_orm(string_value = "http")]
+    #[default]
     Http,
 
     /// Match on TLS SNI hostname (Layer 4/5)
     /// Routes based on SNI before TLS termination - useful for TCP passthrough
     #[sea_orm(string_value = "tls")]
     Tls,
-}
-
-impl Default for RouteType {
-    fn default() -> Self {
-        RouteType::Http
-    }
 }
 
 impl std::fmt::Display for RouteType {

@@ -54,9 +54,13 @@ impl TempsPlugin for ConfigPlugin {
     fn configure_routes(&self, context: &PluginContext) -> Option<PluginRoutes> {
         // Get the ConfigService from the context
         let config_service = context.require_service::<ConfigService>();
+        let audit_service = context.require_service::<dyn temps_core::AuditLogger>();
 
         // Create SettingsState
-        let settings_state = Arc::new(SettingsState { config_service });
+        let settings_state = Arc::new(SettingsState {
+            config_service,
+            audit_service,
+        });
 
         // Configure routes with the state
         let routes = configure_routes().with_state(settings_state);

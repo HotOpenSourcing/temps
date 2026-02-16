@@ -12,6 +12,7 @@
 //!
 //! ```rust,no_run
 //! use temps_query_redis::RedisSource;
+//! use temps_query::DataSource;
 //!
 //! # async fn example() -> temps_query::Result<()> {
 //! let source = RedisSource::new("redis://localhost:6379").await?;
@@ -727,7 +728,7 @@ mod tests {
 
     #[test]
     fn test_capabilities() {
-        let capabilities = vec![Capability::KeyValue];
+        let capabilities = [Capability::KeyValue];
         assert!(capabilities.contains(&Capability::KeyValue));
     }
 

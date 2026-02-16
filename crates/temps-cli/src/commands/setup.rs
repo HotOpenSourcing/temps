@@ -16,7 +16,7 @@ use rustls::crypto::CryptoProvider;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use temps_auth::UserService;
 use temps_core::{AppSettings, EncryptionService};
 use temps_dns::providers::credentials::{
@@ -241,7 +241,7 @@ fn get_data_dir(data_dir: &Option<PathBuf>) -> anyhow::Result<PathBuf> {
     }
 }
 
-fn setup_encryption_key(data_dir: &PathBuf) -> anyhow::Result<String> {
+fn setup_encryption_key(data_dir: &Path) -> anyhow::Result<String> {
     let encryption_key_path = data_dir.join("encryption_key");
 
     if encryption_key_path.exists() {
@@ -259,6 +259,46 @@ fn setup_encryption_key(data_dir: &PathBuf) -> anyhow::Result<String> {
         );
         Ok(key)
     }
+}
+
+/// Ensure the system user (id=0) exists in the database.
+/// This user is referenced by webhook-created resources (e.g., GitHub App installations)
+/// that don't have an authenticated user context.
+async fn ensure_system_user(db: &sea_orm::DatabaseConnection) -> anyhow::Result<()> {
+    let system_user_exists = users::Entity::find_by_id(0)
+        .one(db)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to check system user: {}", e))?
+        .is_some();
+
+    if !system_user_exists {
+        let now = chrono::Utc::now();
+        let system_user = users::ActiveModel {
+            id: Set(0),
+            name: Set("System".to_string()),
+            email: Set("system@localhost".to_string()),
+            password_hash: Set(None),
+            email_verified: Set(true),
+            email_verification_token: Set(None),
+            email_verification_expires: Set(None),
+            password_reset_token: Set(None),
+            password_reset_expires: Set(None),
+            deleted_at: Set(None),
+            mfa_enabled: Set(false),
+            mfa_secret: Set(None),
+            mfa_recovery_codes: Set(None),
+            created_at: Set(now),
+            updated_at: Set(now),
+        };
+
+        system_user
+            .insert(db)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create system user: {}", e))?;
+        debug!("Created system user (id=0)");
+    }
+
+    Ok(())
 }
 
 /// Result type indicating whether the user was created or password was reset
@@ -691,7 +731,7 @@ const GEOLITE2_DOWNLOAD_URL: &str =
     "https://raw.githubusercontent.com/gotempsh/temps/refs/heads/main/crates/temps-cli/GeoLite2-City.mmdb";
 
 /// Download GeoLite2-City.mmdb from GitHub with progress bar
-async fn download_geolite2_database(data_dir: &PathBuf) -> anyhow::Result<()> {
+async fn download_geolite2_database(data_dir: &Path) -> anyhow::Result<()> {
     use futures::StreamExt;
 
     let geo_db_path = data_dir.join("GeoLite2-City.mmdb");
@@ -840,7 +880,7 @@ async fn download_geolite2_database(data_dir: &PathBuf) -> anyhow::Result<()> {
 
 /// Check if GeoLite2-City.mmdb exists
 /// Returns true if database exists, false if it needs to be downloaded
-fn check_geolite2_database(data_dir: &PathBuf) -> bool {
+fn check_geolite2_database(data_dir: &Path) -> bool {
     let geo_db_path = data_dir.join("GeoLite2-City.mmdb");
     let current_dir_path = PathBuf::from("./GeoLite2-City.mmdb");
 
@@ -854,7 +894,7 @@ fn check_geolite2_database(data_dir: &PathBuf) -> bool {
 }
 
 /// Show warning when GeoLite2 database is missing and download was skipped
-fn show_geolite2_missing_warning(data_dir: &PathBuf) {
+fn show_geolite2_missing_warning(data_dir: &Path) {
     print_warning("GeoLite2 database not found (download skipped)");
     println!();
     println!(
@@ -970,10 +1010,8 @@ fn validate_and_parse_certificate(
             return true;
         }
         // Check wildcard matching
-        if cert_domain.starts_with("*.") {
-            let cert_suffix = &cert_domain[2..];
-            if expected_domain.starts_with("*.") {
-                let expected_suffix = &expected_domain[2..];
+        if let Some(cert_suffix) = cert_domain.strip_prefix("*.") {
+            if let Some(expected_suffix) = expected_domain.strip_prefix("*.") {
                 return cert_suffix == expected_suffix;
             }
             // Check if expected is a subdomain of wildcard
@@ -1275,6 +1313,10 @@ impl SetupCommand {
         rt.block_on(user_service.initialize_roles())
             .map_err(|e| anyhow::anyhow!("Failed to initialize roles: {}", e))?;
         print_success("Default roles initialized (admin, user)");
+
+        // Create system user (id=0) if not exists — needed for webhook-created
+        // resources (e.g., GitHub App installations) that reference user_id=0
+        rt.block_on(ensure_system_user(db.as_ref()))?;
 
         // Create admin user (or reset password if user exists)
         print_section("Admin User Setup");
