@@ -12,6 +12,7 @@
 //!
 //! ```rust,no_run
 //! use temps_query_s3::S3Source;
+//! use temps_query::DataSource;
 //!
 //! # async fn example() -> temps_query::Result<()> {
 //! let source = S3Source::new(
