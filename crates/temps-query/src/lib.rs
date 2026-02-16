@@ -17,7 +17,6 @@
 //! - **Introspect**: Optional trait for schema inspection
 //! - **Queryable**: Optional trait for filtering and querying
 //! - **ItemAccess**: Optional trait for key-based access
-//! - **SqlFeature**: Optional trait for raw SQL execution
 //! - **Transactional**: Optional trait for transaction support
 //! - **Extensible**: Optional trait for backend-specific operations
 //!
@@ -75,7 +74,7 @@ pub use error::{DataError, Result};
 pub use registry::{ConnectionConfig, DataSourceFactory, QueryRegistry};
 pub use traits::{
     DataSource, Downloadable, Extensible, Introspect, ItemAccess, QuerySchemaProvider, Queryable,
-    SqlFeature, Transactional,
+    Transactional,
 };
 pub use types::{
     Capability, ContainerCapabilities, ContainerInfo, ContainerPath, ContainerType, DataRow,

@@ -233,9 +233,9 @@ impl DoctorCommand {
         if !data_dir.exists() {
             report.add(
                 "Directory",
-                CheckResult::Fail(format!(
-                    "Data directory does not exist. Run `temps setup` first."
-                )),
+                CheckResult::Fail(
+                    "Data directory does not exist. Run `temps setup` first.".to_string(),
+                ),
             );
             return;
         }
@@ -413,35 +413,32 @@ impl DoctorCommand {
         }
 
         // BuildKit support
-        match timeout(CHECK_TIMEOUT, docker.info()).await {
-            Ok(Ok(info)) => {
-                // Check for buildx/buildkit via server version >= 18.09
-                let has_buildkit = info
-                    .server_version
-                    .as_ref()
-                    .map(|v| {
-                        let parts: Vec<&str> = v.split('.').collect();
-                        if let Some(major) = parts.first().and_then(|s| s.parse::<u32>().ok()) {
-                            major >= 18
-                        } else {
-                            false
-                        }
-                    })
-                    .unwrap_or(false);
+        if let Ok(Ok(info)) = timeout(CHECK_TIMEOUT, docker.info()).await {
+            // Check for buildx/buildkit via server version >= 18.09
+            let has_buildkit = info
+                .server_version
+                .as_ref()
+                .map(|v| {
+                    let parts: Vec<&str> = v.split('.').collect();
+                    if let Some(major) = parts.first().and_then(|s| s.parse::<u32>().ok()) {
+                        major >= 18
+                    } else {
+                        false
+                    }
+                })
+                .unwrap_or(false);
 
-                if has_buildkit {
-                    report.add("BuildKit", CheckResult::Pass("Supported".to_string()));
-                } else {
-                    report.add(
-                        "BuildKit",
-                        CheckResult::Warn(
-                            "Docker version may not support BuildKit. Builds may be slower."
-                                .to_string(),
-                        ),
-                    );
-                }
+            if has_buildkit {
+                report.add("BuildKit", CheckResult::Pass("Supported".to_string()));
+            } else {
+                report.add(
+                    "BuildKit",
+                    CheckResult::Warn(
+                        "Docker version may not support BuildKit. Builds may be slower."
+                            .to_string(),
+                    ),
+                );
             }
-            _ => {}
         }
 
         // Docker network

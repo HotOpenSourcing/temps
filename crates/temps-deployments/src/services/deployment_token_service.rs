@@ -256,7 +256,7 @@ impl DeploymentTokenService {
             })?;
 
         let now = Utc::now();
-        let expires_at = request.expires_at.or_else(|| {
+        let expires_at = request.expires_at.or({
             // Default expiration: never (None)
             None
         });
@@ -642,10 +642,34 @@ mod tests {
     use chrono::Duration;
     use sea_orm::{ActiveModelTrait, Set};
     use temps_database::test_utils::TestDatabase;
-    use temps_entities::projects;
+    use temps_entities::{projects, users};
 
-    async fn setup_test_env() -> (TestDatabase, DeploymentTokenService, projects::Model) {
-        let db = TestDatabase::with_migrations().await.unwrap();
+    /// Test encryption key for creating DeploymentTokenService in tests
+    const TEST_ENCRYPTION_KEY: &str =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    /// Set up a test environment with Docker-based PostgreSQL.
+    /// Returns None if Docker is not available (test should skip gracefully).
+    async fn setup_test_env() -> Option<(TestDatabase, DeploymentTokenService, projects::Model)> {
+        let db = match TestDatabase::with_migrations().await {
+            Ok(db) => db,
+            Err(e) => {
+                println!("Docker not available, skipping test: {}", e);
+                return None;
+            }
+        };
+
+        // Create a test user (needed for FK constraint on deployment_tokens.created_by)
+        let user = users::ActiveModel {
+            name: Set("Test User".to_string()),
+            email: Set(format!("test-{}@example.com", uuid::Uuid::new_v4())),
+            email_verified: Set(true),
+            mfa_enabled: Set(false),
+            created_at: Set(Utc::now()),
+            updated_at: Set(Utc::now()),
+            ..Default::default()
+        };
+        user.insert(db.db.as_ref()).await.unwrap();
 
         // Create a test project
         let project = projects::ActiveModel {
@@ -662,22 +686,17 @@ mod tests {
         };
         let project = project.insert(db.db.as_ref()).await.unwrap();
 
-        // Create encryption service with test key
-        let encryption_service = Arc::new(
-            EncryptionService::new(
-                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-            )
-            .unwrap(),
-        );
+        let encryption_service = Arc::new(EncryptionService::new(TEST_ENCRYPTION_KEY).unwrap());
 
         let service = DeploymentTokenService::new(db.db.clone(), encryption_service);
-        (db, service, project)
+        Some((db, service, project))
     }
 
     #[tokio::test]
-    #[ignore] // Requires Docker for PostgreSQL testcontainer
     async fn test_create_deployment_token() {
-        let (_db, service, project) = setup_test_env().await;
+        let Some((_db, service, project)) = setup_test_env().await else {
+            return;
+        };
 
         let request = CreateDeploymentTokenRequest {
             name: "Test Token".to_string(),
@@ -702,9 +721,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires Docker for PostgreSQL testcontainer
     async fn test_create_deployment_token_default_permissions() {
-        let (_db, service, project) = setup_test_env().await;
+        let Some((_db, service, project)) = setup_test_env().await else {
+            return;
+        };
 
         let request = CreateDeploymentTokenRequest {
             name: "Default Perms Token".to_string(),
@@ -723,9 +743,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires Docker for PostgreSQL testcontainer
     async fn test_create_deployment_token_invalid_permission() {
-        let (_db, service, project) = setup_test_env().await;
+        let Some((_db, service, project)) = setup_test_env().await else {
+            return;
+        };
 
         let request = CreateDeploymentTokenRequest {
             name: "Invalid Perm Token".to_string(),
@@ -744,9 +765,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires Docker for PostgreSQL testcontainer
     async fn test_create_deployment_token_duplicate_name() {
-        let (_db, service, project) = setup_test_env().await;
+        let Some((_db, service, project)) = setup_test_env().await else {
+            return;
+        };
 
         let request1 = CreateDeploymentTokenRequest {
             name: "Duplicate Name".to_string(),
@@ -777,9 +799,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires Docker for PostgreSQL testcontainer
     async fn test_list_deployment_tokens() {
-        let (_db, service, project) = setup_test_env().await;
+        let Some((_db, service, project)) = setup_test_env().await else {
+            return;
+        };
 
         // Create multiple tokens
         for i in 1..=3 {
@@ -802,9 +825,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires Docker for PostgreSQL testcontainer
     async fn test_get_deployment_token() {
-        let (_db, service, project) = setup_test_env().await;
+        let Some((_db, service, project)) = setup_test_env().await else {
+            return;
+        };
 
         let request = CreateDeploymentTokenRequest {
             name: "Get Token Test".to_string(),
@@ -825,9 +849,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires Docker for PostgreSQL testcontainer
     async fn test_update_deployment_token() {
-        let (_db, service, project) = setup_test_env().await;
+        let Some((_db, service, project)) = setup_test_env().await else {
+            return;
+        };
 
         let request = CreateDeploymentTokenRequest {
             name: "Original Name".to_string(),
@@ -858,9 +883,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires Docker for PostgreSQL testcontainer
     async fn test_delete_deployment_token() {
-        let (_db, service, project) = setup_test_env().await;
+        let Some((_db, service, project)) = setup_test_env().await else {
+            return;
+        };
 
         let request = CreateDeploymentTokenRequest {
             name: "Delete Me".to_string(),
@@ -881,9 +907,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires Docker for PostgreSQL testcontainer
     async fn test_validate_deployment_token() {
-        let (_db, service, project) = setup_test_env().await;
+        let Some((_db, service, project)) = setup_test_env().await else {
+            return;
+        };
 
         let request = CreateDeploymentTokenRequest {
             name: "Validate Me".to_string(),
@@ -907,9 +934,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires Docker for PostgreSQL testcontainer
     async fn test_validate_expired_token() {
-        let (_db, service, project) = setup_test_env().await;
+        let Some((_db, service, project)) = setup_test_env().await else {
+            return;
+        };
 
         let request = CreateDeploymentTokenRequest {
             name: "Expired Token".to_string(),
@@ -933,9 +961,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires Docker for PostgreSQL testcontainer
     async fn test_validate_invalid_token() {
-        let (_db, service, _project) = setup_test_env().await;
+        let Some((_db, service, _project)) = setup_test_env().await else {
+            return;
+        };
 
         let result = service.validate_token("dt_invalidtoken123456").await;
 
@@ -947,9 +976,14 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires Docker for PostgreSQL testcontainer
     async fn test_token_generation_format() {
-        let (_db, service, _project) = setup_test_env().await;
+        // This test doesn't need Docker — generate_token is a pure function.
+        // Use a mock DB connection to construct the service.
+        let mock_db = Arc::new(
+            sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres).into_connection(),
+        );
+        let encryption_service = Arc::new(EncryptionService::new(TEST_ENCRYPTION_KEY).unwrap());
+        let service = DeploymentTokenService::new(mock_db, encryption_service);
 
         let token = service.generate_token();
 
@@ -964,9 +998,13 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires Docker for PostgreSQL testcontainer
     async fn test_token_hash_consistency() {
-        let (_db, service, _project) = setup_test_env().await;
+        // This test doesn't need Docker — hash_token is a pure function.
+        let mock_db = Arc::new(
+            sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres).into_connection(),
+        );
+        let encryption_service = Arc::new(EncryptionService::new(TEST_ENCRYPTION_KEY).unwrap());
+        let service = DeploymentTokenService::new(mock_db, encryption_service);
 
         let token = "dt_testtoken123456";
 

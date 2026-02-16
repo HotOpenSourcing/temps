@@ -687,7 +687,7 @@ impl NotificationService {
             .get_enabled_providers()
             .await
             .map_err(|e| anyhow::anyhow!("Failed to get providers {}", e))?;
-        for provider in providers {
+        for provider in &providers {
             if let Err(e) = provider.send(&notification).await {
                 error!("Failed to send notification via provider: {}", e);
             }
@@ -713,6 +713,18 @@ impl NotificationService {
     pub async fn list_providers(&self) -> Result<Vec<notification_providers::Model>> {
         let providers = notification_providers::Entity::find()
             .all(self.db.as_ref())
+            .await?;
+        Ok(providers)
+    }
+
+    pub async fn list_providers_paginated(
+        &self,
+        page: u64,
+        page_size: u64,
+    ) -> Result<Vec<notification_providers::Model>> {
+        let providers = notification_providers::Entity::find()
+            .paginate(self.db.as_ref(), page_size)
+            .fetch_page(page - 1)
             .await?;
         Ok(providers)
     }

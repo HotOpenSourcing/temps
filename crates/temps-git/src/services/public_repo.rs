@@ -106,6 +106,37 @@ impl GitHubPublicProvider {
         Self { client }
     }
 
+    /// Send an HTTP request with retry logic for transient failures.
+    async fn send_with_retry<F>(
+        &self,
+        mut build_request: F,
+    ) -> Result<reqwest::Response, PublicRepoError>
+    where
+        F: FnMut() -> reqwest::RequestBuilder,
+    {
+        temps_core::retry::RetryConfig::new(3)
+            .with_base_delay(std::time::Duration::from_secs(1))
+            .with_max_delay(std::time::Duration::from_secs(10))
+            .retry(|| {
+                let request = build_request();
+                async move {
+                    let response = request.send().await.map_err(Self::map_error)?;
+
+                    let status = response.status();
+                    if status.is_server_error() || status.as_u16() == 429 {
+                        let error_text = response.text().await.unwrap_or_default();
+                        return Err(PublicRepoError::ApiError(format!(
+                            "HTTP {}: {}",
+                            status, error_text
+                        )));
+                    }
+
+                    Ok(response)
+                }
+            })
+            .await
+    }
+
     fn map_error(e: reqwest::Error) -> PublicRepoError {
         let error_str = e.to_string();
         if error_str.contains("404") {
@@ -152,12 +183,7 @@ impl PublicRepoProvider for GitHubPublicProvider {
     ) -> Result<PublicRepoInfo, PublicRepoError> {
         let url = format!("https://api.github.com/repos/{}/{}", owner, repo);
 
-        let response = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(Self::map_error)?;
+        let response = self.send_with_retry(|| self.client.get(&url)).await?;
 
         Self::check_response_status(response.status(), &format!("Repository {}/{}", owner, repo))?;
 
@@ -209,12 +235,7 @@ impl PublicRepoProvider for GitHubPublicProvider {
     ) -> Result<Vec<PublicBranch>, PublicRepoError> {
         let url = format!("https://api.github.com/repos/{}/{}/branches", owner, repo);
 
-        let response = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(Self::map_error)?;
+        let response = self.send_with_retry(|| self.client.get(&url)).await?;
 
         Self::check_response_status(
             response.status(),
@@ -259,12 +280,7 @@ impl PublicRepoProvider for GitHubPublicProvider {
             owner, repo, reference
         );
 
-        let response = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(Self::map_error)?;
+        let response = self.send_with_retry(|| self.client.get(&url)).await?;
 
         Self::check_response_status(
             response.status(),
@@ -316,6 +332,37 @@ impl GitLabPublicProvider {
             client,
             base_url: base_url.unwrap_or_else(|| "https://gitlab.com".to_string()),
         }
+    }
+
+    /// Send an HTTP request with retry logic for transient failures.
+    async fn send_with_retry<F>(
+        &self,
+        mut build_request: F,
+    ) -> Result<reqwest::Response, PublicRepoError>
+    where
+        F: FnMut() -> reqwest::RequestBuilder,
+    {
+        temps_core::retry::RetryConfig::new(3)
+            .with_base_delay(std::time::Duration::from_secs(1))
+            .with_max_delay(std::time::Duration::from_secs(10))
+            .retry(|| {
+                let request = build_request();
+                async move {
+                    let response = request.send().await.map_err(Self::map_error)?;
+
+                    let status = response.status();
+                    if status.is_server_error() || status.as_u16() == 429 {
+                        let error_text = response.text().await.unwrap_or_default();
+                        return Err(PublicRepoError::ApiError(format!(
+                            "HTTP {}: {}",
+                            status, error_text
+                        )));
+                    }
+
+                    Ok(response)
+                }
+            })
+            .await
     }
 
     fn map_error(e: reqwest::Error) -> PublicRepoError {
@@ -372,12 +419,7 @@ impl PublicRepoProvider for GitLabPublicProvider {
         let encoded_path = Self::encode_project_path(owner, repo);
         let url = format!("{}/api/v4/projects/{}", self.base_url, encoded_path);
 
-        let response = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(Self::map_error)?;
+        let response = self.send_with_retry(|| self.client.get(&url)).await?;
 
         Self::check_response_status(response.status(), &format!("Repository {}/{}", owner, repo))?;
 
@@ -428,12 +470,7 @@ impl PublicRepoProvider for GitLabPublicProvider {
             self.base_url, encoded_path
         );
 
-        let response = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(Self::map_error)?;
+        let response = self.send_with_retry(|| self.client.get(&url)).await?;
 
         Self::check_response_status(
             response.status(),
@@ -487,12 +524,7 @@ impl PublicRepoProvider for GitLabPublicProvider {
                 self.base_url, encoded_path, encoded_ref, per_page, page
             );
 
-            let response = self
-                .client
-                .get(&url)
-                .send()
-                .await
-                .map_err(Self::map_error)?;
+            let response = self.send_with_retry(|| self.client.get(&url)).await?;
 
             Self::check_response_status(
                 response.status(),

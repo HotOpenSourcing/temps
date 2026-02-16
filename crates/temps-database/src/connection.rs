@@ -65,8 +65,8 @@ fn parse_database_url(database_url: &str) -> Result<(String, u16), String> {
         if let Some(bracket_end) = host_port.find(']') {
             let ipv6_host = &host_port[1..bracket_end];
             let port_part = &host_port[bracket_end + 1..];
-            let port = if port_part.starts_with(':') {
-                port_part[1..].parse::<u16>().unwrap_or(5432)
+            let port = if let Some(stripped) = port_part.strip_prefix(':') {
+                stripped.parse::<u16>().unwrap_or(5432)
             } else {
                 5432
             };
@@ -112,7 +112,7 @@ pub async fn establish_connection(database_url: &str) -> ServiceResult<Arc<DbCon
     // Check if the database is reachable before attempting to connect
     check_database_connectivity(&host, port)
         .await
-        .map_err(|e| ServiceError::Database(e))?;
+        .map_err(ServiceError::Database)?;
 
     let mut opt = ConnectOptions::new(database_url);
     opt.max_connections(100)

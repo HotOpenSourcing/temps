@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use super::types::AppState;
 use axum::{
-    extract::{Extension, Path, State},
+    extract::{Extension, Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{delete, get, post, put},
@@ -326,6 +326,9 @@ async fn get_service_type_parameters(
     get,
     path = "/external-services",
     tag = "External Services",
+    params(
+        temps_core::PaginationParams,
+    ),
     responses(
         (status = 200, description = "List of external services", body = Vec<ExternalServiceInfo>),
         (status = 500, description = "Internal server error")
@@ -334,10 +337,17 @@ async fn get_service_type_parameters(
 async fn list_services(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
+    Query(pagination): Query<temps_core::PaginationParams>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, ExternalServicesRead);
 
-    match app_state.external_service_manager.list_services().await {
+    let (page, page_size) = pagination.normalize();
+
+    match app_state
+        .external_service_manager
+        .list_services_paginated(page, page_size)
+        .await
+    {
         Ok(services) => Ok((StatusCode::OK, Json(services))),
         Err(e) => {
             error!("Failed to list services: {}", e);
@@ -932,19 +942,23 @@ async fn unlink_service_from_project(
         (status = 500, description = "Internal server error")
     ),
     params(
-        ("id" = i32, Path, description = "External service ID")
+        ("id" = i32, Path, description = "External service ID"),
+        temps_core::PaginationParams,
     )
 )]
 async fn list_service_projects(
     State(app_state): State<Arc<AppState>>,
     Path(id): Path<i32>,
     RequireAuth(auth): RequireAuth,
+    Query(pagination): Query<temps_core::PaginationParams>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, ExternalServicesRead);
 
+    let (page, page_size) = pagination.normalize();
+
     match app_state
         .external_service_manager
-        .list_service_projects(id)
+        .list_service_projects_paginated(id, page, page_size)
         .await
     {
         Ok(projects) => Ok((StatusCode::OK, Json(projects))),
@@ -968,19 +982,23 @@ async fn list_service_projects(
         (status = 500, description = "Internal server error")
     ),
     params(
-        ("project_id" = i32, Path, description = "Project ID")
+        ("project_id" = i32, Path, description = "Project ID"),
+        temps_core::PaginationParams,
     )
 )]
 async fn list_project_services(
     State(app_state): State<Arc<AppState>>,
     Path(project_id): Path<i32>,
     RequireAuth(auth): RequireAuth,
+    Query(pagination): Query<temps_core::PaginationParams>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, ExternalServicesRead);
 
+    let (page, page_size) = pagination.normalize();
+
     match app_state
         .external_service_manager
-        .list_project_services(project_id)
+        .list_project_services_paginated(project_id, page, page_size)
         .await
     {
         Ok(services) => Ok((StatusCode::OK, Json(services))),

@@ -1,7 +1,8 @@
 use anyhow::Result;
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait,
+    PaginatorTrait, QueryFilter,
 };
 use std::sync::Arc;
 use temps_entities::domains;
@@ -503,6 +504,19 @@ impl DomainService {
     /// List all domains
     pub async fn list_domains(&self) -> Result<Vec<domains::Model>, DomainServiceError> {
         let domains = domains::Entity::find().all(self.db.as_ref()).await?;
+        Ok(domains)
+    }
+
+    /// List domains with pagination
+    pub async fn list_domains_paginated(
+        &self,
+        page: u64,
+        page_size: u64,
+    ) -> Result<Vec<domains::Model>, DomainServiceError> {
+        let domains = domains::Entity::find()
+            .paginate(self.db.as_ref(), page_size)
+            .fetch_page(page - 1)
+            .await?;
         Ok(domains)
     }
 

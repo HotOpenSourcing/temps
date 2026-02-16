@@ -519,6 +519,7 @@ impl RustfsService {
                     ..Default::default()
                 },
             ]),
+            log_config: Some(crate::utils::default_service_log_config()),
             ..Default::default()
         };
 
@@ -970,7 +971,7 @@ mod tests {
 
         assert_eq!(config.host, "localhost");
         assert_eq!(config.region, "us-east-1");
-        assert_eq!(config.docker_image, "rustfs/rustfs:latest");
+        assert_eq!(config.docker_image, DEFAULT_RUSTFS_IMAGE);
         assert!(!config.access_key.is_empty());
         assert!(!config.secret_key.is_empty());
     }

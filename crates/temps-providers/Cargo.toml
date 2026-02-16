@@ -48,6 +48,9 @@ axum-macros = { workspace = true }
 schemars = { workspace = true }
 urlencoding = "2.1"
 
+[features]
+docker-tests = []
+
 [dev-dependencies]
 tokio-test = "0.4"
 testcontainers = { workspace = true }

@@ -1010,10 +1010,8 @@ fn validate_and_parse_certificate(
             return true;
         }
         // Check wildcard matching
-        if cert_domain.starts_with("*.") {
-            let cert_suffix = &cert_domain[2..];
-            if expected_domain.starts_with("*.") {
-                let expected_suffix = &expected_domain[2..];
+        if let Some(cert_suffix) = cert_domain.strip_prefix("*.") {
+            if let Some(expected_suffix) = expected_domain.strip_prefix("*.") {
                 return cert_suffix == expected_suffix;
             }
             // Check if expected is a subdomain of wildcard

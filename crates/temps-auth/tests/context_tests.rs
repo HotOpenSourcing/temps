@@ -28,8 +28,9 @@ fn test_auth_context_new_session() {
     let user = create_mock_user();
     let context = AuthContext::new_session(user.clone(), Role::User);
 
-    assert_eq!(context.user.id, user.id);
-    assert_eq!(context.user.email, user.email);
+    let ctx_user = context.user.as_ref().unwrap();
+    assert_eq!(ctx_user.id, user.id);
+    assert_eq!(ctx_user.email, user.email);
     assert_eq!(context.effective_role, Role::User);
     assert!(context.custom_permissions.is_none());
     assert!(context.is_session());
@@ -48,7 +49,8 @@ fn test_auth_context_new_cli_token() {
     let user = create_mock_user();
     let context = AuthContext::new_cli_token(user.clone(), Role::Admin);
 
-    assert_eq!(context.user.id, user.id);
+    let ctx_user = context.user.as_ref().unwrap();
+    assert_eq!(ctx_user.id, user.id);
     assert_eq!(context.effective_role, Role::Admin);
     assert!(context.custom_permissions.is_none());
     assert!(!context.is_session());
@@ -73,7 +75,8 @@ fn test_auth_context_new_api_key_with_role() {
         42,
     );
 
-    assert_eq!(context.user.id, user.id);
+    let ctx_user = context.user.as_ref().unwrap();
+    assert_eq!(ctx_user.id, user.id);
     assert_eq!(context.effective_role, Role::Reader);
     assert!(context.custom_permissions.is_none());
     assert!(!context.is_session());
@@ -111,7 +114,8 @@ fn test_auth_context_new_api_key_with_custom_permissions() {
         123,
     );
 
-    assert_eq!(context.user.id, user.id);
+    let ctx_user = context.user.as_ref().unwrap();
+    assert_eq!(ctx_user.id, user.id);
     assert_eq!(context.effective_role, Role::Custom);
     assert_eq!(context.custom_permissions, Some(custom_permissions));
     assert!(context.is_api_key());
@@ -278,8 +282,10 @@ fn test_auth_context_serialization() {
     let serialized = serde_json::to_string(&context).unwrap();
     let deserialized: AuthContext = serde_json::from_str(&serialized).unwrap();
 
-    assert_eq!(context.user.id, deserialized.user.id);
-    assert_eq!(context.user.email, deserialized.user.email);
+    let ctx_user = context.user.as_ref().unwrap();
+    let deser_user = deserialized.user.as_ref().unwrap();
+    assert_eq!(ctx_user.id, deser_user.id);
+    assert_eq!(ctx_user.email, deser_user.email);
     assert_eq!(context.effective_role, deserialized.effective_role);
     assert_eq!(context.custom_permissions, deserialized.custom_permissions);
 }

@@ -600,7 +600,7 @@ mod tests {
             bytes.copy_from_slice(&result);
 
             // WASM has_leading_zero_bits: convert to hex and count
-            let hash_hex = hex::encode(&bytes);
+            let hash_hex = hex::encode(bytes);
             let mut leading_zeros = 0u32;
             let mut found = false;
 

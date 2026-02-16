@@ -4,14 +4,14 @@ use crate::events::{WebhookEvent, WebhookEventType};
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter,
-    QueryOrder, QuerySelect,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait,
+    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
 };
 use sha2::Sha256;
 use std::sync::Arc;
 use thiserror::Error;
 use tracing::{error, info, warn};
-use url; // For URL validation
+// For URL validation
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -152,6 +152,22 @@ impl WebhookService {
             .filter(temps_entities::webhooks::Column::ProjectId.eq(project_id))
             .order_by_desc(temps_entities::webhooks::Column::CreatedAt)
             .all(self.db.as_ref())
+            .await?;
+        Ok(webhooks)
+    }
+
+    /// List webhooks for a project with pagination
+    pub async fn list_webhooks_paginated(
+        &self,
+        project_id: i32,
+        page: u64,
+        page_size: u64,
+    ) -> Result<Vec<temps_entities::webhooks::Model>, WebhookError> {
+        let webhooks = temps_entities::webhooks::Entity::find()
+            .filter(temps_entities::webhooks::Column::ProjectId.eq(project_id))
+            .order_by_desc(temps_entities::webhooks::Column::CreatedAt)
+            .paginate(self.db.as_ref(), page_size)
+            .fetch_page(page - 1)
             .await?;
         Ok(webhooks)
     }

@@ -312,10 +312,9 @@ impl SourceMapService {
 
             // Check if any frame needs symbolication
             let needs_symbolication = frames.iter().any(|f| {
-                f.get("symbolicated")
+                !f.get("symbolicated")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false)
-                    == false
                     && f.get("lineno").is_some()
             });
 
@@ -748,14 +747,14 @@ fn generate_lookup_paths(filename: &str) -> Vec<String> {
     }
 
     // Also try without the ~ prefix if present
-    if filename.starts_with("~/") {
-        add(format!("/{}", &filename[2..]));
+    if let Some(stripped) = filename.strip_prefix("~/") {
+        add(format!("/{}", stripped));
     }
 
     // Handle app:/// scheme (Sentry server-side abs_path)
     // e.g. "app:///path/to/.next/server/app/api/route.js"
-    if filename.starts_with("app:///") {
-        let path = &filename[6..]; // strip "app://" keeping leading /
+    if let Some(stripped) = filename.strip_prefix("app://") {
+        let path = stripped; // stripped already has leading /
 
         // Try with ~ prefix
         let clean = path.trim_start_matches('/');

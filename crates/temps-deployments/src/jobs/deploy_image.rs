@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use temps_core::{JobResult, WorkflowContext, WorkflowError, WorkflowTask};
 use temps_deployer::{
-    ContainerDeployer, ContainerStatus as DeployerContainerStatus, DeployRequest, PortMapping,
-    Protocol, ResourceLimits, RestartPolicy,
+    ContainerDeployer, ContainerLogConfig, ContainerStatus as DeployerContainerStatus,
+    DeployRequest, PortMapping, Protocol, ResourceLimits, RestartPolicy,
 };
 use temps_logs::{LogLevel, LogService};
 
@@ -164,6 +164,8 @@ pub struct DeployImageJob {
     log_stream_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// Optional: directly provided image tag (for external/pre-built images, bypasses BuildImageJob lookup)
     external_image_tag: Option<String>,
+    /// Docker log rotation config to prevent unbounded log growth
+    log_config: Option<ContainerLogConfig>,
 }
 
 impl std::fmt::Debug for DeployImageJob {
@@ -196,7 +198,13 @@ impl DeployImageJob {
             container_ids: Arc::new(Mutex::new(Vec::new())),
             log_stream_task: Arc::new(Mutex::new(None)),
             external_image_tag: None,
+            log_config: None,
         }
+    }
+
+    pub fn with_log_config(mut self, log_config: ContainerLogConfig) -> Self {
+        self.log_config = Some(log_config);
+        self
     }
 
     pub fn with_config(mut self, config: DeploymentJobConfig) -> Self {
@@ -616,6 +624,7 @@ impl DeployImageJob {
             restart_policy: RestartPolicy::Always,
             log_path,
             command: None,
+            log_config: self.log_config.clone(),
         };
 
         let deploy_result = self
@@ -1137,6 +1146,7 @@ pub struct DeployImageJobBuilder {
     log_id: Option<String>,
     log_service: Option<Arc<LogService>>,
     external_image_tag: Option<String>,
+    log_config: Option<ContainerLogConfig>,
 }
 
 impl DeployImageJobBuilder {
@@ -1149,6 +1159,7 @@ impl DeployImageJobBuilder {
             log_id: None,
             log_service: None,
             external_image_tag: None,
+            log_config: None,
         }
     }
 
@@ -1219,6 +1230,12 @@ impl DeployImageJobBuilder {
         self
     }
 
+    /// Set Docker log rotation config to prevent unbounded log growth
+    pub fn container_log_config(mut self, log_config: ContainerLogConfig) -> Self {
+        self.log_config = Some(log_config);
+        self
+    }
+
     pub fn build(
         self,
         container_deployer: Arc<dyn ContainerDeployer>,
@@ -1242,6 +1259,9 @@ impl DeployImageJobBuilder {
         }
         if let Some(external_image_tag) = self.external_image_tag {
             job = job.with_external_image_tag(external_image_tag);
+        }
+        if let Some(log_config) = self.log_config {
+            job = job.with_log_config(log_config);
         }
 
         Ok(job)

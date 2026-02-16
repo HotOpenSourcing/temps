@@ -10,9 +10,10 @@ use crate::DomainServiceError;
 use temps_auth::{permission_guard, RequireAuth};
 use temps_core::error_builder::ErrorBuilder;
 use temps_core::problemdetails::Problem;
+use temps_core::{AuditContext, AuditOperation, RequestMetadata};
 
 use axum::{
-    extract::{Path, State},
+    extract::{Extension, Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{delete, get, post},
@@ -21,6 +22,36 @@ use axum::{
 use std::sync::Arc;
 use tracing::{debug, error, info};
 use utoipa::OpenApi;
+
+// ========================================
+// Audit Types
+// ========================================
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DomainAudit {
+    context: AuditContext,
+    domain: String,
+    action: String,
+}
+
+impl AuditOperation for DomainAudit {
+    fn operation_type(&self) -> String {
+        self.action.clone()
+    }
+    fn user_id(&self) -> i32 {
+        self.context.user_id
+    }
+    fn ip_address(&self) -> Option<String> {
+        self.context.ip_address.clone()
+    }
+    fn user_agent(&self) -> &str {
+        &self.context.user_agent
+    }
+    fn serialize(&self) -> anyhow::Result<String> {
+        serde_json::to_string(self)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize audit operation {}", e))
+    }
+}
 
 // Convert TlsError to Problem for consistent error handling
 impl From<TlsError> for Problem {
@@ -250,6 +281,7 @@ pub struct DomainApiDoc;
 async fn create_domain(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<DomainAppState>>,
+    Extension(metadata): Extension<RequestMetadata>,
     Json(request): Json<CreateDomainRequest>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, DomainsCreate);
@@ -289,6 +321,20 @@ async fn create_domain(
         "Domain created successfully: {} with ID: {}",
         request.domain, domain.id
     );
+
+    // Audit log
+    let audit = DomainAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        domain: request.domain.clone(),
+        action: "DOMAIN_CREATED".to_string(),
+    };
+    if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to create audit log: {}", e);
+    }
 
     // Step 2: Automatically request challenge for the domain
     match app_state
@@ -462,6 +508,7 @@ async fn get_domain_by_host(
 async fn provision_domain(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<DomainAppState>>,
+    Extension(metadata): Extension<RequestMetadata>,
     Path(domain): Path<String>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, DomainsWrite);
@@ -489,7 +536,7 @@ async fn provision_domain(
     );
 
     // Try to provision the certificate using HTTP-01 challenge
-    match app_state
+    let result = match app_state
         .tls_service
         .provision_certificate(&domain, user_email)
         .await
@@ -535,7 +582,23 @@ async fn provision_domain(
                 })),
             ))
         }
+    };
+
+    // Audit log
+    let audit = DomainAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        domain: domain.clone(),
+        action: "DOMAIN_PROVISIONED".to_string(),
+    };
+    if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to create audit log: {}", e);
     }
+
+    result
 }
 
 /// Check domain status
@@ -623,6 +686,7 @@ async fn check_domain_status(
 async fn finalize_order(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<DomainAppState>>,
+    Extension(metadata): Extension<RequestMetadata>,
     Path(domain_id): Path<i32>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, DomainsWrite);
@@ -677,6 +741,20 @@ async fn finalize_order(
 
     info!("Order finalized successfully for domain: {}", domain.domain);
 
+    // Audit log
+    let audit = DomainAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        domain: domain_name,
+        action: "DOMAIN_ORDER_FINALIZED".to_string(),
+    };
+    if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to create audit log: {}", e);
+    }
+
     Ok((StatusCode::OK, Json(DomainResponse::from(domain))))
 }
 
@@ -704,6 +782,7 @@ async fn finalize_order(
 async fn cancel_domain_order(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<DomainAppState>>,
+    Extension(metadata): Extension<RequestMetadata>,
     Path(domain_id): Path<i32>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, DomainsWrite);
@@ -741,6 +820,20 @@ async fn cancel_domain_order(
 
     info!("Order cancelled successfully for domain: {}", domain.domain);
 
+    // Audit log
+    let audit = DomainAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        domain: domain_name,
+        action: "DOMAIN_ORDER_CANCELLED".to_string(),
+    };
+    if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to create audit log: {}", e);
+    }
+
     Ok((StatusCode::OK, Json(DomainResponse::from(domain))))
 }
 
@@ -765,6 +858,7 @@ async fn cancel_domain_order(
 async fn delete_domain(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<DomainAppState>>,
+    Extension(metadata): Extension<RequestMetadata>,
     Path(domain): Path<String>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, DomainsDelete);
@@ -781,6 +875,21 @@ async fn delete_domain(
         })?;
 
     info!("Domain {} deleted successfully", domain);
+
+    // Audit log
+    let audit = DomainAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        domain: domain.clone(),
+        action: "DOMAIN_DELETED".to_string(),
+    };
+    if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to create audit log: {}", e);
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -793,6 +902,9 @@ async fn delete_domain(
         (status = 401, description = "Unauthorized"),
         (status = 500, description = "Internal server error")
     ),
+    params(
+        temps_core::PaginationParams,
+    ),
     tag = "Domains",
     security(
         ("bearer_auth" = [])
@@ -801,15 +913,22 @@ async fn delete_domain(
 async fn list_domains(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<DomainAppState>>,
+    Query(pagination): Query<temps_core::PaginationParams>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, DomainsRead);
 
+    let (page, page_size) = pagination.normalize();
+
     debug!("Listing domains for user: {}", auth.user_id());
 
-    let domains = app_state.domain_service.list_domains().await.map_err(|e| {
-        error!("Failed to list domains: {}", e);
-        e
-    })?;
+    let domains = app_state
+        .domain_service
+        .list_domains_paginated(page, page_size)
+        .await
+        .map_err(|e| {
+            error!("Failed to list domains: {}", e);
+            e
+        })?;
 
     let domain_responses: Vec<DomainResponse> =
         domains.into_iter().map(DomainResponse::from).collect();
@@ -852,6 +971,7 @@ async fn list_domains(
 async fn renew_domain(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<DomainAppState>>,
+    Extension(metadata): Extension<RequestMetadata>,
     Path(domain): Path<String>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, DomainsWrite);
@@ -893,6 +1013,20 @@ async fn renew_domain(
                 .detail(format!("Domain {} not found", domain))
                 .build()
         })?;
+
+    // Audit log
+    let audit = DomainAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        domain: domain.clone(),
+        action: "DOMAIN_RENEWED".to_string(),
+    };
+    if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to create audit log: {}", e);
+    }
 
     // For DNS-01 domains (wildcards), use request_challenge to create a new order
     if domain_model.verification_method == "dns-01" {
@@ -1175,6 +1309,7 @@ async fn get_challenge_token(
 async fn create_or_recreate_order(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<DomainAppState>>,
+    Extension(metadata): Extension<RequestMetadata>,
     Path(domain_id): Path<i32>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, DomainsWrite);
@@ -1248,6 +1383,20 @@ async fn create_or_recreate_order(
         domain_name, challenge_data.challenge_type
     );
 
+    // Audit log
+    let audit = DomainAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        domain: domain_name,
+        action: "DOMAIN_ORDER_CREATED".to_string(),
+    };
+    if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to create audit log: {}", e);
+    }
+
     Ok((StatusCode::OK, Json(challenge_response)))
 }
 
@@ -1318,6 +1467,9 @@ async fn get_domain_order(
         (status = 401, description = "Unauthorized"),
         (status = 500, description = "Internal server error")
     ),
+    params(
+        temps_core::PaginationParams,
+    ),
     tag = "Domains",
     security(
         ("bearer_auth" = [])
@@ -1326,16 +1478,23 @@ async fn get_domain_order(
 async fn list_orders(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<DomainAppState>>,
+    Query(pagination): Query<temps_core::PaginationParams>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, DomainsRead);
 
+    let (page, page_size) = pagination.normalize();
+
     info!("Listing all ACME orders for user: {}", auth.user_id());
 
-    let acme_orders = app_state.repository.list_all_orders().await.map_err(|e| {
-        temps_core::problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
-            .with_title("Failed to list orders")
-            .with_detail(e.to_string())
-    })?;
+    let acme_orders = app_state
+        .repository
+        .list_all_orders_paginated(page, page_size)
+        .await
+        .map_err(|e| {
+            temps_core::problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
+                .with_title("Failed to list orders")
+                .with_detail(e.to_string())
+        })?;
 
     let orders: Vec<AcmeOrderResponse> = acme_orders
         .into_iter()
@@ -1448,6 +1607,7 @@ async fn get_http_challenge_debug(
 async fn setup_dns_challenge(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<DomainAppState>>,
+    Extension(metadata): Extension<RequestMetadata>,
     Path(domain_id): Path<i32>,
     Json(request): Json<SetupDnsChallengeRequest>,
 ) -> Result<impl IntoResponse, Problem> {
@@ -1603,6 +1763,20 @@ async fn setup_dns_challenge(
         results,
         message,
     };
+
+    // Audit log
+    let audit = DomainAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        domain: domain.domain.clone(),
+        action: "DNS_CHALLENGE_SETUP".to_string(),
+    };
+    if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to create audit log: {}", e);
+    }
 
     Ok(Json(response))
 }

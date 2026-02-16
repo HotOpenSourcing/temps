@@ -568,7 +568,7 @@ mod tests {
     #[test]
     fn test_capabilities() {
         // Test that S3 reports ObjectStore capability
-        let capabilities = vec![Capability::ObjectStore];
+        let capabilities = [Capability::ObjectStore];
         assert!(capabilities.contains(&Capability::ObjectStore));
     }
 

@@ -58,6 +58,7 @@ struct ManagedZonesResponse {
 
 #[derive(Debug, Deserialize)]
 struct ManagedZone {
+    #[allow(dead_code)]
     id: String,
     name: String,
     #[serde(rename = "dnsName")]

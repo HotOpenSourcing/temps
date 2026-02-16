@@ -70,6 +70,11 @@ pub trait CertificateRepository: Send + Sync {
         order_url: &str,
     ) -> Result<Option<AcmeOrder>, RepositoryError>;
     async fn list_all_orders(&self) -> Result<Vec<AcmeOrder>, RepositoryError>;
+    async fn list_all_orders_paginated(
+        &self,
+        page: u64,
+        page_size: u64,
+    ) -> Result<Vec<AcmeOrder>, RepositoryError>;
     async fn update_acme_order_status(
         &self,
         order_url: &str,
@@ -723,6 +728,42 @@ impl CertificateRepository for DefaultCertificateRepository {
             .collect())
     }
 
+    async fn list_all_orders_paginated(
+        &self,
+        page: u64,
+        page_size: u64,
+    ) -> Result<Vec<AcmeOrder>, RepositoryError> {
+        use temps_entities::acme_orders;
+
+        let results = acme_orders::Entity::find()
+            .order_by_desc(acme_orders::Column::CreatedAt)
+            .paginate(self.db.as_ref(), page_size)
+            .fetch_page(page - 1)
+            .await?;
+
+        Ok(results
+            .into_iter()
+            .map(|r| AcmeOrder {
+                id: r.id,
+                order_url: r.order_url,
+                domain_id: r.domain_id,
+                email: r.email,
+                status: r.status,
+                identifiers: r.identifiers,
+                authorizations: r.authorizations,
+                finalize_url: r.finalize_url,
+                certificate_url: r.certificate_url,
+                error: r.error,
+                error_type: r.error_type,
+                token: r.token,
+                key_authorization: r.key_authorization,
+                created_at: r.created_at,
+                updated_at: r.updated_at,
+                expires_at: r.expires_at,
+            })
+            .collect())
+    }
+
     async fn update_acme_order_status(
         &self,
         order_url: &str,
@@ -1006,6 +1047,14 @@ pub mod test_utils {
         }
 
         async fn list_all_orders(&self) -> Result<Vec<AcmeOrder>, RepositoryError> {
+            Ok(vec![])
+        }
+
+        async fn list_all_orders_paginated(
+            &self,
+            _page: u64,
+            _page_size: u64,
+        ) -> Result<Vec<AcmeOrder>, RepositoryError> {
             Ok(vec![])
         }
 

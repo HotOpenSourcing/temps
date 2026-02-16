@@ -98,7 +98,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dns_plugin_default() {
-        let dns_plugin = DnsPlugin::default();
+        let dns_plugin = DnsPlugin;
         assert_eq!(dns_plugin.name(), "dns");
     }
 }

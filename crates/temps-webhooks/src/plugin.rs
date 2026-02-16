@@ -59,13 +59,17 @@ impl TempsPlugin for WebhooksPlugin {
                 Arc::new(WebhookService::new(db.clone(), encryption_service.clone()));
             context.register_service(webhook_service.clone());
 
+            // Get audit service for handlers
+            let audit_service = context.require_service::<dyn temps_core::AuditLogger>();
+
             // Create WebhookState for handlers
-            let webhook_state = Arc::new(WebhookState::new(webhook_service.clone()));
+            let webhook_state = Arc::new(WebhookState::new(webhook_service.clone(), audit_service));
             context.register_service(webhook_state);
 
             // Create WebhookEventListener
             let event_listener = Arc::new(WebhookEventListener::new(
                 webhook_service.clone(),
+                db.clone(),
                 queue.clone(),
             ));
 

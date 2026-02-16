@@ -1,5 +1,6 @@
 use crate::config::*;
 use crate::proxy::LoadBalancer;
+use crate::service::connection_filter_service::TcpConnectionFilter;
 use crate::service::lb_service::LbService;
 use crate::services::*;
 use crate::tls_cert_loader::CertificateLoader;
@@ -14,6 +15,7 @@ use pingora_openssl::pkey::PKey;
 use pingora_openssl::ssl::NameType;
 use pingora_openssl::x509::X509;
 use pingora_proxy::http_proxy_service;
+use std::any::Any;
 use std::sync::Arc;
 use temps_config::ServerConfig;
 use temps_core::plugin::{ServiceRegistrationContext, TempsPlugin};
@@ -24,6 +26,16 @@ use tracing::{debug, info};
 use async_trait::async_trait;
 use std::future::Future;
 use std::pin::Pin;
+
+/// TLS extension data stored in SslDigest via the new Pingora 0.7.0 SslDigestExtension.
+///
+/// This allows us to capture SNI hostname during the TLS handshake and make it
+/// available to the HTTP proxy layer without recomputation.
+#[derive(Debug, Clone)]
+pub struct TlsExtensionData {
+    /// SNI hostname captured during TLS handshake
+    pub sni_hostname: String,
+}
 
 /// Dynamic certificate callback for TLS
 struct DynamicCertLoader {
@@ -103,6 +115,29 @@ impl TlsAccept for DynamicCertLoader {
                 debug!("Error loading certificate for {}: {}", sni, e);
             }
         }
+    }
+
+    /// Store SNI hostname in SslDigestExtension after handshake completes.
+    ///
+    /// This is a Pingora 0.7.0 feature that allows attaching custom data to the
+    /// TLS digest, making it accessible from the HTTP proxy layer via
+    /// `session.downstream_session.digest().ssl_digest.extension`.
+    async fn handshake_complete_callback(
+        &self,
+        ssl: &TlsRef,
+    ) -> Option<Arc<dyn Any + Send + Sync>> {
+        use pingora_openssl::ssl::{NameType as SslNameType, SslRef};
+
+        let ssl_ref: &SslRef = unsafe { std::mem::transmute(ssl) };
+
+        let sni = ssl_ref
+            .servername(SslNameType::HOST_NAME)
+            .unwrap_or("unknown")
+            .to_string();
+
+        debug!("TLS handshake complete for SNI: {}", sni);
+
+        Some(Arc::new(TlsExtensionData { sni_hostname: sni }))
     }
 }
 
@@ -280,6 +315,13 @@ pub fn setup_proxy_server(
             tls_address
         );
     }
+
+    // Set TCP-level connection filter for early IP blocking (Pingora 0.7.0 feature)
+    // This rejects blocked IPs at the TCP layer before TLS handshake or HTTP processing,
+    // saving significant resources compared to HTTP-layer blocking.
+    let tcp_filter = Arc::new(TcpConnectionFilter::new(db.clone()));
+    proxy_service.set_connection_filter(tcp_filter);
+    debug!("TCP connection filter configured for early IP blocking");
 
     server.add_service(proxy_service);
 

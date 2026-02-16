@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn test_kv_plugin_default() {
-        let plugin = KvPlugin::default();
+        let plugin = KvPlugin;
         assert_eq!(plugin.name(), "kv");
     }
 

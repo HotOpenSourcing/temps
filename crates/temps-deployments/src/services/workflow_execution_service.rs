@@ -612,6 +612,15 @@ impl WorkflowExecutionService {
                     builder = builder.external_image_tag(image_tag);
                 }
 
+                // Apply container log rotation settings from config
+                if let Ok(settings) = self.config_service.get_settings().await {
+                    builder =
+                        builder.container_log_config(temps_deployer::ContainerLogConfig::new(
+                            settings.container_logs.max_size.clone(),
+                            settings.container_logs.max_file,
+                        ));
+                }
+
                 let job = builder.build(self.container_deployer.clone())?;
 
                 Ok(Arc::new(job))
@@ -1630,6 +1639,26 @@ mod tests {
         ) -> Result<temps_deployer::BuildResult, temps_deployer::BuilderError> {
             // Delegate to regular build_image since we don't need callback in tests
             self.build_image(request.request).await
+        }
+
+        async fn inspect_image(
+            &self,
+            _image_name: &str,
+        ) -> Result<temps_deployer::ImageInfo, temps_deployer::BuilderError> {
+            Ok(temps_deployer::ImageInfo {
+                id: "sha256:mock".to_string(),
+                architecture: "amd64".to_string(),
+                os: "linux".to_string(),
+                platform: "linux/amd64".to_string(),
+                size_bytes: 1024,
+                tags: vec!["mock-image:latest".to_string()],
+                created: None,
+                working_dir: None,
+            })
+        }
+
+        fn get_native_platform(&self) -> String {
+            "linux/amd64".to_string()
         }
     }
 

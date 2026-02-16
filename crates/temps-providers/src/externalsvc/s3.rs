@@ -320,6 +320,7 @@ impl S3Service {
                 typ: Some(bollard::models::MountTypeEnum::VOLUME),
                 ..Default::default()
             }]),
+            log_config: Some(crate::utils::default_service_log_config()),
             ..Default::default()
         };
 
@@ -1716,12 +1717,12 @@ mod tests {
             let field = properties
                 .get(field_name)
                 .and_then(|v| v.as_object())
-                .expect(&format!("{} field should exist", field_name));
+                .unwrap_or_else(|| panic!("{} field should exist", field_name));
 
             let is_editable = field
                 .get("x-editable")
                 .and_then(|v| v.as_bool())
-                .expect(&format!("{} should have x-editable property", field_name));
+                .unwrap_or_else(|| panic!("{} should have x-editable property", field_name));
 
             assert_eq!(
                 is_editable, should_be_editable,
@@ -1923,6 +1924,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     async fn test_s3_backup_and_restore_to_s3() {
         use super::super::test_utils::{

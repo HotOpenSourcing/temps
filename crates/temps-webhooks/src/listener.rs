@@ -2,15 +2,27 @@
 
 use crate::events::{DeploymentPayload, WebhookEvent, WebhookEventType, WebhookPayload};
 use crate::service::WebhookService;
+use sea_orm::{DatabaseConnection, EntityTrait};
 use std::sync::Arc;
 use temps_core::{Job, JobQueue};
+use temps_entities::{deployments, projects};
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
+
+/// Deployment context data fetched from the database to enrich webhook payloads.
+struct DeploymentContext {
+    project_name: String,
+    branch: Option<String>,
+    commit_sha: Option<String>,
+    commit_message: Option<String>,
+    started_at: Option<chrono::DateTime<chrono::Utc>>,
+}
 
 /// Webhook event listener that processes deployment lifecycle events
 pub struct WebhookEventListener {
     webhook_service: Arc<WebhookService>,
+    db: Arc<DatabaseConnection>,
     queue: Arc<dyn JobQueue>,
     running: Arc<RwLock<bool>>,
     task_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
@@ -18,9 +30,14 @@ pub struct WebhookEventListener {
 
 impl WebhookEventListener {
     /// Create a new webhook event listener
-    pub fn new(webhook_service: Arc<WebhookService>, queue: Arc<dyn JobQueue>) -> Self {
+    pub fn new(
+        webhook_service: Arc<WebhookService>,
+        db: Arc<DatabaseConnection>,
+        queue: Arc<dyn JobQueue>,
+    ) -> Self {
         Self {
             webhook_service,
+            db,
             queue,
             running: Arc::new(RwLock::new(false)),
             task_handle: Arc::new(RwLock::new(None)),
@@ -42,6 +59,7 @@ impl WebhookEventListener {
         // Subscribe to deployment events
         let mut receiver = self.queue.subscribe();
         let webhook_service = self.webhook_service.clone();
+        let db = self.db.clone();
         let running = self.running.clone();
 
         // Spawn background task to process jobs
@@ -53,7 +71,7 @@ impl WebhookEventListener {
                     Ok(job) => {
                         event_count += 1;
                         debug!("📨 Received job #{} from queue: {}", event_count, job);
-                        if let Err(e) = Self::process_job(&webhook_service, &job).await {
+                        if let Err(e) = Self::process_job(&webhook_service, &db, &job).await {
                             error!("❌ Failed to process job #{}: {}", event_count, e);
                         }
                     }
@@ -95,9 +113,50 @@ impl WebhookEventListener {
         *self.running.read().await
     }
 
+    /// Fetch deployment context from the database to enrich webhook payloads.
+    async fn fetch_deployment_context(
+        db: &DatabaseConnection,
+        deployment_id: i32,
+        project_id: i32,
+    ) -> Option<DeploymentContext> {
+        // Fetch deployment record
+        let deployment = match deployments::Entity::find_by_id(deployment_id).one(db).await {
+            Ok(Some(d)) => d,
+            Ok(None) => {
+                warn!(
+                    "Deployment {} not found in database for webhook enrichment",
+                    deployment_id
+                );
+                return None;
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to fetch deployment {} for webhook enrichment: {}",
+                    deployment_id, e
+                );
+                return None;
+            }
+        };
+
+        // Fetch project name
+        let project_name = match projects::Entity::find_by_id(project_id).one(db).await {
+            Ok(Some(p)) => p.name,
+            _ => String::new(),
+        };
+
+        Some(DeploymentContext {
+            project_name,
+            branch: deployment.branch_ref.clone(),
+            commit_sha: deployment.commit_sha.clone(),
+            commit_message: deployment.commit_message.clone(),
+            started_at: deployment.started_at,
+        })
+    }
+
     /// Process a single job
     async fn process_job(
         webhook_service: &WebhookService,
+        db: &DatabaseConnection,
         job: &Job,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match job {
@@ -108,6 +167,7 @@ impl WebhookEventListener {
                 );
                 Self::trigger_webhook(
                     webhook_service,
+                    db,
                     WebhookEventType::DeploymentCreated,
                     event.project_id,
                     event.deployment_id,
@@ -127,18 +187,24 @@ impl WebhookEventListener {
                     "Processing DeploymentSucceeded event for deployment {}",
                     event.deployment_id
                 );
+                let ctx =
+                    Self::fetch_deployment_context(db, event.deployment_id, event.project_id).await;
                 Self::trigger_webhook(
                     webhook_service,
+                    db,
                     WebhookEventType::DeploymentSucceeded,
                     event.project_id,
                     event.deployment_id,
                     event.environment_name.clone(),
-                    None, // Branch not in succeeded event
-                    event.commit_sha.clone(),
+                    ctx.as_ref().and_then(|c| c.branch.clone()),
+                    event
+                        .commit_sha
+                        .clone()
+                        .or_else(|| ctx.as_ref().and_then(|c| c.commit_sha.clone())),
                     event.url.clone(),
                     "succeeded".to_string(),
-                    None, // No error
-                    None, // TODO: Get started_at from database
+                    None,
+                    ctx.as_ref().and_then(|c| c.started_at),
                     Some(chrono::Utc::now()),
                 )
                 .await?;
@@ -148,18 +214,21 @@ impl WebhookEventListener {
                     "Processing DeploymentFailed event for deployment {}",
                     event.deployment_id
                 );
+                let ctx =
+                    Self::fetch_deployment_context(db, event.deployment_id, event.project_id).await;
                 Self::trigger_webhook(
                     webhook_service,
+                    db,
                     WebhookEventType::DeploymentFailed,
                     event.project_id,
                     event.deployment_id,
                     event.environment_name.clone(),
-                    None, // Branch not in failed event
-                    None, // Commit not in failed event
+                    ctx.as_ref().and_then(|c| c.branch.clone()),
+                    ctx.as_ref().and_then(|c| c.commit_sha.clone()),
                     None, // No URL on failure
                     "failed".to_string(),
                     event.error_message.clone(),
-                    None, // TODO: Get started_at from database
+                    ctx.as_ref().and_then(|c| c.started_at),
                     Some(chrono::Utc::now()),
                 )
                 .await?;
@@ -169,18 +238,21 @@ impl WebhookEventListener {
                     "Processing DeploymentCancelled event for deployment {}",
                     event.deployment_id
                 );
+                let ctx =
+                    Self::fetch_deployment_context(db, event.deployment_id, event.project_id).await;
                 Self::trigger_webhook(
                     webhook_service,
+                    db,
                     WebhookEventType::DeploymentCancelled,
                     event.project_id,
                     event.deployment_id,
                     event.environment_name.clone(),
-                    None, // Branch not in cancelled event
-                    None, // Commit not in cancelled event
-                    None, // No URL
+                    ctx.as_ref().and_then(|c| c.branch.clone()),
+                    ctx.as_ref().and_then(|c| c.commit_sha.clone()),
+                    None,
                     "cancelled".to_string(),
-                    None, // No error
-                    None, // TODO: Get started_at from database
+                    None,
+                    ctx.as_ref().and_then(|c| c.started_at),
                     Some(chrono::Utc::now()),
                 )
                 .await?;
@@ -190,18 +262,21 @@ impl WebhookEventListener {
                     "Processing DeploymentReady event for deployment {}",
                     event.deployment_id
                 );
+                let ctx =
+                    Self::fetch_deployment_context(db, event.deployment_id, event.project_id).await;
                 Self::trigger_webhook(
                     webhook_service,
+                    db,
                     WebhookEventType::DeploymentReady,
                     event.project_id,
                     event.deployment_id,
                     event.environment_name.clone(),
-                    None, // Branch not in ready event
-                    None, // Commit not in ready event
+                    ctx.as_ref().and_then(|c| c.branch.clone()),
+                    ctx.as_ref().and_then(|c| c.commit_sha.clone()),
                     event.url.clone(),
                     "ready".to_string(),
-                    None, // No error
-                    None, // TODO: Get started_at from database
+                    None,
+                    ctx.as_ref().and_then(|c| c.started_at),
                     Some(chrono::Utc::now()),
                 )
                 .await?;
@@ -219,6 +294,7 @@ impl WebhookEventListener {
     #[allow(clippy::too_many_arguments)]
     async fn trigger_webhook(
         webhook_service: &WebhookService,
+        db: &DatabaseConnection,
         event_type: WebhookEventType,
         project_id: i32,
         deployment_id: i32,
@@ -236,14 +312,20 @@ impl WebhookEventListener {
             deployment_id, project_id, event_type
         );
 
+        // Fetch deployment context for enrichment (project_name, commit_message)
+        let ctx = Self::fetch_deployment_context(db, deployment_id, project_id).await;
+
         let payload = WebhookPayload::Deployment(DeploymentPayload {
             deployment_id,
             project_id,
-            project_name: String::new(), // TODO: Fetch from database
+            project_name: ctx
+                .as_ref()
+                .map(|c| c.project_name.clone())
+                .unwrap_or_default(),
             environment: environment_name.clone(),
             branch: branch.clone(),
             commit_sha: commit_sha.clone(),
-            commit_message: None, // TODO: Fetch from git provider or database
+            commit_message: ctx.as_ref().and_then(|c| c.commit_message.clone()),
             url: url.clone(),
             status: status.clone(),
             error_message: error_message.clone(),
@@ -317,9 +399,11 @@ mod tests {
             .unwrap(),
         );
         let webhook_service = Arc::new(WebhookService::new(db.clone(), encryption_service));
-        let queue = Arc::new(temps_queue::BroadcastQueueService::new(100)) as Arc<dyn JobQueue>;
+        let (queue_service, _receiver) =
+            temps_queue::BroadcastQueueService::create_broadcast_channel(100);
+        let queue = Arc::new(queue_service) as Arc<dyn JobQueue>;
 
-        let listener = WebhookEventListener::new(webhook_service, queue);
+        let listener = WebhookEventListener::new(webhook_service, db.clone(), queue);
 
         // Test initial state
         assert!(!listener.is_running().await);

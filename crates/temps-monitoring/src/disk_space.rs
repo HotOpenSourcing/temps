@@ -591,7 +591,7 @@ mod tests {
             // Validate values
             assert!(!mount_point.is_empty(), "Mount point should not be empty");
             assert!(
-                usage_percent >= 0.0 && usage_percent <= 100.0,
+                (0.0..=100.0).contains(&usage_percent),
                 "Usage percent should be between 0 and 100, got {}",
                 usage_percent
             );

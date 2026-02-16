@@ -364,66 +364,19 @@ impl Envelope {
 mod tests {
     use super::*;
 
-    //     #[test]
-    //     fn test_parse_sentry_sdk_envelope() {
-    //         let envelope_data = include_str!("../../../sentry_debug/envelope_1760375895525.bin");
-    //         let envelope = Envelope::from_slice(envelope_data.as_bytes());
-    //         let envelope = envelope.unwrap();
-    //         let items = envelope.items();
-    //         for item in items {
-    //             println!("item: {:?}", item);
-    //         }
-    //         println!("envelope: {:?}", envelope.header());
-    //     }
+    #[test]
+    fn test_parse_simple_envelope() {
+        let envelope_data = "{\"event_id\":\"9ec79c33ec9942ab8353589fcb2e04dc\"}\n\
+            {\"type\":\"event\"}\n\
+            {\"event_id\":\"9ec79c33ec9942ab8353589fcb2e04dc\",\"level\":\"error\",\"platform\":\"other\"}\n";
 
-    //     #[test]
-    //     fn test_parse_simple_envelope() {
-    //         let envelope_data = r#"{"event_id":"9ec79c33ec9942ab8353589fcb2e04dc"}
-    // {"type":"event"}
-    // {"event_id":"9ec79c33ec9942ab8353589fcb2e04dc","level":"error","platform":"other"}
-    // "#;
+        let envelope = Envelope::from_slice(envelope_data.as_bytes());
+        assert!(envelope.is_ok(), "Should parse simple envelope");
 
-    //         let envelope = Envelope::from_slice(envelope_data.as_bytes());
-    //         assert!(envelope.is_ok(), "Should parse simple envelope");
+        let envelope = envelope.unwrap();
+        assert_eq!(envelope.items().count(), 1);
+    }
 
-    //         let envelope = envelope.unwrap();
-    //         assert_eq!(envelope.items().count(), 1);
-    //     }
-
-    //     #[test]
-    //     fn test_parse_real_event() {
-    //         // Test with real Sentry event
-    //         let event_json = include_str!("../../../sentry_debug/event_20251013_132350_265.json");
-
-    //         // Wrap in envelope format with a real UUID
-    //         let real_uuid = uuid::Uuid::new_v4().to_string();
-    //         let envelope_data = format!(
-    //             "{{\"event_id\":\"{}\"}}\n{{\"type\":\"event\"}}\n{}\n",
-    //             real_uuid, event_json
-    //         );
-    //         println!("{}", envelope_data);
-    //         let envelope = Envelope::from_slice(envelope_data.as_bytes());
-
-    //         // Should parse (relay types handle the complex structure)
-    //         match &envelope {
-    //             Ok(env) => {
-    //                 println!("✅ Parsed envelope with {} items", env.items().count());
-    //                 for item in env.items() {
-    //                     match item {
-    //                         EnvelopeItem::Event(_) => println!("  - Event item"),
-    //                         EnvelopeItem::Transaction(_) => println!("  - Transaction item"),
-    //                         EnvelopeItem::Session(_) => println!("  - Session item"),
-    //                         EnvelopeItem::SessionAggregates(_) => println!("  - Sessions item"),
-    //                         EnvelopeItem::ClientReport(_) => println!("  - ClientReport item"),
-    //                         EnvelopeItem::Span(_) => println!("  - Span item"),
-    //                     }
-    //                 }
-    //             }
-    //             Err(e) => {
-    //                 println!("❌ Failed to parse: {}", e);
-    //             }
-    //         }
-    //     }
     #[test]
     fn parse_event_with_stacktrace() {
         let event_json = include_str!("../../resources/stacktrace_event.json");

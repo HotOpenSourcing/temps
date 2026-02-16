@@ -1,6 +1,7 @@
 //! Configuration management utilities
 
 use serde::{Deserialize, Serialize};
+use utoipa::IntoParams;
 
 /// Database configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -11,9 +12,13 @@ pub struct DatabaseConfig {
 }
 
 /// Common pagination parameters
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, IntoParams)]
 pub struct PaginationParams {
+    /// Page number (1-indexed)
+    #[param(example = 1)]
     pub page: Option<u64>,
+    /// Number of items per page (max 100)
+    #[param(example = 20)]
     pub page_size: Option<u64>,
     pub sort_by: Option<String>,
     pub sort_order: Option<String>,

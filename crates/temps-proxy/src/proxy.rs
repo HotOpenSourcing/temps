@@ -85,6 +85,8 @@ pub struct ProxyContext {
     pub tls_cipher: Option<String>,
     /// SNI hostname from TLS handshake (for SNI-based routing)
     pub sni_hostname: Option<String>,
+    /// Upstream response body bytes received (tracked by Pingora 0.7.0)
+    pub upstream_body_bytes_received: usize,
 }
 
 impl ProxyContext {
@@ -242,16 +244,28 @@ impl LoadBalancer {
                 }
 
                 // Extract TLS version and cipher for logging
+                // version/cipher are Cow<'static, str> in Pingora 0.7.0
                 ctx.tls_version = Some(ssl_digest.version.to_string());
                 ctx.tls_cipher = Some(ssl_digest.cipher.to_string());
 
-                // Note: SNI hostname is not available in SslDigest in pingora-core 0.6.0
-                // The SNI is captured during the TLS handshake callback in server.rs
-                // For TLS routes, we use the HTTP Host header which typically matches the SNI
+                // Extract SNI hostname from SslDigestExtension (Pingora 0.7.0)
+                // The SNI is captured during the TLS handshake via handshake_complete_callback
+                // in server.rs and stored as TlsExtensionData in the SslDigest extension.
+                if let Some(ext_data) = ssl_digest
+                    .extension
+                    .get::<crate::server::TlsExtensionData>()
+                {
+                    debug!(
+                        "SNI hostname from TLS extension: {} for request_id={}",
+                        ext_data.sni_hostname, ctx.request_id
+                    );
+                }
 
+                let version: &str = ssl_digest.version.as_ref();
+                let cipher: &str = ssl_digest.cipher.as_ref();
                 debug!(
                     "TLS connection: {} with cipher {} for request_id={}",
-                    ssl_digest.version, ssl_digest.cipher, ctx.request_id
+                    version, cipher, ctx.request_id
                 );
             } else {
                 debug!(
@@ -545,12 +559,17 @@ impl LoadBalancer {
 
                         if has_preset && !has_individual_headers {
                             // Use preset to generate default headers
-                            let preset_name = headers.preset.as_ref().unwrap();
-                            debug!(
-                                "Using preset '{}' to generate security headers from project config",
-                                preset_name
-                            );
-                            (true, Some(get_preset_headers(preset_name)))
+                            if let Some(preset_name) = headers.preset.as_ref() {
+                                debug!(
+                                    "Using preset '{}' to generate security headers from project config",
+                                    preset_name
+                                );
+                                (true, Some(get_preset_headers(preset_name)))
+                            } else {
+                                // has_preset was true but preset is None — should not happen,
+                                // fall through to global config
+                                (false, None)
+                            }
                         } else if has_individual_headers {
                             // Use individual headers as configured
                             debug!(
@@ -1524,6 +1543,7 @@ impl ProxyHttp for LoadBalancer {
             tls_version: None,
             tls_cipher: None,
             sni_hostname: None,
+            upstream_body_bytes_received: 0,
         }
     }
 
@@ -1793,19 +1813,18 @@ impl ProxyHttp for LoadBalancer {
                         .write_response_header(Box::new(response), true)
                         .await?;
 
-                    let html = format!(
-                        r#"<!DOCTYPE html>
+                    let html = r#"<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>HTTPS Required</title>
     <style>
-        body {{ font-family: system-ui, -apple-system, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }}
-        .container {{ background: white; border-radius: 16px; padding: 40px; max-width: 500px; text-align: center; box-shadow: 0 20px 60px rgba(0,0,0,0.3); }}
-        h1 {{ color: #1a202c; margin-bottom: 16px; }}
-        p {{ color: #4a5568; line-height: 1.6; }}
-        .icon {{ font-size: 64px; margin-bottom: 16px; }}
+        body { font-family: system-ui, -apple-system, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
+        .container { background: white; border-radius: 16px; padding: 40px; max-width: 500px; text-align: center; box-shadow: 0 20px 60px rgba(0,0,0,0.3); }
+        h1 { color: #1a202c; margin-bottom: 16px; }
+        p { color: #4a5568; line-height: 1.6; }
+        .icon { font-size: 64px; margin-bottom: 16px; }
     </style>
 </head>
 <body>
@@ -1816,8 +1835,7 @@ impl ProxyHttp for LoadBalancer {
         <p>Please use <strong>https://</strong> instead of http://</p>
     </div>
 </body>
-</html>"#
-                    );
+</html>"#.to_string();
 
                     session
                         .write_response_body(Some(Bytes::from(html)), true)
@@ -2234,12 +2252,15 @@ impl ProxyHttp for LoadBalancer {
         Ok(false)
     }
 
-    fn upstream_response_filter(
+    async fn upstream_response_filter(
         &self,
         _session: &mut PingoraSession,
         upstream_response: &mut ResponseHeader,
         ctx: &mut Self::CTX,
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        Self::CTX: Send + Sync,
+    {
         debug!("Upstream response filter headers: {:?}", upstream_response);
         ctx.upstream_response_headers = Some(upstream_response.clone());
 

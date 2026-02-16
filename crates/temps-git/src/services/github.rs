@@ -412,7 +412,12 @@ impl GithubAppService {
             .map_err(|e| GithubAppServiceError::GithubApiError(e.to_string()))?;
 
         let create_access_token = CreateInstallationAccessToken::default();
-        let gh_access_tokens_url = Url::parse(installation.access_tokens_url.as_ref().unwrap())
+        let access_tokens_url = installation.access_tokens_url.as_ref().ok_or_else(|| {
+            GithubAppServiceError::GithubApiError(
+                "Installation missing access_tokens_url".to_string(),
+            )
+        })?;
+        let gh_access_tokens_url = Url::parse(access_tokens_url)
             .map_err(|e| GithubAppServiceError::GithubApiError(e.to_string()))?;
 
         let access: InstallationToken = octocrab
@@ -421,7 +426,12 @@ impl GithubAppService {
             .map_err(|e| GithubAppServiceError::GithubApiError(e.to_string()))?;
 
         // Update the access token in the connection
-        let expires_at = chrono::DateTime::parse_from_rfc3339(&access.expires_at.unwrap())
+        let expires_at_str = access.expires_at.as_ref().ok_or_else(|| {
+            GithubAppServiceError::GithubApiError(
+                "Installation token missing expires_at field".to_string(),
+            )
+        })?;
+        let expires_at = chrono::DateTime::parse_from_rfc3339(expires_at_str)
             .map_err(|e| GithubAppServiceError::GithubApiError(e.to_string()))?;
         let expires_at = expires_at.with_timezone(&chrono::Utc);
 
@@ -436,7 +446,7 @@ impl GithubAppService {
         let octocrab = octocrab::OctocrabBuilder::new()
             .personal_token(access.token.clone())
             .build()
-            .unwrap();
+            .map_err(|e| GithubAppServiceError::GithubApiError(e.to_string()))?;
 
         Ok((octocrab, app_data, access.token))
     }
@@ -827,11 +837,17 @@ impl GithubAppService {
         // Launch jobs
         let s = self.queue_service.clone();
         for repo in all_repositories {
-            s.send(temps_core::jobs::Job::UpdateRepoFramework(
-                temps_core::jobs::UpdateRepoFrameworkJob { repo_id: repo.id },
-            ))
-            .await
-            .expect("failed to push job");
+            if let Err(e) = s
+                .send(temps_core::jobs::Job::UpdateRepoFramework(
+                    temps_core::jobs::UpdateRepoFrameworkJob { repo_id: repo.id },
+                ))
+                .await
+            {
+                warn!(
+                    "Failed to queue framework detection for repo {}: {}",
+                    repo.id, e
+                );
+            }
         }
 
         info!(
@@ -858,7 +874,12 @@ impl GithubAppService {
             })?;
         // Get access token for the installation
         let create_access_token = CreateInstallationAccessToken::default();
-        let gh_access_tokens_url = Url::parse(installation.access_tokens_url.as_ref().unwrap())
+        let access_tokens_url = installation.access_tokens_url.as_ref().ok_or_else(|| {
+            GithubAppServiceError::GithubApiError(
+                "Installation missing access_tokens_url".to_string(),
+            )
+        })?;
+        let gh_access_tokens_url = Url::parse(access_tokens_url)
             .map_err(|e| GithubAppServiceError::GithubApiError(e.to_string()))?;
 
         let access: InstallationToken = octocrab
@@ -867,7 +888,12 @@ impl GithubAppService {
             .map_err(|e| GithubAppServiceError::GithubApiError(e.to_string()))?;
 
         // Parse token expiration
-        let expires_at = chrono::DateTime::parse_from_rfc3339(&access.expires_at.unwrap())
+        let expires_at_str = access.expires_at.as_ref().ok_or_else(|| {
+            GithubAppServiceError::GithubApiError(
+                "Installation token missing expires_at field".to_string(),
+            )
+        })?;
+        let expires_at = chrono::DateTime::parse_from_rfc3339(expires_at_str)
             .map_err(|e| GithubAppServiceError::GithubApiError(e.to_string()))?;
         let expires_at = expires_at.with_timezone(&chrono::Utc);
 
@@ -1417,7 +1443,7 @@ impl GithubAppService {
             )
             .all(self.db.as_ref())
             .await
-            .map_err(|e| GithubAppServiceError::DatabaseError(e))?;
+            .map_err(GithubAppServiceError::DatabaseError)?;
 
         if connections.is_empty() {
             warn!(
@@ -1432,7 +1458,7 @@ impl GithubAppService {
                 .filter(projects::Column::GitProviderConnectionId.is_in(connection_ids.clone()))
                 .all(self.db.as_ref())
                 .await
-                .map_err(|e| GithubAppServiceError::DatabaseError(e))?;
+                .map_err(GithubAppServiceError::DatabaseError)?;
 
             if !dependent_projects.is_empty() {
                 let project_names: Vec<String> =
@@ -1644,7 +1670,8 @@ impl GithubAppService {
     /// * `owner` - Repository owner (username or organization)
     /// * `repo` - Repository name
     /// * `reference` - Branch name, tag, or commit SHA
-    /// Find which GitHub App provider owns a given installation
+    ///
+    /// Find which GitHub App provider owns a given installation.
     /// Returns Ok(Some(provider_id)) if found, Ok(None) if not found
     pub async fn find_provider_for_installation(
         &self,

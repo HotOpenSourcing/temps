@@ -18,6 +18,7 @@ use utoipa::ToSchema;
 /// The inheritance chain: Environment > Project > Global
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema, FromJsonQueryResult)]
 #[serde(rename_all = "camelCase")]
+#[derive(Default)]
 pub struct SecurityConfig {
     /// Enable/disable security features at this level
     /// If None, inherits from parent level
@@ -119,19 +120,6 @@ pub struct GeoRestrictionsConfig {
     /// Allow traffic only from specific countries
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_countries: Vec<String>,
-}
-
-impl Default for SecurityConfig {
-    fn default() -> Self {
-        Self {
-            enabled: None,
-            headers: None,
-            rate_limiting: None,
-            attack_mode: None,
-            challenge_config: None,
-            geo_restrictions: None,
-        }
-    }
 }
 
 impl SecurityConfig {

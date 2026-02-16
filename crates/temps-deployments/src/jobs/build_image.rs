@@ -944,6 +944,26 @@ mod tests {
             // Delegate to regular build_image since we don't need callback in tests
             self.build_image(request.request).await
         }
+
+        async fn inspect_image(
+            &self,
+            _image_name: &str,
+        ) -> Result<temps_deployer::ImageInfo, BuilderError> {
+            Ok(temps_deployer::ImageInfo {
+                id: "sha256:test123".to_string(),
+                architecture: "amd64".to_string(),
+                os: "linux".to_string(),
+                platform: "linux/amd64".to_string(),
+                size_bytes: 104857600,
+                tags: vec!["test:latest".to_string()],
+                created: None,
+                working_dir: None,
+            })
+        }
+
+        fn get_native_platform(&self) -> String {
+            "linux/amd64".to_string()
+        }
     }
 
     #[test]

@@ -35,7 +35,7 @@ fn extract_ses_error_details<E: std::fmt::Display + std::fmt::Debug>(
         }
         SdkError::DispatchFailure(dispatch_err) => {
             if dispatch_err.is_io() {
-                format!("Network error: Unable to connect to AWS SES. Please verify your network connection and credentials.")
+                "Network error: Unable to connect to AWS SES. Please verify your network connection and credentials.".to_string()
             } else if dispatch_err.is_timeout() {
                 "Connection timed out. Please try again.".to_string()
             } else if dispatch_err.is_user() {

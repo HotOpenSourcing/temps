@@ -460,6 +460,8 @@ pub mod proxy_tests {
                     &visitor,
                     None, // No project context
                     Some("https://example.com"),
+                    None, // No query string
+                    None, // No current hostname
                 )
                 .await,
         )?;

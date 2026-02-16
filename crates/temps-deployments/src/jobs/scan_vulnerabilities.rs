@@ -36,7 +36,7 @@ pub struct ScanVulnerabilitiesJob {
     environment_id: i32,
     branch: String,
     commit_hash: String,
-    download_job_id: String,
+    _download_job_id: String,
     build_job_id: String,
     db: Arc<DbConnection>,
     log_id: Option<String>,
@@ -58,6 +58,7 @@ impl std::fmt::Debug for ScanVulnerabilitiesJob {
 }
 
 impl ScanVulnerabilitiesJob {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         job_id: String,
         deployment_id: i32,
@@ -76,7 +77,7 @@ impl ScanVulnerabilitiesJob {
             environment_id,
             branch,
             commit_hash,
-            download_job_id,
+            _download_job_id: download_job_id,
             build_job_id,
             db,
             log_id: None,

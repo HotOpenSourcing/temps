@@ -349,6 +349,7 @@ impl RedisService {
                 typ: Some(bollard::models::MountTypeEnum::VOLUME),
                 ..Default::default()
             }]),
+            log_config: Some(crate::utils::default_service_log_config()),
             ..Default::default()
         };
         ensure_network_exists(docker)
@@ -1363,6 +1364,8 @@ impl ExternalService for RedisService {
 mod tests {
     use super::*;
 
+    use crate::externalsvc::DEPLOYMENT_MODE_MUTEX as ENV_MUTEX;
+
     #[test]
     fn test_parameter_schema_editable_fields() {
         let docker = Arc::new(Docker::connect_with_local_defaults().unwrap());
@@ -1391,12 +1394,12 @@ mod tests {
             let field = properties
                 .get(field_name)
                 .and_then(|v| v.as_object())
-                .expect(&format!("{} field should exist", field_name));
+                .unwrap_or_else(|| panic!("{} field should exist", field_name));
 
             let is_editable = field
                 .get("x-editable")
                 .and_then(|v| v.as_bool())
-                .expect(&format!("{} should have x-editable property", field_name));
+                .unwrap_or_else(|| panic!("{} should have x-editable property", field_name));
 
             assert_eq!(
                 is_editable, should_be_editable,
@@ -1406,6 +1409,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     #[ignore] // Requires Docker
     async fn test_port_change_after_creation() {
@@ -1588,7 +1592,7 @@ mod tests {
     #[test]
     fn test_import_redis_version_extraction() {
         let test_cases = vec![
-            ("redis:8-alpine", "7-alpine"),
+            ("redis:8-alpine", "8-alpine"),
             ("redis:latest", "latest"),
             ("redis:6.2", "6.2"),
             ("redis:7.0-alpine", "7.0-alpine"),
@@ -1639,6 +1643,7 @@ mod tests {
         assert!(connection_url.contains("6379"));
     }
 
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     async fn test_redis_backup_and_restore_to_s3() {
         use super::super::test_utils::{
@@ -1975,8 +1980,9 @@ mod tests {
 
     #[test]
     fn test_get_effective_address_baremetal_mode() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         // Clear Docker mode to ensure baremetal mode
-        std::env::remove_var("DEPLOYMENT_MODE");
+        unsafe { std::env::remove_var("DEPLOYMENT_MODE") };
 
         let docker = Arc::new(Docker::connect_with_local_defaults().unwrap());
         let service = RedisService::new("test-effective-addr".to_string(), docker);
@@ -2001,8 +2007,9 @@ mod tests {
 
     #[test]
     fn test_get_effective_address_docker_mode() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         // Set Docker mode
-        std::env::set_var("DEPLOYMENT_MODE", "docker");
+        unsafe { std::env::set_var("DEPLOYMENT_MODE", "docker") };
 
         let docker = Arc::new(Docker::connect_with_local_defaults().unwrap());
         let service = RedisService::new("test-effective-addr-docker".to_string(), docker);
@@ -2025,14 +2032,13 @@ mod tests {
         assert_eq!(port, "6379"); // Internal port
 
         // Clean up
-        std::env::remove_var("DEPLOYMENT_MODE");
+        unsafe { std::env::remove_var("DEPLOYMENT_MODE") };
     }
 
     #[test]
-    fn test_get_environment_variables_baremetal_mode() {
-        // Clear Docker mode to ensure baremetal mode
-        std::env::remove_var("DEPLOYMENT_MODE");
-
+    fn test_get_environment_variables_always_uses_container_name() {
+        // get_environment_variables always uses container name and internal port
+        // for container-to-container communication, regardless of deployment mode
         let docker = Arc::new(Docker::connect_with_local_defaults().unwrap());
         let service = RedisService::new("test-env-vars".to_string(), docker);
 
@@ -2042,48 +2048,20 @@ mod tests {
 
         let env_vars = service.get_environment_variables(&params).unwrap();
 
-        // In baremetal mode, should use localhost
-        assert_eq!(env_vars.get("REDIS_HOST").unwrap(), "localhost");
-        assert_eq!(env_vars.get("REDIS_PORT").unwrap(), "6380");
+        // Always uses container name and internal port (6379)
+        assert_eq!(env_vars.get("REDIS_HOST").unwrap(), "redis-test-env-vars");
+        assert_eq!(env_vars.get("REDIS_PORT").unwrap(), "6379");
         assert!(env_vars
             .get("REDIS_URL")
             .unwrap()
-            .contains("localhost:6380"));
-    }
-
-    #[test]
-    fn test_get_environment_variables_docker_mode() {
-        // Set Docker mode
-        std::env::set_var("DEPLOYMENT_MODE", "docker");
-
-        let docker = Arc::new(Docker::connect_with_local_defaults().unwrap());
-        let service = RedisService::new("test-env-vars-docker".to_string(), docker);
-
-        let mut params = std::collections::HashMap::new();
-        params.insert("port".to_string(), "6380".to_string());
-        params.insert("password".to_string(), "testpass".to_string());
-
-        let env_vars = service.get_environment_variables(&params).unwrap();
-
-        // In Docker mode, should use container name and internal port
-        assert_eq!(
-            env_vars.get("REDIS_HOST").unwrap(),
-            "redis-test-env-vars-docker"
-        );
-        assert_eq!(env_vars.get("REDIS_PORT").unwrap(), "6379"); // Internal port
-        assert!(env_vars
-            .get("REDIS_URL")
-            .unwrap()
-            .contains("redis-test-env-vars-docker:6379"));
-
-        // Clean up
-        std::env::remove_var("DEPLOYMENT_MODE");
+            .contains("redis-test-env-vars:6379"));
     }
 
     #[test]
     fn test_get_docker_environment_variables_baremetal_mode() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         // Clear Docker mode to ensure baremetal mode
-        std::env::remove_var("DEPLOYMENT_MODE");
+        unsafe { std::env::remove_var("DEPLOYMENT_MODE") };
 
         let docker = Arc::new(Docker::connect_with_local_defaults().unwrap());
         let service = RedisService::new("test-docker-env".to_string(), docker);
@@ -2101,8 +2079,9 @@ mod tests {
 
     #[test]
     fn test_get_docker_environment_variables_docker_mode() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         // Set Docker mode
-        std::env::set_var("DEPLOYMENT_MODE", "docker");
+        unsafe { std::env::set_var("DEPLOYMENT_MODE", "docker") };
 
         let docker = Arc::new(Docker::connect_with_local_defaults().unwrap());
         let service = RedisService::new("test-docker-env-mode".to_string(), docker);
@@ -2121,6 +2100,6 @@ mod tests {
         assert_eq!(env_vars.get("REDIS_PORT").unwrap(), "6379"); // Internal port
 
         // Clean up
-        std::env::remove_var("DEPLOYMENT_MODE");
+        unsafe { std::env::remove_var("DEPLOYMENT_MODE") };
     }
 }

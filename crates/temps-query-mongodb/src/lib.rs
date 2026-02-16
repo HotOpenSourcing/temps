@@ -608,7 +608,7 @@ mod tests {
 
     #[test]
     fn test_capabilities() {
-        let capabilities = vec![Capability::Document];
+        let capabilities = [Capability::Document];
         assert!(capabilities.contains(&Capability::Document));
     }
 }

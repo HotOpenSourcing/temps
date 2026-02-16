@@ -453,7 +453,7 @@ fn validate_geolite2_database(default_db_path: &PathBuf) -> anyhow::Result<()> {
     }
 
     // Database not found in any location
-    return Err(anyhow::anyhow!(
+    Err(anyhow::anyhow!(
         "❌ GeoLite2-City.mmdb not found\n\n\
         The MaxMind GeoLite2 database is required for geolocation features.\n\n\
         📍 Checked locations (in order):\n\
@@ -476,7 +476,7 @@ fn validate_geolite2_database(default_db_path: &PathBuf) -> anyhow::Result<()> {
         search_paths[0].display(),
         search_paths[1].display(),
         search_paths[1].display()
-    ));
+    ))
 }
 
 /// Initialize and start the console API server

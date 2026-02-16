@@ -378,8 +378,7 @@ async fn blob_download(
         .await?;
 
     // Convert the stream to axum Body
-    let body =
-        Body::from_stream(stream.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)));
+    let body = Body::from_stream(stream.map_err(std::io::Error::other));
 
     Ok((
         StatusCode::OK,

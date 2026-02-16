@@ -223,7 +223,7 @@ impl QueryResult {
             rows,
             stats: QueryStats {
                 row_count,
-                total_rows: Some(row_count as usize),
+                total_rows: Some(row_count),
                 execution_ms,
                 has_more,
                 next_cursor: None,

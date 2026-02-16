@@ -263,7 +263,7 @@ async fn test_workflow_execution_service_with_real_jobs() {
     // Create ExternalServiceManager
     let external_service_manager = Arc::new(temps_providers::ExternalServiceManager::new(
         db.clone(),
-        encryption_service,
+        encryption_service.clone(),
         Arc::new(docker.clone()),
     ));
 
@@ -406,10 +406,14 @@ async fn test_workflow_execution_service_with_real_jobs() {
         bollard::Docker::connect_with_local_defaults().expect("Failed to connect to Docker"),
     );
 
+    // Create queue for test
+    let (queue, _receiver) = temps_queue::BroadcastQueueService::create_broadcast_channel(100);
+    let queue = Arc::new(queue) as Arc<dyn temps_core::JobQueue>;
+
     // Create WorkflowExecutionService
     let workflow_execution_service = Arc::new(WorkflowExecutionService::new(
         db.clone(),
-        queue.clone(),
+        queue,
         git_provider,
         image_builder,
         container_deployer,
@@ -418,7 +422,6 @@ async fn test_workflow_execution_service_with_real_jobs() {
         cron_config_service,
         config_service.clone(),
         screenshot_service.clone(),
-        None, // blob_service
         docker,
     ));
 

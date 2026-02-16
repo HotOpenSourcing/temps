@@ -5,9 +5,14 @@
 
 use std::sync::Arc;
 
+use super::audit::{
+    DeployFromImageAudit, DeployFromImageUploadAudit, DeployFromStaticAudit,
+    ExternalImageDeletedAudit, ExternalImageRegisteredAudit, StaticBundleDeletedAudit,
+    StaticBundleUploadedAudit,
+};
 use super::types::AppState;
 use axum::{
-    extract::{Multipart, Path, Query, State},
+    extract::{Extension, Multipart, Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -18,7 +23,7 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryF
 use serde::{Deserialize, Serialize};
 use temps_auth::{permission_guard, RequireAuth};
 use temps_core::problemdetails::{self, Problem};
-use temps_core::{DeploymentCreatedJob, Job, UtcDateTime};
+use temps_core::{AuditContext, DeploymentCreatedJob, Job, RequestMetadata, UtcDateTime};
 use temps_entities::deployments::DeploymentMetadata;
 use temps_entities::source_type::SourceType;
 use temps_entities::types::PipelineStatus;
@@ -234,6 +239,7 @@ pub async fn deploy_from_image(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<AppState>>,
     Path((project_id, environment_id)): Path<(i32, i32)>,
+    Extension(metadata): Extension<RequestMetadata>,
     Json(req): Json<DeployFromImageRequest>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, DeploymentsCreate);
@@ -479,7 +485,23 @@ pub async fn deploy_from_image(
         }
     }
 
-    // 8. Return deployment info
+    // 8. Audit log
+    let audit = DeployFromImageAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        project_id,
+        environment_id,
+        image_ref: image_ref.clone(),
+        deployment_id: deployment.id,
+    };
+    if let Err(e) = state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to create audit log: {}", e);
+    }
+
+    // 9. Return deployment info
     Ok((
         StatusCode::ACCEPTED,
         Json(DeploymentResponse {
@@ -515,6 +537,7 @@ pub async fn deploy_from_static(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<AppState>>,
     Path((project_id, environment_id)): Path<(i32, i32)>,
+    Extension(metadata): Extension<RequestMetadata>,
     Json(req): Json<DeployFromStaticRequest>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, DeploymentsCreate);
@@ -738,7 +761,22 @@ pub async fn deploy_from_static(
         }
     }
 
-    // 9. Return deployment info
+    // 9. Audit log
+    let audit = DeployFromStaticAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        project_id,
+        environment_id,
+        deployment_id: deployment.id,
+    };
+    if let Err(e) = state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to create audit log: {}", e);
+    }
+
+    // 10. Return deployment info
     Ok((
         StatusCode::ACCEPTED,
         Json(DeploymentResponse {
@@ -780,6 +818,7 @@ pub async fn deploy_from_image_upload(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<AppState>>,
     Path((project_id, environment_id)): Path<(i32, i32)>,
+    Extension(metadata): Extension<RequestMetadata>,
     Query(query): Query<DeployFromImageUploadQuery>,
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, Problem> {
@@ -1139,7 +1178,22 @@ pub async fn deploy_from_image_upload(
         }
     }
 
-    // 14. Return deployment info
+    // 14. Audit log
+    let audit = DeployFromImageUploadAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        project_id,
+        environment_id,
+        deployment_id: deployment.id,
+    };
+    if let Err(e) = state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to create audit log: {}", e);
+    }
+
+    // 15. Return deployment info
     Ok((
         StatusCode::ACCEPTED,
         Json(DeploymentResponse {
@@ -1176,6 +1230,7 @@ pub async fn upload_static_bundle(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(project_id): Path<i32>,
+    Extension(request_metadata): Extension<RequestMetadata>,
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, DeploymentsCreate);
@@ -1432,6 +1487,19 @@ pub async fn upload_static_bundle(
         bundle_info.id, project_id
     );
 
+    let audit = StaticBundleUploadedAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(request_metadata.ip_address.clone()),
+            user_agent: request_metadata.user_agent.clone(),
+        },
+        project_id,
+        bundle_id: bundle_info.id,
+    };
+    if let Err(e) = state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to create audit log: {}", e);
+    }
+
     // 6. Return bundle info
     Ok((
         StatusCode::CREATED,
@@ -1461,6 +1529,7 @@ pub async fn register_external_image(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(project_id): Path<i32>,
+    Extension(metadata): Extension<RequestMetadata>,
     Json(req): Json<RegisterImageRequest>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, DeploymentsCreate);
@@ -1498,6 +1567,20 @@ pub async fn register_external_image(
         "External image registered for project {}: id={}",
         project_id, result.id
     );
+
+    let audit = ExternalImageRegisteredAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        project_id,
+        image_id: result.id,
+        image_ref: result.image_ref.clone(),
+    };
+    if let Err(e) = state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to create audit log: {}", e);
+    }
 
     Ok((
         StatusCode::CREATED,
@@ -1612,7 +1695,8 @@ pub async fn get_external_image(
 pub async fn delete_external_image(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<AppState>>,
-    Path((_project_id, image_id)): Path<(i32, i32)>,
+    Path((project_id, image_id)): Path<(i32, i32)>,
+    Extension(metadata): Extension<RequestMetadata>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, DeploymentsDelete);
 
@@ -1633,6 +1717,19 @@ pub async fn delete_external_image(
                     .with_detail(e.to_string()),
             }
         })?;
+
+    let audit = ExternalImageDeletedAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        project_id,
+        image_id,
+    };
+    if let Err(e) = state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to create audit log: {}", e);
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1744,7 +1841,8 @@ pub async fn get_static_bundle(
 pub async fn delete_static_bundle(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<AppState>>,
-    Path((_project_id, bundle_id)): Path<(i32, i32)>,
+    Path((project_id, bundle_id)): Path<(i32, i32)>,
+    Extension(metadata): Extension<RequestMetadata>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, DeploymentsDelete);
 
@@ -1765,6 +1863,19 @@ pub async fn delete_static_bundle(
                     .with_detail(e.to_string()),
             }
         })?;
+
+    let audit = StaticBundleDeletedAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        project_id,
+        bundle_id,
+    };
+    if let Err(e) = state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to create audit log: {}", e);
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }

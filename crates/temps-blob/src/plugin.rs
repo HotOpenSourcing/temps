@@ -193,7 +193,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_blob_plugin_default() {
-        let plugin = BlobPlugin::default();
+        let plugin = BlobPlugin;
         assert_eq!(plugin.name(), "blob");
     }
 }

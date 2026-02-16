@@ -977,6 +977,16 @@ export type CreateProjectRequest = {
     project_type?: string | null;
     repo_name?: string | null;
     repo_owner?: string | null;
+    /**
+     * Source type for deployments
+     *
+     * Determines how the project is deployed:
+     * - **git** (default): Traditional Git-based deployments - source code is pulled, built, and deployed
+     * - **docker_image**: Deploy pre-built Docker images from external registries (DockerHub, GHCR, etc.)
+     * - **static_files**: Deploy pre-built static files uploaded as tar.gz or zip bundles
+     * - **manual**: Manual deployment via CLI
+     */
+    source_type?: SourceType;
     storage_service_ids: Array<number>;
     use_default_wildcard?: boolean | null;
 };
@@ -2494,6 +2504,30 @@ export type FunnelResponse = {
     updated_at: string;
 };
 
+export type GenerateDockerfileRequest = {
+    /** Package manager used by the project (npm, yarn, pnpm, bun) */
+    package_manager?: string | null;
+    /** Custom install command (overrides preset default) */
+    install_command?: string | null;
+    /** Custom build command (overrides preset default) */
+    build_command?: string | null;
+    /** Output directory for static builds */
+    output_dir?: string | null;
+    /** Project name/slug used for container naming */
+    project_name?: string | null;
+    /** Whether to use BuildKit cache mounts for faster builds (default: true) */
+    use_buildkit?: boolean;
+};
+
+export type GenerateDockerfileResponse = {
+    /** The generated Dockerfile content */
+    dockerfile: string;
+    /** Build arguments to pass to docker build --build-arg KEY=VALUE */
+    build_args: Record<string, string>;
+    /** The preset slug used for generation */
+    preset: string;
+};
+
 export type GeneralStatsQuery = {
     end_date: string;
     start_date: string;
@@ -3875,6 +3909,10 @@ export type ProjectResponse = {
     repo_name?: string | null;
     repo_owner?: string | null;
     slug: string;
+    /**
+     * Source type for deployments (git, docker_image, static_files, or manual)
+     */
+    source_type: SourceType;
     updated_at: number;
 };
 
@@ -5060,6 +5098,8 @@ export type SmtpResult = {
      */
     is_disabled: boolean;
 };
+
+export type SourceType = 'git' | 'docker_image' | 'static_files' | 'manual';
 
 /**
  * Entry in the source backup index
@@ -13632,6 +13672,39 @@ export type ListPresetsResponses = {
 };
 
 export type ListPresetsResponse2 = ListPresetsResponses[keyof ListPresetsResponses];
+
+export type GeneratePresetDockerfileData = {
+    body: GenerateDockerfileRequest;
+    path: {
+        slug: string;
+    };
+    query?: never;
+    url: '/presets/{slug}/dockerfile';
+};
+
+export type GeneratePresetDockerfileErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Preset not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GeneratePresetDockerfileResponses = {
+    /**
+     * Generated Dockerfile
+     */
+    200: GenerateDockerfileResponse;
+};
+
+export type GeneratePresetDockerfileResponse = GeneratePresetDockerfileResponses[keyof GeneratePresetDockerfileResponses];
 
 export type GetProjectsData = {
     body?: never;

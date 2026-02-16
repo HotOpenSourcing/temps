@@ -3,7 +3,7 @@ use crate::services::{
     NotificationPreferences, NotificationPreferencesService, NotificationService, TlsMode,
 };
 use axum::{
-    extract::{Path, State},
+    extract::{Extension, Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{delete, get, post, put},
@@ -15,6 +15,7 @@ use temps_auth::permission_guard;
 use temps_auth::RequireAuth;
 use temps_core::error_builder::ErrorBuilder;
 use temps_core::problemdetails::Problem;
+use temps_core::{AuditContext, AuditLogger, AuditOperation, RequestMetadata};
 use tracing::{error, info};
 use utoipa::OpenApi;
 
@@ -22,6 +23,7 @@ pub struct NotificationState {
     notification_service: Arc<NotificationService>,
     notification_preferences_service: Arc<NotificationPreferencesService>,
     digest_service: Arc<DigestService>,
+    pub audit_service: Arc<dyn AuditLogger>,
 }
 
 impl NotificationState {
@@ -29,18 +31,77 @@ impl NotificationState {
         notification_service: Arc<NotificationService>,
         notification_preferences_service: Arc<NotificationPreferencesService>,
         digest_service: Arc<DigestService>,
+        audit_service: Arc<dyn AuditLogger>,
     ) -> Self {
         Self {
             notification_service,
             notification_preferences_service,
             digest_service,
+            audit_service,
         }
     }
 }
-// use crate::{
-//     db::NotificationProvider as DbNotificationProvider, services::notification::NotificationService,
-//     services::{AuditService, email::TlsMode},
-// };
+// ── Audit types ──────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct NotificationProviderAudit {
+    context: AuditContext,
+    provider_id: i32,
+    provider_type: String,
+    action: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct NotificationPreferencesAudit {
+    context: AuditContext,
+    action: String,
+}
+
+impl AuditOperation for NotificationProviderAudit {
+    fn operation_type(&self) -> String {
+        self.action.clone()
+    }
+    fn user_id(&self) -> i32 {
+        self.context.user_id
+    }
+    fn ip_address(&self) -> Option<String> {
+        self.context.ip_address.clone()
+    }
+    fn user_agent(&self) -> &str {
+        &self.context.user_agent
+    }
+    fn serialize(&self) -> anyhow::Result<String> {
+        serde_json::to_string(self)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize audit operation {}", e))
+    }
+}
+
+impl AuditOperation for NotificationPreferencesAudit {
+    fn operation_type(&self) -> String {
+        self.action.clone()
+    }
+    fn user_id(&self) -> i32 {
+        self.context.user_id
+    }
+    fn ip_address(&self) -> Option<String> {
+        self.context.ip_address.clone()
+    }
+    fn user_agent(&self) -> &str {
+        &self.context.user_agent
+    }
+    fn serialize(&self) -> anyhow::Result<String> {
+        serde_json::to_string(self)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize audit operation {}", e))
+    }
+}
+
+fn make_audit_context(auth: &temps_auth::AuthContext, metadata: &RequestMetadata) -> AuditContext {
+    AuditContext {
+        user_id: auth.user_id(),
+        ip_address: Some(metadata.ip_address.clone()),
+        user_agent: metadata.user_agent.clone(),
+    }
+}
 
 #[derive(OpenApi)]
 #[openapi(
@@ -241,6 +302,9 @@ pub struct UpdateWebhookProviderRequest {
         (status = 200, description = "Successfully retrieved providers", body = Vec<NotificationProviderResponse>),
         (status = 500, description = "Internal server error")
     ),
+    params(
+        temps_core::PaginationParams,
+    ),
     tag = "Notification Providers",
     security(
         ("bearer_auth" = [])
@@ -249,10 +313,18 @@ pub struct UpdateWebhookProviderRequest {
 async fn list_notification_providers(
     State(app_state): State<Arc<NotificationState>>,
     RequireAuth(auth): RequireAuth,
+    Query(pagination): Query<temps_core::PaginationParams>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, NotificationProvidersRead);
     info!("Listing notification providers");
-    match app_state.notification_service.list_providers().await {
+
+    let (page, page_size) = pagination.normalize();
+
+    match app_state
+        .notification_service
+        .list_providers_paginated(page, page_size)
+        .await
+    {
         Ok(providers) => {
             let mut response_vec = Vec::new();
             for p in providers {
@@ -367,6 +439,7 @@ async fn get_notification_provider(
 async fn create_notification_provider(
     State(app_state): State<Arc<NotificationState>>,
     RequireAuth(auth): RequireAuth,
+    Extension(metadata): Extension<RequestMetadata>,
     Json(request): Json<CreateProviderRequest>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, NotificationProvidersCreate);
@@ -377,6 +450,16 @@ async fn create_notification_provider(
         .await
     {
         Ok(provider) => {
+            let audit = NotificationProviderAudit {
+                context: make_audit_context(&auth, &metadata),
+                provider_id: provider.id,
+                provider_type: provider.provider_type.clone(),
+                action: "NOTIFICATION_PROVIDER_CREATED".to_string(),
+            };
+            if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+                error!("Failed to create audit log: {}", e);
+            }
+
             let config = app_state
                 .notification_service
                 .decrypt_provider_config(&provider.config)
@@ -439,6 +522,7 @@ async fn update_provider(
     State(app_state): State<Arc<NotificationState>>,
     Path(id): Path<i32>,
     RequireAuth(auth): RequireAuth,
+    Extension(metadata): Extension<RequestMetadata>,
     Json(request): Json<UpdateProviderRequest>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, NotificationProvidersWrite);
@@ -449,6 +533,16 @@ async fn update_provider(
         .await
     {
         Ok(Some(provider)) => {
+            let audit = NotificationProviderAudit {
+                context: make_audit_context(&auth, &metadata),
+                provider_id: provider.id,
+                provider_type: provider.provider_type.clone(),
+                action: "NOTIFICATION_PROVIDER_UPDATED".to_string(),
+            };
+            if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+                error!("Failed to create audit log: {}", e);
+            }
+
             let config = app_state
                 .notification_service
                 .decrypt_provider_config(&provider.config)
@@ -505,11 +599,24 @@ async fn delete_provider(
     State(app_state): State<Arc<NotificationState>>,
     Path(id): Path<i32>,
     RequireAuth(auth): RequireAuth,
+    Extension(metadata): Extension<RequestMetadata>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, NotificationProvidersDelete);
     info!("Deleting notification provider {}", id);
     match app_state.notification_service.delete_provider(id).await {
-        Ok(true) => Ok(StatusCode::NO_CONTENT),
+        Ok(true) => {
+            let audit = NotificationProviderAudit {
+                context: make_audit_context(&auth, &metadata),
+                provider_id: id,
+                provider_type: "unknown".to_string(),
+                action: "NOTIFICATION_PROVIDER_DELETED".to_string(),
+            };
+            if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+                error!("Failed to create audit log: {}", e);
+            }
+
+            Ok(StatusCode::NO_CONTENT)
+        }
         Ok(false) => Err(ErrorBuilder::new(StatusCode::NOT_FOUND)
             .title("Provider not found")
             .detail("The requested notification provider does not exist")
@@ -545,11 +652,22 @@ async fn test_provider(
     State(app_state): State<Arc<NotificationState>>,
     Path(id): Path<i32>,
     RequireAuth(auth): RequireAuth,
+    Extension(metadata): Extension<RequestMetadata>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, NotificationProvidersRead);
     info!("Testing notification provider {}", id);
     match app_state.notification_service.test_provider(id).await {
         Ok(result) => {
+            let audit = NotificationProviderAudit {
+                context: make_audit_context(&auth, &metadata),
+                provider_id: id,
+                provider_type: "unknown".to_string(),
+                action: "NOTIFICATION_PROVIDER_TESTED".to_string(),
+            };
+            if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+                error!("Failed to create audit log: {}", e);
+            }
+
             let message = if result {
                 Some("Test email sent successfully".to_string())
             } else {
@@ -598,6 +716,7 @@ async fn test_provider(
 async fn create_slack_provider(
     State(app_state): State<Arc<NotificationState>>,
     RequireAuth(auth): RequireAuth,
+    Extension(metadata): Extension<RequestMetadata>,
     Json(request): Json<CreateSlackProviderRequest>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, NotificationProvidersCreate);
@@ -609,6 +728,16 @@ async fn create_slack_provider(
         .await
     {
         Ok(provider) => {
+            let audit = NotificationProviderAudit {
+                context: make_audit_context(&auth, &metadata),
+                provider_id: provider.id,
+                provider_type: "slack".to_string(),
+                action: "NOTIFICATION_PROVIDER_CREATED".to_string(),
+            };
+            if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+                error!("Failed to create audit log: {}", e);
+            }
+
             let config = app_state
                 .notification_service
                 .decrypt_provider_config(&provider.config)
@@ -658,6 +787,7 @@ async fn create_slack_provider(
 async fn create_email_provider(
     State(app_state): State<Arc<NotificationState>>,
     RequireAuth(auth): RequireAuth,
+    Extension(metadata): Extension<RequestMetadata>,
     Json(request): Json<CreateEmailProviderRequest>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, NotificationProvidersCreate);
@@ -669,6 +799,16 @@ async fn create_email_provider(
         .await
     {
         Ok(provider) => {
+            let audit = NotificationProviderAudit {
+                context: make_audit_context(&auth, &metadata),
+                provider_id: provider.id,
+                provider_type: "email".to_string(),
+                action: "NOTIFICATION_PROVIDER_CREATED".to_string(),
+            };
+            if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+                error!("Failed to create audit log: {}", e);
+            }
+
             let config = app_state
                 .notification_service
                 .decrypt_provider_config(&provider.config)
@@ -722,6 +862,7 @@ async fn update_slack_provider(
     State(app_state): State<Arc<NotificationState>>,
     Path(id): Path<i32>,
     RequireAuth(auth): RequireAuth,
+    Extension(metadata): Extension<RequestMetadata>,
     Json(request): Json<UpdateSlackProviderRequest>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, NotificationProvidersWrite);
@@ -738,6 +879,16 @@ async fn update_slack_provider(
         .await
     {
         Ok(Some(provider)) => {
+            let audit = NotificationProviderAudit {
+                context: make_audit_context(&auth, &metadata),
+                provider_id: provider.id,
+                provider_type: "slack".to_string(),
+                action: "NOTIFICATION_PROVIDER_UPDATED".to_string(),
+            };
+            if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+                error!("Failed to create audit log: {}", e);
+            }
+
             let config = app_state
                 .notification_service
                 .decrypt_provider_config(&provider.config)
@@ -795,6 +946,7 @@ async fn update_email_provider(
     State(app_state): State<Arc<NotificationState>>,
     Path(id): Path<i32>,
     RequireAuth(auth): RequireAuth,
+    Extension(metadata): Extension<RequestMetadata>,
     Json(request): Json<UpdateEmailProviderRequest>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, NotificationProvidersWrite);
@@ -811,6 +963,16 @@ async fn update_email_provider(
         .await
     {
         Ok(Some(provider)) => {
+            let audit = NotificationProviderAudit {
+                context: make_audit_context(&auth, &metadata),
+                provider_id: provider.id,
+                provider_type: "email".to_string(),
+                action: "NOTIFICATION_PROVIDER_UPDATED".to_string(),
+            };
+            if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+                error!("Failed to create audit log: {}", e);
+            }
+
             let config = app_state
                 .notification_service
                 .decrypt_provider_config(&provider.config)
@@ -869,6 +1031,7 @@ async fn update_email_provider(
 async fn create_webhook_provider(
     State(app_state): State<Arc<NotificationState>>,
     RequireAuth(auth): RequireAuth,
+    Extension(metadata): Extension<RequestMetadata>,
     Json(request): Json<CreateWebhookProviderRequest>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, NotificationProvidersCreate);
@@ -898,6 +1061,16 @@ async fn create_webhook_provider(
         .await
     {
         Ok(provider) => {
+            let audit = NotificationProviderAudit {
+                context: make_audit_context(&auth, &metadata),
+                provider_id: provider.id,
+                provider_type: "webhook".to_string(),
+                action: "NOTIFICATION_PROVIDER_CREATED".to_string(),
+            };
+            if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+                error!("Failed to create audit log: {}", e);
+            }
+
             let config = app_state
                 .notification_service
                 .decrypt_provider_config(&provider.config)
@@ -951,6 +1124,7 @@ async fn update_webhook_provider(
     State(app_state): State<Arc<NotificationState>>,
     Path(id): Path<i32>,
     RequireAuth(auth): RequireAuth,
+    Extension(metadata): Extension<RequestMetadata>,
     Json(request): Json<UpdateWebhookProviderRequest>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, NotificationProvidersWrite);
@@ -985,6 +1159,16 @@ async fn update_webhook_provider(
         .await
     {
         Ok(Some(provider)) => {
+            let audit = NotificationProviderAudit {
+                context: make_audit_context(&auth, &metadata),
+                provider_id: provider.id,
+                provider_type: "webhook".to_string(),
+                action: "NOTIFICATION_PROVIDER_UPDATED".to_string(),
+            };
+            if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+                error!("Failed to create audit log: {}", e);
+            }
+
             let config = app_state
                 .notification_service
                 .decrypt_provider_config(&provider.config)
@@ -1159,6 +1343,7 @@ async fn get_preferences(
 async fn update_preferences(
     State(app_state): State<Arc<NotificationState>>,
     RequireAuth(auth): RequireAuth,
+    Extension(metadata): Extension<RequestMetadata>,
     Json(request): Json<UpdatePreferencesRequest>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, NotificationPreferencesWrite);
@@ -1200,10 +1385,20 @@ async fn update_preferences(
         .update_preferences(db_preferences)
         .await
     {
-        Ok(preferences) => Ok((
-            StatusCode::OK,
-            Json(NotificationPreferencesResponse::from(preferences)),
-        )),
+        Ok(preferences) => {
+            let audit = NotificationPreferencesAudit {
+                context: make_audit_context(&auth, &metadata),
+                action: "NOTIFICATION_PREFERENCES_UPDATED".to_string(),
+            };
+            if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+                error!("Failed to create audit log: {}", e);
+            }
+
+            Ok((
+                StatusCode::OK,
+                Json(NotificationPreferencesResponse::from(preferences)),
+            ))
+        }
         Err(e) => {
             error!("Failed to update notification preferences: {}", e);
             Err(ErrorBuilder::new(StatusCode::INTERNAL_SERVER_ERROR)
@@ -1231,6 +1426,7 @@ async fn update_preferences(
 async fn delete_preferences(
     State(app_state): State<Arc<NotificationState>>,
     RequireAuth(auth): RequireAuth,
+    Extension(metadata): Extension<RequestMetadata>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, NotificationPreferencesWrite);
 
@@ -1243,7 +1439,17 @@ async fn delete_preferences(
         .delete_preferences()
         .await
     {
-        Ok(_) => Ok(StatusCode::NO_CONTENT),
+        Ok(_) => {
+            let audit = NotificationPreferencesAudit {
+                context: make_audit_context(&auth, &metadata),
+                action: "NOTIFICATION_PREFERENCES_DELETED".to_string(),
+            };
+            if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+                error!("Failed to create audit log: {}", e);
+            }
+
+            Ok(StatusCode::NO_CONTENT)
+        }
         Err(e) => {
             error!("Failed to delete notification preferences: {}", e);
             Err(ErrorBuilder::new(StatusCode::INTERNAL_SERVER_ERROR)
@@ -1270,6 +1476,7 @@ async fn delete_preferences(
 async fn trigger_weekly_digest(
     State(app_state): State<Arc<NotificationState>>,
     RequireAuth(auth): RequireAuth,
+    Extension(metadata): Extension<RequestMetadata>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, NotificationPreferencesWrite);
 
@@ -1294,6 +1501,14 @@ async fn trigger_weekly_digest(
         .await
     {
         Ok(_) => {
+            let audit = NotificationPreferencesAudit {
+                context: make_audit_context(&auth, &metadata),
+                action: "WEEKLY_DIGEST_TRIGGERED".to_string(),
+            };
+            if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+                error!("Failed to create audit log: {}", e);
+            }
+
             info!("Weekly digest generated and sent successfully");
             Ok(Json(TriggerDigestResponse {
                 success: true,
@@ -1418,10 +1633,24 @@ mod tests {
                 notification_service.clone(),
             ));
 
+            #[derive(Clone)]
+            struct MockAuditLogger;
+
+            #[async_trait::async_trait]
+            impl temps_core::AuditLogger for MockAuditLogger {
+                async fn create_audit_log(
+                    &self,
+                    _operation: &dyn temps_core::AuditOperation,
+                ) -> Result<(), anyhow::Error> {
+                    Ok(())
+                }
+            }
+
             let notification_state = Arc::new(NotificationState::new(
                 notification_service,
                 notification_preferences_service,
                 digest_service,
+                Arc::new(MockAuditLogger) as Arc<dyn temps_core::AuditLogger>,
             ));
 
             Ok(TestSetup {

@@ -127,49 +127,177 @@ pub struct TestDatabase {
 
 impl Drop for TestDatabase {
     fn drop(&mut self) {
-        // Clean up the unique schema when the test database is dropped
-        if let Some(schema_name) = &self.schema_name {
-            let db = Arc::clone(&self.db);
-            let schema = schema_name.clone();
+        // Skip cleanup if already cleaned up via explicit cleanup() call
+        let has_schema = self.schema_name.is_some();
+        let needs_counter_decrement = self.uses_shared_container;
 
-            // Spawn a background task to drop the schema
-            // We can't use async/await in Drop, so we spawn a task
-            tokio::spawn(async move {
-                let drop_schema_sql = format!("DROP SCHEMA IF EXISTS {} CASCADE", schema);
-                let statement = Statement::from_string(DatabaseBackend::Postgres, drop_schema_sql);
-
-                if let Err(e) = db.execute(statement).await {
-                    eprintln!("Warning: Failed to drop test schema {}: {}", schema, e);
-                }
-            });
+        if !has_schema && !needs_counter_decrement {
+            return;
         }
 
-        // Decrement the active instance counter if using shared container
-        if self.uses_shared_container {
-            tokio::spawn(async move {
-                // Decrement active instances counter
-                if let Some(counter) = ACTIVE_INSTANCES.get() {
-                    let mut count = counter.lock().await;
-                    *count = count.saturating_sub(1);
+        // Run async cleanup synchronously from Drop.
+        //
+        // Strategy:
+        //   1. Try block_in_place + block_on (works on multi-threaded tokio runtime)
+        //      using the existing SeaORM connection pool
+        //   2. If that panics (single-threaded runtime), fall back to spawning a
+        //      dedicated thread with its own runtime and a FRESH database connection
+        //      (the SeaORM pool is tied to the original runtime and won't work)
+        //   3. If all else fails, log the leaked schema
+        //
+        // Previous approach used tokio::spawn which was fire-and-forget — spawned
+        // tasks would race against runtime shutdown, leaving orphaned schemas.
+        let db = Arc::clone(&self.db);
+        let schema = self.schema_name.take();
+        let database_url = self.database_url.clone();
 
-                    // If this was the last instance, drop the shared container
-                    if *count == 0 {
-                        if let Some(container_holder) = TEST_CONTAINER.get() {
-                            let mut container_opt = container_holder.lock().await;
-                            if let Some(container) = container_opt.take() {
-                                drop(container); // Explicitly drop the SharedContainer
-                                eprintln!(
-                                    "Dropped shared test database container (all tests completed)"
-                                );
-                            }
-                        }
+        let cleanup = move || {
+            let rt_result = tokio::runtime::Handle::try_current();
+            let handle = match rt_result {
+                Ok(h) => h,
+                Err(_) => {
+                    if let Some(ref s) = schema {
+                        eprintln!(
+                            "Warning: Cannot clean up test schema {} (no tokio runtime)",
+                            s
+                        );
                     }
+                    return;
                 }
-            });
+            };
+
+            // Try block_in_place first (multi-threaded runtime).
+            // If it panics (current-thread runtime), fall back to a dedicated thread.
+            let block_in_place_result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    tokio::task::block_in_place(|| {
+                        handle.block_on(Self::run_cleanup(&db, &schema, needs_counter_decrement));
+                    });
+                }));
+
+            if block_in_place_result.is_err() {
+                // Single-threaded runtime: spawn a dedicated thread with a fresh
+                // connection. We can't reuse the SeaORM pool because it was created
+                // on the original runtime and its connections won't work here.
+                let schema2 = schema.clone();
+                let cleanup_thread = std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build();
+                    if let Ok(rt) = rt {
+                        rt.block_on(async {
+                            Self::run_cleanup_with_fresh_connection(
+                                &database_url,
+                                &schema2,
+                                needs_counter_decrement,
+                            )
+                            .await;
+                        });
+                    } else if let Some(ref s) = schema2 {
+                        eprintln!(
+                            "Warning: Cannot clean up test schema {} (failed to create runtime)",
+                            s
+                        );
+                    }
+                });
+                let _ = cleanup_thread.join();
+            }
+        };
+
+        // Wrap in catch_unwind so panics in Drop don't abort the process
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(cleanup));
+        if result.is_err() {
+            eprintln!("Warning: TestDatabase cleanup panicked (runtime may be shutting down)");
         }
 
         // Note: dedicated_container will be automatically cleaned up by testcontainers
         // when it goes out of scope (Drop is implemented by testcontainers)
+    }
+}
+
+impl TestDatabase {
+    /// Internal cleanup logic shared between Drop and the async cleanup() method.
+    /// Uses the existing SeaORM connection pool.
+    async fn run_cleanup(
+        db: &Arc<DbConnection>,
+        schema: &Option<String>,
+        needs_counter_decrement: bool,
+    ) {
+        if let Some(schema_name) = schema {
+            let drop_schema_sql = format!("DROP SCHEMA IF EXISTS {} CASCADE", schema_name);
+            let statement = Statement::from_string(DatabaseBackend::Postgres, drop_schema_sql);
+
+            if let Err(e) = db.execute(statement).await {
+                eprintln!("Warning: Failed to drop test schema {}: {}", schema_name, e);
+            }
+        }
+
+        Self::maybe_drop_shared_container(needs_counter_decrement).await;
+    }
+
+    /// Cleanup logic for the fallback thread path (single-threaded runtime).
+    /// Creates a fresh database connection since the original SeaORM pool
+    /// is tied to the test's runtime and won't work on a new runtime.
+    async fn run_cleanup_with_fresh_connection(
+        database_url: &str,
+        schema: &Option<String>,
+        needs_counter_decrement: bool,
+    ) {
+        if let Some(schema_name) = schema {
+            // Extract the base URL (strip schema-specific query params)
+            let base_url = database_url.split('?').next().unwrap_or(database_url);
+
+            // Create a minimal fresh connection just for the DROP SCHEMA
+            let connect_options = ConnectOptions::new(base_url)
+                .max_connections(1)
+                .min_connections(0)
+                .connect_timeout(std::time::Duration::from_secs(5))
+                .to_owned();
+
+            match Database::connect(connect_options).await {
+                Ok(fresh_db) => {
+                    let drop_schema_sql = format!("DROP SCHEMA IF EXISTS {} CASCADE", schema_name);
+                    let statement =
+                        Statement::from_string(DatabaseBackend::Postgres, drop_schema_sql);
+
+                    if let Err(e) = fresh_db.execute(statement).await {
+                        eprintln!("Warning: Failed to drop test schema {}: {}", schema_name, e);
+                    }
+                    let _ = fresh_db.close().await;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "Warning: Failed to connect for schema cleanup {}: {}",
+                        schema_name, e
+                    );
+                }
+            }
+        }
+
+        Self::maybe_drop_shared_container(needs_counter_decrement).await;
+    }
+
+    /// Decrement the active instances counter and drop the shared container
+    /// if this was the last instance.
+    async fn maybe_drop_shared_container(needs_counter_decrement: bool) {
+        if needs_counter_decrement {
+            if let Some(counter) = ACTIVE_INSTANCES.get() {
+                let mut count = counter.lock().await;
+                *count = count.saturating_sub(1);
+
+                if *count == 0 {
+                    if let Some(container_holder) = TEST_CONTAINER.get() {
+                        let mut container_opt = container_holder.lock().await;
+                        if let Some(container) = container_opt.take() {
+                            drop(container);
+                            eprintln!(
+                                "Dropped shared test database container (all tests completed)"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -191,6 +319,19 @@ impl TestDatabase {
             .get_or_init(|| async { Arc::new(Mutex::new(0)) })
             .await
             .clone()
+    }
+
+    /// Explicitly clean up the test schema (async version).
+    ///
+    /// This is called automatically by `Drop`, but can also be called
+    /// explicitly for guaranteed cleanup in async test contexts.
+    /// Calling this before the `TestDatabase` is dropped avoids relying
+    /// on the synchronous `Drop` fallback.
+    pub async fn cleanup(&mut self) {
+        let schema = self.schema_name.take();
+        let needs_counter = self.uses_shared_container;
+        self.uses_shared_container = false; // Prevent double-decrement in Drop
+        Self::run_cleanup(&self.db, &schema, needs_counter).await;
     }
 
     /// Create a new test database with TimescaleDB (uses shared container or existing database)

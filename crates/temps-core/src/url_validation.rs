@@ -89,10 +89,13 @@ pub fn validate_external_url(url: &str) -> Result<Url, UrlValidationError> {
         match host {
             url::Host::Ipv4(ip) => validate_ipv4(&ip)?,
             url::Host::Ipv6(ip) => validate_ipv6(&ip)?,
-            url::Host::Domain(_domain) => {
-                // For production use, you should implement DNS resolution and validation here
-                // This requires async context and tokio::net::lookup_host
-                // For now, we'll validate synchronously and recommend async validation at the service layer
+            url::Host::Domain(domain) => {
+                // Block well-known loopback and internal hostnames synchronously.
+                // For full DNS resolution validation, use an async validator at the service layer.
+                let lower = domain.to_lowercase();
+                if lower == "localhost" || lower.ends_with(".localhost") {
+                    return Err(UrlValidationError::LoopbackIp);
+                }
             }
         }
     } else {

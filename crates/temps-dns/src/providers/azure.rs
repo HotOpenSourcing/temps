@@ -405,11 +405,7 @@ impl AzureProvider {
 
     /// Convert Azure record set to our DnsRecord type
     fn convert_record_set(record_set: &AzureRecordSet, zone_name: &str) -> Vec<DnsRecord> {
-        let record_type_str = record_set
-            .record_type
-            .as_ref()
-            .map(|s| s.as_str())
-            .unwrap_or("");
+        let record_type_str = record_set.record_type.as_deref().unwrap_or("");
 
         let record_type = match Self::parse_record_type(record_type_str) {
             Some(t) => t,

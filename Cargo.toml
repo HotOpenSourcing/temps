@@ -178,9 +178,9 @@ webpki-roots = "0.26"
 # ============================================================================
 # Reverse Proxy (Pingora)
 # ============================================================================
-pingora = { version = "0.6.0" }
-pingora-core = { version = "0.6.0", features = ["openssl"] }
-pingora-proxy = { version = "0.6.0" }
+pingora = { version = "0.7.0" }
+pingora-core = { version = "0.7.0", features = ["openssl", "connection_filter"] }
+pingora-proxy = { version = "0.7.0" }
 prometheus = "0.14"
 
 # ============================================================================
@@ -282,11 +282,9 @@ opt-level = 2      # Optimize dependencies
 #    - Status: Tracked in nixpacks repository
 #    - Mitigation: TOCTOU race condition, low impact in our usage
 #
-# 3. GHSA-g98v-hv3f-hcfr: atty 0.2.14 (LOW severity)
-#    - Path: pingora-core → clap 3.2.25 → atty 0.2.14
-#    - Fix: Requires pingora to update to clap 4.x (which doesn't use atty)
-#    - Status: Waiting for pingora to update clap dependency
-#    - Mitigation: Unaligned read issue, minimal security impact
+# 3. GHSA-g98v-hv3f-hcfr: atty 0.2.14 — RESOLVED in Pingora 0.7.0
+#    - Previously: pingora-core → clap 3.2.25 → atty 0.2.14
+#    - Pingora 0.7.0 upgraded to clap 4.5 which no longer depends on atty
 #
 # All of these are transitive dependencies from third-party crates that we cannot
 # directly patch without forking. Monitoring upstream for updates.

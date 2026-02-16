@@ -1,7 +1,7 @@
 import { requireAuth, config, credentials } from '../../config/store.js'
 import { setupClient, client } from '../../lib/api-client.js'
 import { watchDeployment } from '../../lib/deployment-watcher.jsx'
-import { getProjectBySlug, getProject, getEnvironments } from '../../api/sdk.gen.js'
+import { getProjectBySlug, getProject, getEnvironments, generatePresetDockerfile } from '../../api/sdk.gen.js'
 import type { EnvironmentResponse } from '../../api/types.gen.js'
 import { promptSelect } from '../../ui/prompts.js'
 import {
@@ -20,7 +20,7 @@ import {
   box,
 } from '../../ui/output.js'
 import { spawn } from 'node:child_process'
-import { existsSync, createWriteStream } from 'node:fs'
+import { existsSync, createWriteStream, writeFileSync, mkdirSync } from 'node:fs'
 import { unlink } from 'node:fs/promises'
 import { resolve, basename, join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -47,101 +47,7 @@ export async function deployLocalImage(options: DeployLocalImageOptions): Promis
 
   newline()
 
-  let imageName: string
-  let didBuild = false
-
-  // Determine if we should build or use existing image
-  const shouldBuild = !options.noBuild && !options.image
-
-  if (shouldBuild) {
-    // Build mode: build from Dockerfile
-    const dockerfilePath = options.dockerfile || 'Dockerfile'
-    const contextPath = options.context || '.'
-    const resolvedDockerfile = resolve(dockerfilePath)
-    const resolvedContext = resolve(contextPath)
-
-    // Check if Dockerfile exists
-    if (!existsSync(resolvedDockerfile)) {
-      warning(`Dockerfile not found: ${resolvedDockerfile}`)
-      info('Options:')
-      info('  1. Create a Dockerfile in the current directory')
-      info('  2. Specify a Dockerfile path: --dockerfile <path>')
-      info('  3. Skip build and use existing image: --image <image-name>')
-      return
-    }
-
-    // Generate image tag if not provided
-    const projectName = options.project ?? config.get('defaultProject')
-    const dirName = basename(process.cwd())
-    const timestamp = Date.now()
-    imageName = options.tag || `${projectName || dirName}:local-${timestamp}`
-
-    // Show build preview
-    newline()
-    box(
-      `Dockerfile: ${colors.bold(resolvedDockerfile)}\n` +
-        `Context: ${colors.bold(resolvedContext)}\n` +
-        `Image Tag: ${colors.bold(imageName)}` +
-        (options.buildArg?.length ? `\nBuild Args: ${colors.bold(options.buildArg.join(', '))}` : ''),
-      `${icons.package} Docker Build`
-    )
-    newline()
-
-    // Build the image
-    startSpinner('Building Docker image...')
-
-    try {
-      await dockerBuild({
-        dockerfile: resolvedDockerfile,
-        context: resolvedContext,
-        tag: imageName,
-        buildArgs: options.buildArg || [],
-        onOutput: (line) => {
-          // Show build progress
-          const trimmed = line.trim()
-          if (trimmed) {
-            updateSpinner(`Building: ${trimmed.substring(0, 60)}${trimmed.length > 60 ? '...' : ''}`)
-          }
-        },
-      })
-      succeedSpinner(`Image built: ${imageName}`)
-      didBuild = true
-    } catch (err) {
-      failSpinner('Docker build failed')
-      if (err instanceof Error) {
-        warning(err.message)
-      }
-      return
-    }
-  } else if (options.image) {
-    // Use existing image
-    imageName = options.image
-
-    // Verify image exists locally
-    startSpinner('Verifying local Docker image...')
-
-    const imageExists = await checkImageExists(imageName)
-    if (!imageExists) {
-      failSpinner(`Image "${imageName}" not found locally`)
-      info('Make sure the image exists by running: docker images')
-      info('Or remove --image to build from Dockerfile')
-      return
-    }
-
-    succeedSpinner(`Found local image: ${imageName}`)
-  } else {
-    // No image and --no-build specified
-    warning('No image specified and build is disabled')
-    info('Use: temps deploy:local-image --image <image-name>')
-    info('Or remove --no-build to build from Dockerfile')
-    return
-  }
-
-  // Get image size for display
-  const imageSize = await getImageSize(imageName)
-  info(`Image size: ${formatFileSize(imageSize)}`)
-
-  // Get project name
+  // ─── Step 1: Resolve project and environment ─────────────────────────────
   const projectName = options.project ?? config.get('defaultProject')
 
   if (!projectName) {
@@ -152,18 +58,15 @@ export async function deployLocalImage(options: DeployLocalImageOptions): Promis
     return
   }
 
-  // Fetch project details
   startSpinner('Fetching project details...')
 
   let projectData: { id: number; name: string; slug: string }
   let environments: EnvironmentResponse[] = []
 
   try {
-    // Check if projectName is a numeric ID
     const isNumericId = /^\d+$/.test(projectName)
 
     if (isNumericId) {
-      // Fetch by numeric ID
       const result = await getProject({
         client,
         path: { id: parseInt(projectName, 10) },
@@ -175,19 +78,17 @@ export async function deployLocalImage(options: DeployLocalImageOptions): Promis
         return
       }
 
-      // Handle potential wrapped response
       const responseData = result.data as Record<string, unknown>
       if (responseData.id !== undefined) {
         projectData = result.data as { id: number; name: string; slug: string }
       } else if (responseData.data && typeof responseData.data === 'object') {
         projectData = responseData.data as { id: number; name: string; slug: string }
       } else {
-        failSpinner(`Unexpected project response format`)
+        failSpinner('Unexpected project response format')
         info(`Debug: ${JSON.stringify(result.data)}`)
         return
       }
     } else {
-      // Fetch by slug
       const { data, error } = await getProjectBySlug({
         client,
         path: { slug: projectName },
@@ -209,11 +110,9 @@ export async function deployLocalImage(options: DeployLocalImageOptions): Promis
       path: { project_id: projectData.id },
     })
 
-    // Handle different response formats - could be array directly or wrapped in object
     if (Array.isArray(envData)) {
       environments = envData
     } else if (envData && typeof envData === 'object') {
-      // Try common wrapper properties
       const wrapped = envData as Record<string, unknown>
       if (Array.isArray(wrapped.data)) {
         environments = wrapped.data as EnvironmentResponse[]
@@ -226,14 +125,12 @@ export async function deployLocalImage(options: DeployLocalImageOptions): Promis
     throw err
   }
 
-  // Get environment
+  // ─── Step 2: Select environment ──────────────────────────────────────────
   let environmentId: number | undefined
   let environmentName = options.environment || 'production'
 
-  // If environment ID is specified directly, use it without lookup
   if (options.environmentId) {
     environmentId = parseInt(options.environmentId, 10)
-    // Try to find the name from environments list if available
     if (environments.length > 0) {
       const env = environments.find((e) => e.id === environmentId)
       if (env) {
@@ -244,14 +141,12 @@ export async function deployLocalImage(options: DeployLocalImageOptions): Promis
     }
   } else if (environments.length > 0) {
     if (options.environment) {
-      // Find by name
       const env = environments.find((e) => e.name === options.environment)
       if (env) {
         environmentId = env.id
         environmentName = env.name
       }
     } else if (!options.yes) {
-      // Interactive: prompt for environment selection
       const selectedEnv = await promptSelect({
         message: 'Select environment',
         choices: environments.map((env) => ({
@@ -269,7 +164,6 @@ export async function deployLocalImage(options: DeployLocalImageOptions): Promis
       environmentName =
         environments.find((e) => e.id === environmentId)?.name ?? 'production'
     } else {
-      // Non-interactive: use production or first environment
       const prodEnv = environments.find((e) => e.name === 'production')
       if (prodEnv) {
         environmentId = prodEnv.id
@@ -285,7 +179,104 @@ export async function deployLocalImage(options: DeployLocalImageOptions): Promis
     return
   }
 
-  // Show deployment preview
+  info(`Environment: ${colors.bold(environmentName)}`)
+
+  // ─── Step 3: Resolve Dockerfile and build image ──────────────────────────
+  let imageName: string
+  let didBuild = false
+
+  const shouldBuild = !options.noBuild && !options.image
+
+  if (shouldBuild) {
+    let dockerfilePath = options.dockerfile || 'Dockerfile'
+    const contextPath = options.context || '.'
+    let resolvedDockerfile = resolve(dockerfilePath)
+    const resolvedContext = resolve(contextPath)
+    let generatedBuildArgs: string[] = []
+
+    // Check if Dockerfile exists — if not, try to generate one from the project's preset
+    if (!existsSync(resolvedDockerfile)) {
+      const generated = await tryGenerateDockerfile(options.project)
+
+      if (generated) {
+        resolvedDockerfile = generated.dockerfilePath
+        generatedBuildArgs = generated.buildArgs
+        success(`Dockerfile generated from ${colors.bold(generated.preset)} preset`)
+      } else {
+        warning(`Dockerfile not found: ${resolvedDockerfile}`)
+        info('Options:')
+        info('  1. Create a Dockerfile in the current directory')
+        info('  2. Specify a Dockerfile path: --dockerfile <path>')
+        info('  3. Skip build and use existing image: --image <image-name>')
+        return
+      }
+    }
+
+    const allBuildArgs = [...generatedBuildArgs, ...(options.buildArg || [])]
+
+    const dirName = basename(process.cwd())
+    const timestamp = Date.now()
+    imageName = options.tag || `${projectName || dirName}:local-${timestamp}`
+
+    newline()
+    box(
+      `Dockerfile: ${colors.bold(resolvedDockerfile)}\n` +
+        `Context: ${colors.bold(resolvedContext)}\n` +
+        `Image Tag: ${colors.bold(imageName)}` +
+        (allBuildArgs.length ? `\nBuild Args: ${colors.bold(allBuildArgs.join(', '))}` : ''),
+      `${icons.package} Docker Build`
+    )
+    newline()
+
+    startSpinner('Building Docker image...')
+
+    try {
+      await dockerBuild({
+        dockerfile: resolvedDockerfile,
+        context: resolvedContext,
+        tag: imageName,
+        buildArgs: allBuildArgs,
+        onOutput: (line) => {
+          const trimmed = line.trim()
+          if (trimmed) {
+            updateSpinner(`Building: ${trimmed.substring(0, 60)}${trimmed.length > 60 ? '...' : ''}`)
+          }
+        },
+      })
+      succeedSpinner(`Image built: ${imageName}`)
+      didBuild = true
+    } catch (err) {
+      failSpinner('Docker build failed')
+      if (err instanceof Error) {
+        warning(err.message)
+      }
+      return
+    }
+  } else if (options.image) {
+    imageName = options.image
+
+    startSpinner('Verifying local Docker image...')
+
+    const imageExists = await checkImageExists(imageName)
+    if (!imageExists) {
+      failSpinner(`Image "${imageName}" not found locally`)
+      info('Make sure the image exists by running: docker images')
+      info('Or remove --image to build from Dockerfile')
+      return
+    }
+
+    succeedSpinner(`Found local image: ${imageName}`)
+  } else {
+    warning('No image specified and build is disabled')
+    info('Use: temps deploy:local-image --image <image-name>')
+    info('Or remove --no-build to build from Dockerfile')
+    return
+  }
+
+  // ─── Step 4: Show deployment preview ─────────────────────────────────────
+  const imageSize = await getImageSize(imageName)
+  info(`Image size: ${formatFileSize(imageSize)}`)
+
   newline()
   box(
     `Project: ${colors.bold(projectName)}\n` +
@@ -297,7 +288,7 @@ export async function deployLocalImage(options: DeployLocalImageOptions): Promis
   )
   newline()
 
-  // Export image using docker save to a temp file
+  // ─── Step 5: Export, upload, and deploy ──────────────────────────────────
   const tempFilename = `temps-image-${Date.now()}.tar`
   const tempFilePath = join(tmpdir(), tempFilename)
 
@@ -317,7 +308,6 @@ export async function deployLocalImage(options: DeployLocalImageOptions): Promis
     return
   }
 
-  // Check size limit (1GB)
   const MAX_SIZE = 1024 * 1024 * 1024
   if (exportedSize > MAX_SIZE) {
     warning(`Image size (${formatFileSize(exportedSize)}) exceeds maximum allowed (1 GB)`)
@@ -325,7 +315,6 @@ export async function deployLocalImage(options: DeployLocalImageOptions): Promis
     return
   }
 
-  // Upload to server
   startSpinner('Uploading image to server...')
 
   const apiUrl = config.get('apiUrl')
@@ -334,7 +323,6 @@ export async function deployLocalImage(options: DeployLocalImageOptions): Promis
   try {
     const uploadUrl = `${apiUrl}/projects/${projectData.id}/environments/${environmentId}/deploy/image-upload`
 
-    // Build query string for tag
     const queryParams = new URLSearchParams()
     if (options.tag) {
       queryParams.set('tag', options.tag)
@@ -343,17 +331,13 @@ export async function deployLocalImage(options: DeployLocalImageOptions): Promis
       ? `${uploadUrl}?${queryParams.toString()}`
       : uploadUrl
 
-    // Stream file upload using Bun's native file streaming
     const file = Bun.file(tempFilePath)
     const filename = `${imageName.replace(/[/:]/g, '-')}.tar`
 
-    // Create multipart boundary
     const boundary = `----BunFormBoundary${Date.now().toString(16)}`
 
-    // Build multipart body as a stream
     const fileStream = file.stream()
 
-    // Multipart header and footer
     const header = [
       `--${boundary}`,
       `Content-Disposition: form-data; name="file"; filename="${filename}"`,
@@ -367,15 +351,12 @@ export async function deployLocalImage(options: DeployLocalImageOptions): Promis
     const headerBytes = new TextEncoder().encode(header)
     const footerBytes = new TextEncoder().encode(footer)
 
-    // Create a combined stream: header + file + footer
     let uploadedBytes = 0
 
     const combinedStream = new ReadableStream({
       async start(controller) {
-        // Send header
         controller.enqueue(headerBytes)
 
-        // Stream file chunks
         const reader = fileStream.getReader()
         try {
           while (true) {
@@ -389,7 +370,6 @@ export async function deployLocalImage(options: DeployLocalImageOptions): Promis
           reader.releaseLock()
         }
 
-        // Send footer
         controller.enqueue(footerBytes)
         controller.close()
       },
@@ -405,7 +385,6 @@ export async function deployLocalImage(options: DeployLocalImageOptions): Promis
       duplex: 'half',
     } as RequestInit)
 
-    // Clean up temp file
     await unlink(tempFilePath).catch(() => {})
 
     if (!uploadResponse.ok) {
@@ -429,17 +408,15 @@ export async function deployLocalImage(options: DeployLocalImageOptions): Promis
 
     succeedSpinner(`Deployment started: ${deployment.slug}`)
 
-    // Wait for completion if requested
     if (options.wait !== false) {
       const result = await watchDeployment({
         projectId: projectData.id,
         deploymentId: deployment.id,
-        timeoutSecs: parseInt(options.timeout || '600', 10), // Longer default for image uploads
+        timeoutSecs: parseInt(options.timeout || '600', 10),
         projectName,
       })
 
       if (!result.success) {
-        // Exit with error code for CI/CD
         process.exitCode = 1
       }
     } else {
@@ -472,12 +449,10 @@ async function dockerBuild(options: DockerBuildOptions): Promise<void> {
       '-t', options.tag,
     ]
 
-    // Add build args
     for (const arg of options.buildArgs) {
       args.push('--build-arg', arg)
     }
 
-    // Add context path
     args.push(options.context)
 
     const docker = spawn('docker', args, {
@@ -497,7 +472,6 @@ async function dockerBuild(options: DockerBuildOptions): Promise<void> {
 
     docker.stderr.on('data', (chunk: Buffer) => {
       stderr += chunk.toString()
-      // Docker build outputs progress to stderr
       const lines = chunk.toString().split('\n')
       for (const line of lines) {
         if (line.trim() && options.onOutput) {
@@ -615,4 +589,131 @@ function formatFileSize(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+}
+
+// ─── Dockerfile Generation ───────────────────────────────────────────────────
+
+interface GeneratedDockerfile {
+  dockerfilePath: string
+  buildArgs: string[]
+  preset: string
+}
+
+/**
+ * Try to generate a Dockerfile from the project's preset via the API.
+ * Returns null if the project has no preset or generation fails.
+ */
+async function tryGenerateDockerfile(
+  projectSlug?: string
+): Promise<GeneratedDockerfile | null> {
+  const slug = projectSlug ?? config.get('defaultProject')
+  if (!slug) return null
+
+  // Fetch the project to get its preset
+  let preset: string | null | undefined
+  try {
+    const isNumericId = /^\d+$/.test(slug)
+    if (isNumericId) {
+      const { data } = await getProject({
+        client,
+        path: { id: parseInt(slug, 10) },
+      })
+      preset = (data as Record<string, unknown>)?.preset as string | undefined
+    } else {
+      const { data } = await getProjectBySlug({
+        client,
+        path: { slug },
+      })
+      preset = data?.preset
+    }
+  } catch {
+    return null
+  }
+
+  if (!preset || preset === 'dockerfile') return null
+
+  info(`No Dockerfile found. Generating from ${colors.bold(preset)} preset...`)
+
+  // Detect local package manager
+  const packageManager = detectLocalPackageManager()
+
+  try {
+    const { data, error: apiError } = await generatePresetDockerfile({
+      client,
+      path: { slug: preset },
+      body: {
+        package_manager: packageManager,
+        project_name: slug,
+        use_buildkit: true,
+      },
+    })
+
+    if (apiError || !data) {
+      const errorMsg = apiError
+        ? (typeof apiError === 'object' && apiError !== null && 'detail' in apiError
+            ? String((apiError as Record<string, unknown>).detail)
+            : JSON.stringify(apiError))
+        : 'No data returned'
+      warning(`Failed to generate Dockerfile: ${errorMsg}`)
+      return null
+    }
+
+    // The API client may return the response as a parsed object or as a raw
+    // JSON string (when Content-Type is not application/json). Handle both.
+    let parsed: Record<string, unknown>
+    if (typeof data === 'string') {
+      try {
+        parsed = JSON.parse(data) as Record<string, unknown>
+      } catch {
+        warning('Failed to generate Dockerfile: could not parse API response')
+        return null
+      }
+    } else {
+      parsed = data as Record<string, unknown>
+    }
+
+    const dockerfileContent =
+      typeof parsed.dockerfile === 'string' ? parsed.dockerfile : undefined
+    const buildArgsObj =
+      parsed.build_args && typeof parsed.build_args === 'object'
+        ? (parsed.build_args as Record<string, string>)
+        : {}
+    const presetSlug = typeof parsed.preset === 'string' ? parsed.preset : preset
+
+    if (!dockerfileContent) {
+      warning(
+        `Failed to generate Dockerfile: unexpected response (keys: ${Object.keys(parsed).join(', ')})`
+      )
+      return null
+    }
+
+    // Write to a temp file
+    const tempDir = join(tmpdir(), `temps-dockerfile-${Date.now()}`)
+    mkdirSync(tempDir, { recursive: true })
+    const dockerfilePath = join(tempDir, 'Dockerfile')
+    writeFileSync(dockerfilePath, dockerfileContent)
+
+    // Convert build args to KEY=VALUE format
+    const buildArgs = Object.entries(buildArgsObj).map(
+      ([key, value]) => `${key}=${value}`
+    )
+
+    return { dockerfilePath, buildArgs, preset: presetSlug }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    warning(`Failed to generate Dockerfile: ${msg}`)
+    return null
+  }
+}
+
+/**
+ * Detect the package manager by checking for lockfiles in the current directory.
+ */
+function detectLocalPackageManager(): string {
+  const cwd = process.cwd()
+  if (existsSync(join(cwd, 'pnpm-lock.yaml'))) return 'pnpm'
+  if (existsSync(join(cwd, 'yarn.lock'))) return 'yarn'
+  if (existsSync(join(cwd, 'bun.lockb')) || existsSync(join(cwd, 'bun.lock'))) return 'bun'
+  if (existsSync(join(cwd, 'package-lock.json'))) return 'npm'
+  return 'npm'
 }

@@ -150,10 +150,10 @@ pub fn extract_referrer_hostname(referrer: &str) -> Option<String> {
 
     // Fallback: manual extraction
     let referrer = referrer.trim();
-    let without_protocol = if referrer.starts_with("https://") {
-        &referrer[8..]
-    } else if referrer.starts_with("http://") {
-        &referrer[7..]
+    let without_protocol = if let Some(stripped) = referrer.strip_prefix("https://") {
+        stripped
+    } else if let Some(stripped) = referrer.strip_prefix("http://") {
+        stripped
     } else {
         referrer
     };

@@ -18,11 +18,13 @@ use crate::externalsvc::rustfs::RustfsConfig;
 use crate::externalsvc::s3::S3InputConfig;
 use crate::ExternalServiceManager;
 
+/// Cache of active connections by (service_id, database_name)
+type ConnectionCache = HashMap<(i32, String), Arc<dyn DataSource>>;
+
 /// Service for managing query connections to external services
 pub struct QueryService {
     external_service_manager: Arc<ExternalServiceManager>,
-    /// Cache of active connections by (service_id, database_name)
-    connections: Arc<RwLock<HashMap<(i32, String), Arc<dyn DataSource>>>>,
+    connections: Arc<RwLock<ConnectionCache>>,
 }
 
 impl QueryService {
@@ -93,7 +95,7 @@ impl QueryService {
                     &config.host,
                     port,
                     &config.username,
-                    &config.password.unwrap_or_else(|| "".to_string()),
+                    &config.password.unwrap_or_default(),
                     database, // Use the requested database, not config.database
                 )
                 .await
@@ -155,7 +157,7 @@ impl QueryService {
 
                 // Build connection string with URL-encoded credentials
                 let port = config.port.unwrap_or_else(|| "27017".to_string());
-                let password = config.password.unwrap_or_else(|| "".to_string());
+                let password = config.password.unwrap_or_default();
 
                 // URL-encode username and password to handle special characters
                 let encoded_username = urlencoding::encode(&config.username);
@@ -190,7 +192,7 @@ impl QueryService {
 
                 // Build connection string with URL-encoded password
                 let port = config.port.unwrap_or_else(|| "6379".to_string());
-                let password = config.password.unwrap_or_else(|| "".to_string());
+                let password = config.password.unwrap_or_default();
 
                 let connection_string = if password.is_empty() {
                     format!("redis://{}:{}", config.host, port)
@@ -219,7 +221,7 @@ impl QueryService {
                 })?;
 
                 let port = config.port.unwrap_or_else(|| "6379".to_string());
-                let password = config.password.unwrap_or_else(|| "".to_string());
+                let password = config.password.unwrap_or_default();
 
                 let connection_string = if password.is_empty() {
                     format!("redis://{}:{}", config.host, port)

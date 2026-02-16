@@ -267,6 +267,9 @@ impl TempsPlugin for DeploymentsPlugin {
             .get_service::<temps_blob::BlobService>()
             .expect("BlobService must be registered before configuring routes");
 
+        // Get audit service for logging write operations
+        let audit_service = context.require_service::<dyn temps_core::AuditLogger>();
+
         // Get data directory for local file storage
         let data_dir = config_service.data_dir();
 
@@ -283,6 +286,7 @@ impl TempsPlugin for DeploymentsPlugin {
             blob_service,
             data_dir,
             image_builder,
+            audit_service,
         });
 
         let deployments_routes = handlers::deployments::configure_routes();

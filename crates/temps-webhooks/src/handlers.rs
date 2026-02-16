@@ -3,7 +3,7 @@
 use crate::events::WebhookEventType;
 use crate::service::{CreateWebhookRequest, UpdateWebhookRequest, WebhookService};
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -14,17 +14,48 @@ use std::sync::Arc;
 use temps_auth::{permission_guard, RequireAuth};
 use temps_core::error_builder::ErrorBuilder;
 use temps_core::problemdetails::Problem;
+use temps_core::{AuditContext, AuditLogger, AuditOperation, RequestMetadata};
 use tracing::{error, info};
 use utoipa::{OpenApi, ToSchema};
 
 /// Shared state for webhook handlers
 pub struct WebhookState {
     pub webhook_service: Arc<WebhookService>,
+    pub audit_service: Arc<dyn AuditLogger>,
 }
 
 impl WebhookState {
-    pub fn new(webhook_service: Arc<WebhookService>) -> Self {
-        Self { webhook_service }
+    pub fn new(webhook_service: Arc<WebhookService>, audit_service: Arc<dyn AuditLogger>) -> Self {
+        Self {
+            webhook_service,
+            audit_service,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct WebhookAudit {
+    context: AuditContext,
+    webhook_id: i32,
+    action: String,
+}
+
+impl AuditOperation for WebhookAudit {
+    fn operation_type(&self) -> String {
+        self.action.clone()
+    }
+    fn user_id(&self) -> i32 {
+        self.context.user_id
+    }
+    fn ip_address(&self) -> Option<String> {
+        self.context.ip_address.clone()
+    }
+    fn user_agent(&self) -> &str {
+        &self.context.user_agent
+    }
+    fn serialize(&self) -> anyhow::Result<String> {
+        serde_json::to_string(self)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize audit operation {}", e))
     }
 }
 
@@ -189,7 +220,8 @@ pub struct ListDeliveriesQuery {
         (status = 500, description = "Internal server error")
     ),
     params(
-        ("project_id" = i32, Path, description = "Project ID")
+        ("project_id" = i32, Path, description = "Project ID"),
+        temps_core::PaginationParams,
     ),
     tag = "Webhooks",
     security(("bearer_auth" = []))
@@ -198,10 +230,17 @@ async fn list_webhooks(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<WebhookState>>,
     Path(project_id): Path<i32>,
+    Query(pagination): Query<temps_core::PaginationParams>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, WebhooksRead);
 
-    match state.webhook_service.list_webhooks(project_id).await {
+    let (page, page_size) = pagination.normalize();
+
+    match state
+        .webhook_service
+        .list_webhooks_paginated(project_id, page, page_size)
+        .await
+    {
         Ok(webhooks) => {
             let responses: Vec<WebhookResponse> = webhooks.into_iter().map(Into::into).collect();
             Ok(Json(responses))
@@ -286,6 +325,7 @@ async fn create_webhook(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<WebhookState>>,
     Path(project_id): Path<i32>,
+    Extension(metadata): Extension<RequestMetadata>,
     Json(body): Json<CreateWebhookRequestBody>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, WebhooksCreate);
@@ -315,6 +355,20 @@ async fn create_webhook(
     match state.webhook_service.create_webhook(request).await {
         Ok(webhook) => {
             info!("Created webhook {} for project {}", webhook.id, project_id);
+
+            let audit = WebhookAudit {
+                context: AuditContext {
+                    user_id: auth.user_id(),
+                    ip_address: Some(metadata.ip_address.clone()),
+                    user_agent: metadata.user_agent.clone(),
+                },
+                webhook_id: webhook.id,
+                action: "WEBHOOK_CREATED".to_string(),
+            };
+            if let Err(e) = state.audit_service.create_audit_log(&audit).await {
+                error!("Failed to create audit log: {}", e);
+            }
+
             Ok((StatusCode::CREATED, Json(WebhookResponse::from(webhook))))
         }
         Err(e) => {
@@ -351,6 +405,7 @@ async fn update_webhook(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<WebhookState>>,
     Path((project_id, webhook_id)): Path<(i32, i32)>,
+    Extension(metadata): Extension<RequestMetadata>,
     Json(body): Json<UpdateWebhookRequestBody>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, WebhooksWrite);
@@ -386,6 +441,20 @@ async fn update_webhook(
     {
         Ok(Some(webhook)) => {
             info!("Updated webhook {}", webhook_id);
+
+            let audit = WebhookAudit {
+                context: AuditContext {
+                    user_id: auth.user_id(),
+                    ip_address: Some(metadata.ip_address.clone()),
+                    user_agent: metadata.user_agent.clone(),
+                },
+                webhook_id,
+                action: "WEBHOOK_UPDATED".to_string(),
+            };
+            if let Err(e) = state.audit_service.create_audit_log(&audit).await {
+                error!("Failed to create audit log: {}", e);
+            }
+
             Ok(Json(WebhookResponse::from(webhook)))
         }
         Ok(None) => Err(ErrorBuilder::new(StatusCode::NOT_FOUND)
@@ -423,6 +492,7 @@ async fn delete_webhook(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<WebhookState>>,
     Path((project_id, webhook_id)): Path<(i32, i32)>,
+    Extension(metadata): Extension<RequestMetadata>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, WebhooksDelete);
 
@@ -439,6 +509,20 @@ async fn delete_webhook(
     match state.webhook_service.delete_webhook(webhook_id).await {
         Ok(true) => {
             info!("Deleted webhook {}", webhook_id);
+
+            let audit = WebhookAudit {
+                context: AuditContext {
+                    user_id: auth.user_id(),
+                    ip_address: Some(metadata.ip_address.clone()),
+                    user_agent: metadata.user_agent.clone(),
+                },
+                webhook_id,
+                action: "WEBHOOK_DELETED".to_string(),
+            };
+            if let Err(e) = state.audit_service.create_audit_log(&audit).await {
+                error!("Failed to create audit log: {}", e);
+            }
+
             Ok(StatusCode::NO_CONTENT)
         }
         Ok(false) => Err(ErrorBuilder::new(StatusCode::NOT_FOUND)
@@ -595,7 +679,8 @@ async fn get_delivery(
 async fn retry_delivery(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<WebhookState>>,
-    Path((_project_id, _webhook_id, delivery_id)): Path<(i32, i32, i32)>,
+    Path((_project_id, webhook_id, delivery_id)): Path<(i32, i32, i32)>,
+    Extension(metadata): Extension<RequestMetadata>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, WebhooksWrite);
 
@@ -605,6 +690,20 @@ async fn retry_delivery(
                 "Retried delivery {}, success: {}",
                 delivery_id, result.success
             );
+
+            let audit = WebhookAudit {
+                context: AuditContext {
+                    user_id: auth.user_id(),
+                    ip_address: Some(metadata.ip_address.clone()),
+                    user_agent: metadata.user_agent.clone(),
+                },
+                webhook_id,
+                action: "WEBHOOK_DELIVERY_RETRIED".to_string(),
+            };
+            if let Err(e) = state.audit_service.create_audit_log(&audit).await {
+                error!("Failed to create audit log: {}", e);
+            }
+
             Ok(Json(serde_json::json!({
                 "success": result.success,
                 "status_code": result.status_code,

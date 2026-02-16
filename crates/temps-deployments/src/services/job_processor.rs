@@ -1128,12 +1128,13 @@ mod tests {
             .create_deployment_jobs(deployment.id)
             .await?;
 
-        // Verify jobs were created (nextjs project should create 6 jobs including configure_crons and scan_vulnerabilities)
+        // Verify jobs were created (nextjs project should create 7 jobs including
+        // configure_crons, scan_vulnerabilities, and capture_source_maps)
         let job_ids: Vec<String> = jobs.iter().map(|j| j.job_id.clone()).collect();
         assert_eq!(
             jobs.len(),
-            6,
-            "Expected 6 jobs but got {}: {:?}",
+            7,
+            "Expected 7 jobs but got {}: {:?}",
             jobs.len(),
             job_ids
         );
@@ -1145,6 +1146,7 @@ mod tests {
         assert!(job_ids.contains(&"mark_deployment_complete".to_string()));
         assert!(job_ids.contains(&"configure_crons".to_string()));
         assert!(job_ids.contains(&"scan_vulnerabilities".to_string()));
+        assert!(job_ids.contains(&"capture_source_maps".to_string()));
 
         // Verify all jobs are in pending state
         for job in &jobs {

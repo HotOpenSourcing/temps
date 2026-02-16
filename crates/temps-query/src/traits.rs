@@ -148,23 +148,6 @@ pub trait ItemAccess: DataSource {
     ) -> Result<()>;
 }
 
-/// Optional trait for SQL-based sources (PostgreSQL, MySQL, etc.)
-#[async_trait]
-pub trait SqlFeature: DataSource {
-    /// Execute raw SQL query
-    async fn execute_sql(
-        &self,
-        sql: &str,
-        params: Option<Vec<serde_json::Value>>,
-    ) -> Result<QueryResult>;
-
-    /// Explain query execution plan
-    async fn explain(&self, sql: &str) -> Result<String>;
-
-    /// Validate SQL syntax
-    fn validate_sql(&self, sql: &str) -> Result<()>;
-}
-
 /// Optional trait for sources supporting transactions
 #[async_trait]
 pub trait Transactional: DataSource {

@@ -834,7 +834,12 @@ impl ContainerDeployer for DockerRuntime {
             exposed_ports.insert(container_port_key, HashMap::new());
         }
 
-        // Create host config
+        // Create host config with log rotation to prevent unbounded disk growth
+        let log_config = request
+            .log_config
+            .as_ref()
+            .map(|lc| lc.to_bollard_log_config());
+
         let host_config = bollard::models::HostConfig {
             port_bindings: Some(port_bindings),
             network_mode: Some(self.network_name.clone()),
@@ -850,6 +855,7 @@ impl ContainerDeployer for DockerRuntime {
                 .resource_limits
                 .cpu_limit
                 .map(|cores| (cores * 1_000_000_000.0) as i64),
+            log_config,
             ..Default::default()
         };
 
@@ -1073,9 +1079,7 @@ impl ContainerDeployer for DockerRuntime {
                     .as_ref()
                     .and_then(|cs| cs.online_cpus)
                     .unwrap_or(1) as f64;
-                ((cpu_delta / system_delta) * num_cpus * 100.0)
-                    .min(100.0)
-                    .max(0.0)
+                ((cpu_delta / system_delta) * num_cpus * 100.0).clamp(0.0, 100.0)
             } else {
                 0.0
             }
@@ -1086,15 +1090,11 @@ impl ContainerDeployer for DockerRuntime {
         // Extract memory stats
         let memory_stats = stats_data.memory_stats.as_ref();
         let memory_bytes = memory_stats.and_then(|ms| ms.usage).unwrap_or(0) as u64;
-        let memory_limit_bytes = memory_stats.and_then(|ms| ms.limit).map(|l| l as u64);
+        let memory_limit_bytes = memory_stats.and_then(|ms| ms.limit);
 
         let memory_percent = if let Some(limit) = memory_limit_bytes {
             if limit > 0 {
-                Some(
-                    ((memory_bytes as f64 / limit as f64) * 100.0)
-                        .min(100.0)
-                        .max(0.0),
-                )
+                Some(((memory_bytes as f64 / limit as f64) * 100.0).clamp(0.0, 100.0))
             } else {
                 None
             }
@@ -1108,8 +1108,8 @@ impl ContainerDeployer for DockerRuntime {
         let (network_rx_bytes, network_tx_bytes) =
             if let Some(net_stat) = networks_stats.values().next() {
                 (
-                    net_stat.rx_bytes.unwrap_or(0) as u64,
-                    net_stat.tx_bytes.unwrap_or(0) as u64,
+                    net_stat.rx_bytes.unwrap_or(0),
+                    net_stat.tx_bytes.unwrap_or(0),
                 )
             } else {
                 (0, 0)
@@ -1220,7 +1220,8 @@ impl ContainerRuntime for DockerRuntime {
 mod docker_tests {
     use super::*;
     use crate::{
-        BuildRequest, DeployRequest, PortMapping, Protocol, ResourceLimits, RestartPolicy,
+        BuildRequest, ContainerLogConfig, DeployRequest, PortMapping, Protocol, ResourceLimits,
+        RestartPolicy,
     };
     use serial_test::serial;
     use std::collections::HashMap;
@@ -1381,6 +1382,7 @@ CMD ["cat", "/hello.txt"]
                     restart_policy: RestartPolicy::Never,
                     log_path: PathBuf::from("/tmp/lifecycle-test.log"),
                     command: Some(vec!["sleep".to_string(), "30".to_string()]),
+                    log_config: Some(ContainerLogConfig::app_default()),
                 };
 
                 let deploy_result = runtime.deploy_container(deploy_request).await;

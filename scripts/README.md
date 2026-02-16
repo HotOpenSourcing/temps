@@ -64,7 +64,7 @@ Next steps:
      git push origin v1.0.0
 
   3. Monitor the release workflow:
-     https://github.com/YOUR_ORG/temps/actions
+     https://github.com/gotempsh/temps/actions
 
 Push now? (y/N)
 ```

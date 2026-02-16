@@ -200,13 +200,9 @@ impl DeploymentService {
             .await?
             .ok_or_else(|| DeploymentError::NotFound("Environment not found".to_string()))?;
 
-        if environment.current_deployment_id.is_none() {
-            return Err(DeploymentError::NotFound(
-                "No active deployment found".to_string(),
-            ));
-        }
-
-        let deployment_id = environment.current_deployment_id.unwrap();
+        let deployment_id = environment
+            .current_deployment_id
+            .ok_or_else(|| DeploymentError::NotFound("No active deployment found".to_string()))?;
 
         // Verify the container belongs to this deployment
         let _container = deployment_containers::Entity::find()
@@ -276,11 +272,10 @@ impl DeploymentService {
             .await?
             .ok_or_else(|| DeploymentError::NotFound("Environment not found".to_string()))?;
 
-        if environment.current_deployment_id.is_none() {
-            return Ok(Vec::new()); // No active deployment, no containers
-        }
-
-        let deployment_id = environment.current_deployment_id.unwrap();
+        let deployment_id = match environment.current_deployment_id {
+            Some(id) => id,
+            None => return Ok(Vec::new()), // No active deployment, no containers
+        };
 
         // Get all containers for this deployment from the database
         let db_containers = deployment_containers::Entity::find()
@@ -554,12 +549,9 @@ impl DeploymentService {
             .await
             .map_err(|e| DeploymentError::Other(e.to_string()))?;
 
-        if project.is_none() {
-            return Err(DeploymentError::NotFound(format!(
-                "project {} not found",
-                project_id
-            )));
-        }
+        let project = project.ok_or_else(|| {
+            DeploymentError::NotFound(format!("project {} not found", project_id))
+        })?;
         debug!("Project found: {:?}", project);
 
         debug!(
@@ -567,8 +559,8 @@ impl DeploymentService {
             project_id, environment_id
         );
         // Check if repo_owner and repo_name are present
-        let repo_owner = project.as_ref().unwrap().repo_owner.clone();
-        let repo_name = project.as_ref().unwrap().repo_name.clone();
+        let repo_owner = project.repo_owner.clone();
+        let repo_name = project.repo_name.clone();
 
         // Validate that they're not empty
         if repo_owner.is_empty() {
@@ -651,7 +643,7 @@ impl DeploymentService {
             "Initiating rollback for project_id: {}, deployment_id: {}, image: {}, environment_id: {}",
             project_id, deployment_id, image_name, environment_id
         );
-        let preset = temps_presets::get_preset_by_slug(&project.preset.as_str())
+        let preset = temps_presets::get_preset_by_slug(project.preset.as_str())
             .ok_or_else(|| DeploymentError::NotFound("Preset not found".to_string()))?;
         // Check if preset is static - if so, just update environment without deploying
         if preset.project_type() == temps_presets::ProjectType::Static {
@@ -688,7 +680,7 @@ impl DeploymentService {
 
             // Step 1: Execute DeployImageJob with external image
             // CRITICAL: Use "deploy_container" as job_id so MarkDeploymentCompleteJob can find the outputs
-            let deploy_job = crate::jobs::DeployImageJobBuilder::new()
+            let mut deploy_builder = crate::jobs::DeployImageJobBuilder::new()
                 .job_id("deploy_container".to_string())
                 .build_job_id("external-image".to_string()) // Placeholder, will use external image instead
                 .target(crate::jobs::DeploymentTarget::Docker {
@@ -723,7 +715,18 @@ impl DeploymentService {
                         .unwrap_or(3000) as u32,
                 )
                 .log_id(rollback_log_id.clone())
-                .log_service(self.log_service.clone())
+                .log_service(self.log_service.clone());
+
+            // Apply container log rotation settings from config
+            if let Ok(settings) = self.config_service.get_settings().await {
+                deploy_builder =
+                    deploy_builder.container_log_config(temps_deployer::ContainerLogConfig::new(
+                        settings.container_logs.max_size.clone(),
+                        settings.container_logs.max_file,
+                    ));
+            }
+
+            let deploy_job = deploy_builder
                 .build(self.deployer.clone())
                 .map_err(|e| DeploymentError::Other(format!("Failed to create deploy job: {}", e)))?
                 .with_external_image_tag(image_name.clone()); // Use existing image without rebuild
@@ -762,6 +765,7 @@ impl DeploymentService {
                 .log_id(rollback_log_id)
                 .log_service(self.log_service.clone())
                 .container_deployer(self.deployer.clone())
+                .queue(self.queue_service.clone())
                 .build()
                 .map_err(|e| {
                     DeploymentError::Other(format!("Failed to create mark complete job: {}", e))
@@ -1180,8 +1184,7 @@ impl DeploymentService {
             .map(|login| login.to_string());
         let commit_date = repo_commit
             .clone()
-            .and_then(|rc| rc.commit.committer.map(|c| c.date))
-            .map(|date| date.unwrap());
+            .and_then(|rc| rc.commit.committer.and_then(|c| c.date));
 
         // Compute the actual URL from the stored slug
         let deployment_url = self
@@ -1953,10 +1956,7 @@ impl DeploymentService {
 
             // Only count deployments with a commit SHA
             if let Some(commit_sha) = deployment.commit_sha {
-                commits_by_date
-                    .entry(date)
-                    .or_insert_with(std::collections::HashSet::new)
-                    .insert(commit_sha);
+                commits_by_date.entry(date).or_default().insert(commit_sha);
             }
         }
 
@@ -2000,6 +2000,19 @@ impl DeploymentService {
             start_date: start_date.to_string(),
             end_date: end_date.to_string(),
         })
+    }
+}
+
+// Implement DeploymentCanceller trait from temps-core
+#[async_trait::async_trait]
+impl temps_core::DeploymentCanceller for DeploymentService {
+    async fn cancel_all_environment_deployments(
+        &self,
+        environment_id: i32,
+    ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+        self.cancel_all_environment_deployments(environment_id)
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
     }
 }
 
@@ -2305,18 +2318,6 @@ mod tests {
             docker_log_service,
             deployer,
         }
-    }
-
-    // Note: test_deployment_to_container_launch_spec has been removed
-    // The deployment_to_container_launch_spec method no longer exists as deployments
-    // are now handled through the workflow system
-    #[tokio::test]
-    #[ignore] // Temporarily ignored - method no longer exists after workflow refactoring
-    async fn test_deployment_to_container_launch_spec_removed(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        // This test has been removed because deployment_to_container_launch_spec
-        // no longer exists after the workflow system refactoring
-        Ok(())
     }
 
     #[tokio::test]
@@ -3598,18 +3599,5 @@ mod tests {
         let container = container.insert(db.as_ref()).await?;
 
         Ok((project, environment, deployment, container))
-    }
-}
-
-// Implement DeploymentCanceller trait from temps-core
-#[async_trait::async_trait]
-impl temps_core::DeploymentCanceller for DeploymentService {
-    async fn cancel_all_environment_deployments(
-        &self,
-        environment_id: i32,
-    ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
-        self.cancel_all_environment_deployments(environment_id)
-            .await
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
     }
 }

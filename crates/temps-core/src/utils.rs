@@ -46,13 +46,35 @@ pub fn mask_sensitive(data: &str) -> String {
 /// assert_eq!(slugify_branch_name("fix/issue#123"), "fix-issue-123");
 /// ```
 pub fn slugify_branch_name(branch: &str) -> String {
-    branch
+    let slugified: String = branch
         .to_lowercase()
-        .replace('/', "-")
-        .replace('_', "-")
+        .replace(['/', '_'], "-")
         .chars()
-        .filter(|c| c.is_alphanumeric() || *c == '-')
-        .collect::<String>()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+
+    // Collapse consecutive dashes into a single dash
+    let mut result = String::with_capacity(slugified.len());
+    let mut prev_dash = false;
+    for c in slugified.chars() {
+        if c == '-' {
+            if !prev_dash {
+                result.push('-');
+            }
+            prev_dash = true;
+        } else {
+            result.push(c);
+            prev_dash = false;
+        }
+    }
+
+    result
         .trim_matches('-')
         .chars()
         .take(63) // DNS label max length

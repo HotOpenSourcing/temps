@@ -376,6 +376,26 @@ mod tests {
         ) -> Result<BuildResult, BuilderError> {
             self.build_image(request.request).await
         }
+
+        async fn inspect_image(
+            &self,
+            _image_name: &str,
+        ) -> Result<temps_deployer::ImageInfo, BuilderError> {
+            Ok(temps_deployer::ImageInfo {
+                id: "sha256:mock".to_string(),
+                architecture: "amd64".to_string(),
+                os: "linux".to_string(),
+                platform: "linux/amd64".to_string(),
+                size_bytes: 0,
+                tags: vec![],
+                created: None,
+                working_dir: None,
+            })
+        }
+
+        fn get_native_platform(&self) -> String {
+            "linux/amd64".to_string()
+        }
     }
 
     fn copy_dir_recursive(src: &PathBuf, dst: &std::path::Path) -> std::io::Result<()> {

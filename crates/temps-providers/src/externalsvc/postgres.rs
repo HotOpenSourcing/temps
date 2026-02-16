@@ -372,6 +372,7 @@ impl PostgresService {
                 typ: Some(bollard::models::MountTypeEnum::VOLUME),
                 ..Default::default()
             }]),
+            log_config: Some(crate::utils::default_service_log_config()),
             ..Default::default()
         };
 
@@ -1155,7 +1156,7 @@ impl ExternalService for PostgresService {
                     e,
                     e.to_string()
                 );
-                anyhow::anyhow!("Failed to upload backup to S3: {}", e.to_string())
+                anyhow::anyhow!("Failed to upload backup to S3: {}", e)
             })?;
 
         info!("Successfully uploaded backup to S3");
@@ -1813,6 +1814,8 @@ impl ExternalService for PostgresService {
 mod tests {
     use super::*;
 
+    use crate::externalsvc::DEPLOYMENT_MODE_MUTEX as ENV_MUTEX;
+
     #[test]
     fn test_postgres_input_config_default_values() {
         let config = PostgresInputConfig {
@@ -1886,12 +1889,12 @@ mod tests {
             let field = properties
                 .get(field_name)
                 .and_then(|v| v.as_object())
-                .expect(&format!("{} field should exist", field_name));
+                .unwrap_or_else(|| panic!("{} field should exist", field_name));
 
             let is_editable = field
                 .get("x-editable")
                 .and_then(|v| v.as_bool())
-                .expect(&format!("{} should have x-editable property", field_name));
+                .unwrap_or_else(|| panic!("{} should have x-editable property", field_name));
 
             assert_eq!(
                 is_editable, should_be_editable,
@@ -1901,6 +1904,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     #[ignore] // Requires Docker
     async fn test_port_change_after_creation() {
@@ -2065,7 +2069,7 @@ mod tests {
         // Test various PostgreSQL image formats
         let test_cases = vec![
             ("postgres:16-alpine", 16),
-            ("postgres:18-alpine", 17),
+            ("postgres:18-alpine", 18),
             ("postgres:16.0-alpine", 16),
             ("postgres:17.2-alpine", 17),
             ("timescale/timescaledb-ha:pg16", 16),
@@ -2204,6 +2208,7 @@ mod tests {
         assert!(v17_version > v16_version, "v17 should be greater than v16");
     }
 
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     async fn test_postgres_v16_to_v17_actual_upgrade() {
         // This test creates a real PostgreSQL 16 container, upgrades it to v17,
@@ -2297,7 +2302,7 @@ mod tests {
         // Connect and verify v16 version
         let connection_string = format!(
             "postgresql://postgres:{}@127.0.0.1:{}/postgres",
-            urlencoding::encode(&password),
+            urlencoding::encode(password),
             port
         );
 
@@ -2574,6 +2579,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "docker-tests")]
     #[tokio::test]
     async fn test_postgres_backup_and_restore_to_s3() {
         use super::super::test_utils::{
@@ -2656,7 +2662,7 @@ mod tests {
         // Create a test database and insert data
         let connection_string = format!(
             "postgresql://postgres:{}@127.0.0.1:{}/postgres",
-            urlencoding::encode(&pg_password),
+            urlencoding::encode(pg_password),
             pg_port
         );
 
@@ -2928,8 +2934,9 @@ mod tests {
 
     #[test]
     fn test_get_effective_address_baremetal_mode() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         // Clear Docker mode to ensure baremetal mode
-        std::env::remove_var("DEPLOYMENT_MODE");
+        unsafe { std::env::remove_var("DEPLOYMENT_MODE") };
 
         let docker = Arc::new(Docker::connect_with_local_defaults().unwrap());
         let service = PostgresService::new("test-effective-addr".to_string(), docker);
@@ -2957,8 +2964,9 @@ mod tests {
 
     #[test]
     fn test_get_effective_address_docker_mode() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         // Set Docker mode
-        std::env::set_var("DEPLOYMENT_MODE", "docker");
+        unsafe { std::env::set_var("DEPLOYMENT_MODE", "docker") };
 
         let docker = Arc::new(Docker::connect_with_local_defaults().unwrap());
         let service = PostgresService::new("test-effective-addr-docker".to_string(), docker);
@@ -2984,14 +2992,13 @@ mod tests {
         assert_eq!(port, "5432"); // Internal port
 
         // Clean up
-        std::env::remove_var("DEPLOYMENT_MODE");
+        unsafe { std::env::remove_var("DEPLOYMENT_MODE") };
     }
 
     #[test]
-    fn test_get_environment_variables_baremetal_mode() {
-        // Clear Docker mode to ensure baremetal mode
-        std::env::remove_var("DEPLOYMENT_MODE");
-
+    fn test_get_environment_variables_always_uses_container_name() {
+        // get_environment_variables always uses container name and internal port
+        // for container-to-container communication, regardless of deployment mode
         let docker = Arc::new(Docker::connect_with_local_defaults().unwrap());
         let service = PostgresService::new("test-env-vars".to_string(), docker);
 
@@ -3003,51 +3010,22 @@ mod tests {
 
         let env_vars = service.get_environment_variables(&params).unwrap();
 
-        // In baremetal mode, should use localhost
-        assert_eq!(env_vars.get("POSTGRES_HOST").unwrap(), "localhost");
-        assert_eq!(env_vars.get("POSTGRES_PORT").unwrap(), "5433");
-        assert!(env_vars
-            .get("POSTGRES_URL")
-            .unwrap()
-            .contains("localhost:5433"));
-    }
-
-    #[test]
-    fn test_get_environment_variables_docker_mode() {
-        // Set Docker mode
-        std::env::set_var("DEPLOYMENT_MODE", "docker");
-
-        let docker = Arc::new(Docker::connect_with_local_defaults().unwrap());
-        let service = PostgresService::new("test-env-vars-docker".to_string(), docker);
-
-        let mut params = HashMap::new();
-        params.insert("port".to_string(), "5433".to_string());
-        params.insert("database".to_string(), "testdb".to_string());
-        params.insert("username".to_string(), "testuser".to_string());
-        params.insert("password".to_string(), "testpass".to_string());
-
-        let env_vars = service.get_environment_variables(&params).unwrap();
-
-        // In Docker mode, should use container name and internal port
+        // Always uses container name and internal port (5432)
         assert_eq!(
             env_vars.get("POSTGRES_HOST").unwrap(),
-            "postgres-test-env-vars-docker"
+            "postgres-test-env-vars"
         );
-        assert_eq!(env_vars.get("POSTGRES_PORT").unwrap(), "5432"); // Internal port
+        assert_eq!(env_vars.get("POSTGRES_PORT").unwrap(), "5432");
         assert!(env_vars
             .get("POSTGRES_URL")
             .unwrap()
-            .contains("postgres-test-env-vars-docker:5432"));
-
-        // Clean up
-        std::env::remove_var("DEPLOYMENT_MODE");
+            .contains("postgres-test-env-vars:5432"));
     }
 
     #[test]
-    fn test_get_docker_environment_variables_baremetal_mode() {
-        // Clear Docker mode to ensure baremetal mode
-        std::env::remove_var("DEPLOYMENT_MODE");
-
+    fn test_get_docker_environment_variables_always_uses_container_name() {
+        // get_docker_environment_variables always uses container name and internal port
+        // for container-to-container communication, regardless of deployment mode
         let docker = Arc::new(Docker::connect_with_local_defaults().unwrap());
         let service = PostgresService::new("test-docker-env".to_string(), docker);
 
@@ -3059,35 +3037,11 @@ mod tests {
 
         let env_vars = service.get_docker_environment_variables(&params).unwrap();
 
-        // In baremetal mode, should use localhost with exposed port
-        assert_eq!(env_vars.get("POSTGRES_HOST").unwrap(), "localhost");
-        assert_eq!(env_vars.get("POSTGRES_PORT").unwrap(), "5434");
-    }
-
-    #[test]
-    fn test_get_docker_environment_variables_docker_mode() {
-        // Set Docker mode
-        std::env::set_var("DEPLOYMENT_MODE", "docker");
-
-        let docker = Arc::new(Docker::connect_with_local_defaults().unwrap());
-        let service = PostgresService::new("test-docker-env-mode".to_string(), docker);
-
-        let mut params = HashMap::new();
-        params.insert("port".to_string(), "5434".to_string());
-        params.insert("database".to_string(), "testdb".to_string());
-        params.insert("username".to_string(), "testuser".to_string());
-        params.insert("password".to_string(), "testpass".to_string());
-
-        let env_vars = service.get_docker_environment_variables(&params).unwrap();
-
-        // In Docker mode, should use container name and internal port
+        // Always uses container name and internal port (5432)
         assert_eq!(
             env_vars.get("POSTGRES_HOST").unwrap(),
-            "postgres-test-docker-env-mode"
+            "postgres-test-docker-env"
         );
-        assert_eq!(env_vars.get("POSTGRES_PORT").unwrap(), "5432"); // Internal port
-
-        // Clean up
-        std::env::remove_var("DEPLOYMENT_MODE");
+        assert_eq!(env_vars.get("POSTGRES_PORT").unwrap(), "5432");
     }
 }

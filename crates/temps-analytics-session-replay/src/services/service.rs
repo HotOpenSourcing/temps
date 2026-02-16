@@ -1401,15 +1401,3 @@ impl SessionReplayService {
         Ok(())
     }
 }
-
-// Tests are commented out for now until we can resolve compilation issues
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use serde_json::json;
-//
-//     #[test]
-//     fn test_unpack_events_not_packed() {
-//         // Test implementation would go here
-//     }
-// }

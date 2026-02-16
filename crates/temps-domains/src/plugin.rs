@@ -103,12 +103,16 @@ impl TempsPlugin for DomainsPlugin {
             // Get DnsProviderService (requires dns plugin to be registered first)
             let dns_provider_service = context.require_service::<DnsProviderService>();
 
+            // Get audit service
+            let audit_service = context.require_service::<dyn temps_core::AuditLogger>();
+
             // Create DomainAppState for handlers
             let domain_app_state = create_domain_app_state_with_dns(
                 tls_service,
                 repository,
                 domain_service,
                 dns_provider_service,
+                audit_service,
             );
             context.register_service(domain_app_state);
 

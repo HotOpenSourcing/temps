@@ -109,7 +109,49 @@ impl GitHubProvider {
             .user_agent("Temps-Engine/1.0")
             .timeout(std::time::Duration::from_secs(30))
             .build()
-            .unwrap()
+            .expect("Failed to build reqwest client with static config")
+    }
+
+    /// Retry configuration for GitHub API calls.
+    fn retry_config() -> temps_core::retry::RetryConfig {
+        temps_core::retry::RetryConfig::new(3)
+            .with_base_delay(std::time::Duration::from_secs(1))
+            .with_max_delay(std::time::Duration::from_secs(10))
+    }
+
+    /// Send an HTTP request with retry logic for transient failures.
+    /// The `build_request` closure is called on each attempt to rebuild the request
+    /// (since reqwest::RequestBuilder is consumed on send).
+    async fn send_with_retry<F>(
+        &self,
+        mut build_request: F,
+    ) -> Result<reqwest::Response, GitProviderError>
+    where
+        F: FnMut() -> reqwest::RequestBuilder,
+    {
+        Self::retry_config()
+            .retry(|| {
+                let request = build_request();
+                async move {
+                    let response = request
+                        .send()
+                        .await
+                        .map_err(|e| GitProviderError::ApiError(e.to_string()))?;
+
+                    // Retry on server errors and rate limits, not on client errors
+                    let status = response.status();
+                    if status.is_server_error() || status.as_u16() == 429 {
+                        let error_text = response.text().await.unwrap_or_default();
+                        return Err(GitProviderError::ApiError(format!(
+                            "HTTP {}: {}",
+                            status, error_text
+                        )));
+                    }
+
+                    Ok(response)
+                }
+            })
+            .await
     }
 
     fn get_headers(&self, access_token: &str) -> reqwest::header::HeaderMap {
@@ -142,19 +184,20 @@ impl GitHubProvider {
 
         let client = self.get_client();
         let params = [
-            ("client_id", client_id),
-            ("client_secret", client_secret),
-            ("refresh_token", refresh_token),
-            ("grant_type", "refresh_token"),
+            ("client_id", client_id.to_string()),
+            ("client_secret", client_secret.to_string()),
+            ("refresh_token", refresh_token.to_string()),
+            ("grant_type", "refresh_token".to_string()),
         ];
 
-        let response = client
-            .post("https://github.com/login/oauth/access_token")
-            .header("Accept", "application/json")
-            .form(&params)
-            .send()
-            .await
-            .map_err(|e| GitProviderError::ApiError(format!("Failed to refresh token: {}", e)))?;
+        let response = self
+            .send_with_retry(|| {
+                client
+                    .post("https://github.com/login/oauth/access_token")
+                    .header("Accept", "application/json")
+                    .form(&params)
+            })
+            .await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -281,12 +324,9 @@ impl GitHubProvider {
             _ => format!("{}/user", self.api_url),
         };
 
-        let response = client
-            .get(&endpoint)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|e| GitProviderError::ApiError(format!("Failed to validate token: {}", e)))?;
+        let response = self
+            .send_with_retry(|| client.get(&endpoint).headers(headers.clone()))
+            .await?;
 
         // Token is valid if we get a 200 OK
         // 401 means unauthorized (invalid token)
@@ -344,18 +384,19 @@ impl GitProviderService for GitHubProvider {
                     // Exchange authorization code for access token
                     let client = self.get_client();
                     let params = [
-                        ("client_id", client_id.as_str()),
-                        ("client_secret", client_secret.as_str()),
-                        ("code", &code),
+                        ("client_id", client_id.to_string()),
+                        ("client_secret", client_secret.to_string()),
+                        ("code", code.clone()),
                     ];
 
-                    let response = client
-                        .post("https://github.com/login/oauth/access_token")
-                        .header("Accept", "application/json")
-                        .form(&params)
-                        .send()
-                        .await
-                        .map_err(|e| GitProviderError::ApiError(e.to_string()))?;
+                    let response = self
+                        .send_with_retry(|| {
+                            client
+                                .post("https://github.com/login/oauth/access_token")
+                                .header("Accept", "application/json")
+                                .form(&params)
+                        })
+                        .await?;
 
                     let token_response: OAuthTokenResponse = response
                         .json()
@@ -421,12 +462,9 @@ impl GitProviderService for GitHubProvider {
             _ => format!("{}/user", self.api_url),
         };
 
-        let response = client
-            .get(&endpoint)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|e| GitProviderError::ApiError(format!("Failed to validate token: {}", e)))?;
+        let response = self
+            .send_with_retry(|| client.get(&endpoint).headers(headers.clone()))
+            .await?;
 
         // Token is valid if we get a 200 OK
         // 401 means unauthorized (invalid token)
@@ -583,12 +621,9 @@ impl GitProviderService for GitHubProvider {
 
             debug!("Fetching page {} from: {}", page, url);
 
-            let response = client
-                .get(&url)
-                .headers(headers.clone())
-                .send()
-                .await
-                .map_err(|e| GitProviderError::ApiError(e.to_string()))?;
+            let response = self
+                .send_with_retry(|| client.get(&url).headers(headers.clone()))
+                .await?;
 
             if !response.status().is_success() {
                 let status = response.status();
@@ -682,12 +717,9 @@ impl GitProviderService for GitHubProvider {
 
         let url = format!("{}/repos/{}/{}", self.api_url, owner, repo);
 
-        let response = client
-            .get(&url)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|e| GitProviderError::ApiError(e.to_string()))?;
+        let response = self
+            .send_with_retry(|| client.get(&url).headers(headers.clone()))
+            .await?;
 
         if !response.status().is_success() {
             return Err(GitProviderError::ApiError(format!(
@@ -834,12 +866,9 @@ impl GitProviderService for GitHubProvider {
             url.push_str(&format!("?ref={}", ref_name));
         }
 
-        let response = client
-            .get(&url)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|e| GitProviderError::ApiError(e.to_string()))?;
+        let response = self
+            .send_with_retry(|| client.get(&url).headers(headers.clone()))
+            .await?;
 
         if !response.status().is_success() {
             return Err(GitProviderError::ApiError(format!(
@@ -882,12 +911,9 @@ impl GitProviderService for GitHubProvider {
             self.api_url, owner, repo, branch
         );
 
-        let response = client
-            .get(&url)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|e| GitProviderError::ApiError(e.to_string()))?;
+        let response = self
+            .send_with_retry(|| client.get(&url).headers(headers.clone()))
+            .await?;
 
         if !response.status().is_success() {
             return Err(GitProviderError::ApiError(format!(
@@ -969,13 +995,9 @@ impl GitProviderService for GitHubProvider {
             active: true,
         };
 
-        let response = client
-            .post(&url)
-            .headers(headers)
-            .json(&request)
-            .send()
-            .await
-            .map_err(|e| GitProviderError::ApiError(e.to_string()))?;
+        let response = self
+            .send_with_retry(|| client.post(&url).headers(headers.clone()).json(&request))
+            .await?;
 
         if !response.status().is_success() {
             return Err(GitProviderError::ApiError(format!(
@@ -1007,12 +1029,9 @@ impl GitProviderService for GitHubProvider {
             self.api_url, owner, repo, webhook_id
         );
 
-        let response = client
-            .delete(&url)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|e| GitProviderError::ApiError(e.to_string()))?;
+        let response = self
+            .send_with_retry(|| client.delete(&url).headers(headers.clone()))
+            .await?;
 
         if !response.status().is_success() {
             return Err(GitProviderError::ApiError(format!(
@@ -1049,12 +1068,9 @@ impl GitProviderService for GitHubProvider {
 
         let url = format!("{}/user", self.api_url);
 
-        let response = client
-            .get(&url)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|e| GitProviderError::ApiError(e.to_string()))?;
+        let response = self
+            .send_with_retry(|| client.get(&url).headers(headers.clone()))
+            .await?;
 
         if !response.status().is_success() {
             return Err(GitProviderError::ApiError(format!(
@@ -1095,11 +1111,7 @@ impl GitProviderService for GitHubProvider {
 
         let url = format!("{}/repos/{}/{}", self.api_url, owner, repo);
 
-        let response = client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| GitProviderError::ApiError(e.to_string()))?;
+        let response = self.send_with_retry(|| client.get(&url)).await?;
 
         Ok(response.status().is_success())
     }
@@ -1162,12 +1174,9 @@ impl GitProviderService for GitHubProvider {
             self.api_url, owner, repo, reference
         );
 
-        let response = client
-            .get(&url)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|e| GitProviderError::ApiError(e.to_string()))?;
+        let response = self
+            .send_with_retry(|| client.get(&url).headers(headers.clone()))
+            .await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -1235,12 +1244,9 @@ impl GitProviderService for GitHubProvider {
             self.api_url, owner, repo, commit_sha
         );
 
-        let response = client
-            .get(&url)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|e| GitProviderError::ApiError(e.to_string()))?;
+        let response = self
+            .send_with_retry(|| client.get(&url).headers(headers.clone()))
+            .await?;
 
         // If we get a 200, the commit exists
         // If we get a 404, the commit doesn't exist
@@ -1288,12 +1294,9 @@ impl GitProviderService for GitHubProvider {
             reqwest::header::HeaderValue::from_static("application/vnd.github.v3.raw"),
         );
 
-        let response = client
-            .get(&url)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|e| GitProviderError::ApiError(format!("Failed to request archive: {}", e)))?;
+        let response = self
+            .send_with_retry(|| client.get(&url).headers(headers.clone()))
+            .await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -1378,15 +1381,9 @@ impl GitProviderService for GitHubProvider {
 
         info!("Creating repository {} (private: {})", name, private);
 
-        let response = client
-            .post(&url)
-            .headers(headers)
-            .json(&request)
-            .send()
-            .await
-            .map_err(|e| {
-                GitProviderError::ApiError(format!("Failed to create repository: {}", e))
-            })?;
+        let response = self
+            .send_with_retry(|| client.post(&url).headers(headers.clone()).json(&request))
+            .await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -1465,12 +1462,9 @@ impl GitProviderService for GitHubProvider {
             self.api_url, owner, repo, branch
         );
 
-        let ref_response = client
-            .get(&ref_url)
-            .headers(headers.clone())
-            .send()
-            .await
-            .map_err(|e| GitProviderError::ApiError(format!("Failed to get branch ref: {}", e)))?;
+        let ref_response = self
+            .send_with_retry(|| client.get(&ref_url).headers(headers.clone()))
+            .await?;
 
         if !ref_response.status().is_success() {
             let status = ref_response.status();
@@ -1508,12 +1502,9 @@ impl GitProviderService for GitHubProvider {
             self.api_url, owner, repo, base_commit_sha
         );
 
-        let commit_response = client
-            .get(&commit_url)
-            .headers(headers.clone())
-            .send()
-            .await
-            .map_err(|e| GitProviderError::ApiError(format!("Failed to get commit: {}", e)))?;
+        let commit_response = self
+            .send_with_retry(|| client.get(&commit_url).headers(headers.clone()))
+            .await?;
 
         #[derive(Deserialize)]
         struct GitCommitResponse {
@@ -1550,15 +1541,14 @@ impl GitProviderService for GitHubProvider {
                 encoding: "base64".to_string(),
             };
 
-            let blob_response = client
-                .post(&blob_url)
-                .headers(headers.clone())
-                .json(&blob_request)
-                .send()
-                .await
-                .map_err(|e| {
-                    GitProviderError::ApiError(format!("Failed to create blob for {}: {}", path, e))
-                })?;
+            let blob_response = self
+                .send_with_retry(|| {
+                    client
+                        .post(&blob_url)
+                        .headers(headers.clone())
+                        .json(&blob_request)
+                })
+                .await?;
 
             if !blob_response.status().is_success() {
                 let status = blob_response.status();
@@ -1600,13 +1590,14 @@ impl GitProviderService for GitHubProvider {
             "tree": tree_entries
         });
 
-        let tree_response = client
-            .post(&tree_url)
-            .headers(headers.clone())
-            .json(&tree_request)
-            .send()
-            .await
-            .map_err(|e| GitProviderError::ApiError(format!("Failed to create tree: {}", e)))?;
+        let tree_response = self
+            .send_with_retry(|| {
+                client
+                    .post(&tree_url)
+                    .headers(headers.clone())
+                    .json(&tree_request)
+            })
+            .await?;
 
         if !tree_response.status().is_success() {
             let status = tree_response.status();
@@ -1641,13 +1632,14 @@ impl GitProviderService for GitHubProvider {
             "parents": [base_commit_sha]
         });
 
-        let new_commit_response = client
-            .post(&new_commit_url)
-            .headers(headers.clone())
-            .json(&commit_request)
-            .send()
-            .await
-            .map_err(|e| GitProviderError::ApiError(format!("Failed to create commit: {}", e)))?;
+        let new_commit_response = self
+            .send_with_retry(|| {
+                client
+                    .post(&new_commit_url)
+                    .headers(headers.clone())
+                    .json(&commit_request)
+            })
+            .await?;
 
         if !new_commit_response.status().is_success() {
             let status = new_commit_response.status();
@@ -1693,13 +1685,14 @@ impl GitProviderService for GitHubProvider {
             "force": false
         });
 
-        let update_ref_response = client
-            .patch(&update_ref_url)
-            .headers(headers)
-            .json(&update_ref_request)
-            .send()
-            .await
-            .map_err(|e| GitProviderError::ApiError(format!("Failed to update ref: {}", e)))?;
+        let update_ref_response = self
+            .send_with_retry(|| {
+                client
+                    .patch(&update_ref_url)
+                    .headers(headers.clone())
+                    .json(&update_ref_request)
+            })
+            .await?;
 
         if !update_ref_response.status().is_success() {
             let status = update_ref_response.status();

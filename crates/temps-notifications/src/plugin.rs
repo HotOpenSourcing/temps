@@ -75,11 +75,15 @@ impl TempsPlugin for NotificationsPlugin {
                 Arc::new(DigestService::new(db.clone(), notification_service.clone()));
             context.register_service(digest_service.clone());
 
+            // Get audit service for logging write operations
+            let audit_service = context.require_service::<dyn temps_core::AuditLogger>();
+
             // Create NotificationState for handlers
             let notification_state = Arc::new(NotificationState::new(
                 notification_service.clone(),
                 notification_preferences_service.clone(),
                 digest_service.clone(),
+                audit_service,
             ));
             context.register_service(notification_state);
 

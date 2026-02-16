@@ -47,8 +47,12 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
             "/projects/from-template",
             post(create_project_from_template),
         )
-        // Presets route
+        // Presets routes
         .route("/presets", get(list_presets))
+        .route(
+            "/presets/{slug}/dockerfile",
+            post(generate_preset_dockerfile),
+        )
         // Template routes
         .route("/templates", get(list_templates))
         .route("/templates/tags", get(list_template_tags))
@@ -91,6 +95,7 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         trigger_project_pipeline,
         get_project_statistics,
         list_presets,
+        generate_preset_dockerfile,
         list_templates,
         get_template,
         list_template_tags,
@@ -111,6 +116,8 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
             ProjectStatisticsResponse,
             super::types::PresetResponse,
             super::types::ListPresetsResponse,
+            super::types::GenerateDockerfileRequest,
+            super::types::GenerateDockerfileResponse,
             super::templates::ListTemplatesQuery,
             super::templates::TemplateResponse,
             super::templates::GitRefResponse,
@@ -962,6 +969,104 @@ pub async fn list_presets(RequireAuth(_auth): RequireAuth) -> Result<impl IntoRe
     let response = super::types::ListPresetsResponse { presets, total };
 
     Ok(Json(response))
+}
+
+/// Generate a Dockerfile from a preset
+///
+/// Returns the Dockerfile content and build arguments for a given preset slug.
+/// The CLI can use this to build Docker images locally without needing a Dockerfile
+/// in the project directory, enabling zero-config deployments.
+#[utoipa::path(
+    post,
+    path = "/presets/{slug}/dockerfile",
+    tag = "Presets",
+    params(
+        ("slug" = String, Path, description = "Preset slug (e.g., nextjs, vite, python)")
+    ),
+    request_body = super::types::GenerateDockerfileRequest,
+    responses(
+        (status = 200, description = "Generated Dockerfile", body = super::types::GenerateDockerfileResponse),
+        (status = 404, description = "Preset not found"),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn generate_preset_dockerfile(
+    RequireAuth(_auth): RequireAuth,
+    Path(slug): Path<String>,
+    Json(request): Json<super::types::GenerateDockerfileRequest>,
+) -> Result<impl IntoResponse, Problem> {
+    let preset = temps_presets::get_preset_by_slug(&slug).ok_or_else(|| {
+        problemdetails::new(StatusCode::NOT_FOUND)
+            .with_title("Preset Not Found")
+            .with_detail(format!("No preset found with slug '{slug}'"))
+    })?;
+
+    // Create a temporary directory with the appropriate lockfile
+    // so the preset can detect the package manager
+    let temp_dir = tempfile::tempdir().map_err(|e| {
+        problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
+            .with_title("Internal Error")
+            .with_detail(format!("Failed to create temp directory: {e}"))
+    })?;
+
+    let temp_path = temp_dir.path();
+
+    // Write the lockfile for the requested package manager
+    let pm = request.package_manager.as_deref().unwrap_or("npm");
+    let lockfile = match pm {
+        "pnpm" => Some("pnpm-lock.yaml"),
+        "yarn" => Some("yarn.lock"),
+        "bun" => Some("bun.lock"),
+        "npm" => Some("package-lock.json"),
+        _ => Some("package-lock.json"),
+    };
+
+    if let Some(lockfile_name) = lockfile {
+        std::fs::write(temp_path.join(lockfile_name), "").map_err(|e| {
+            problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
+                .with_title("Internal Error")
+                .with_detail(format!("Failed to write lockfile: {e}"))
+        })?;
+    }
+
+    // Write a minimal package.json so presets that read it don't fail
+    std::fs::write(
+        temp_path.join("package.json"),
+        r#"{"name":"app","version":"1.0.0"}"#,
+    )
+    .map_err(|e| {
+        problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
+            .with_title("Internal Error")
+            .with_detail(format!("Failed to write package.json: {e}"))
+    })?;
+
+    let project_name = request.project_name.as_deref().unwrap_or("app");
+
+    let install_cmd_owned = request.install_command.clone();
+    let build_cmd_owned = request.build_command.clone();
+    let output_dir_owned = request.output_dir.clone();
+    let build_vars = Vec::new();
+
+    let config = temps_presets::DockerfileConfig {
+        root_local_path: temp_path,
+        local_path: temp_path,
+        install_command: install_cmd_owned.as_deref(),
+        build_command: build_cmd_owned.as_deref(),
+        output_dir: output_dir_owned.as_deref(),
+        build_vars: Some(&build_vars),
+        project_slug: project_name,
+        use_buildkit: request.use_buildkit,
+    };
+
+    let result = preset.dockerfile(config).await;
+
+    Ok(Json(super::types::GenerateDockerfileResponse {
+        dockerfile: result.content,
+        build_args: result.build_args,
+        preset: slug,
+    }))
 }
 
 // ============================================================================

@@ -7,6 +7,7 @@ use crate::services::ExternalDeploymentManager;
 use crate::services::WorkflowExecutionService;
 use crate::DeploymentService;
 use sea_orm::DatabaseConnection;
+use temps_core::AuditLogger;
 
 pub struct AppState {
     pub deployment_service: Arc<DeploymentService>,
@@ -25,6 +26,8 @@ pub struct AppState {
     pub data_dir: std::path::PathBuf,
     /// Image builder for importing Docker images from tarballs
     pub image_builder: Arc<dyn temps_deployer::ImageBuilder>,
+    /// Audit logging service
+    pub audit_service: Arc<dyn AuditLogger>,
 }
 
 use crate::services::types::Deployment;

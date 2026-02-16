@@ -727,7 +727,7 @@ mod tests {
 
     #[test]
     fn test_capabilities() {
-        let capabilities = vec![Capability::KeyValue];
+        let capabilities = [Capability::KeyValue];
         assert!(capabilities.contains(&Capability::KeyValue));
     }
 
