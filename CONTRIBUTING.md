@@ -48,7 +48,7 @@ docker run -d \
   -e POSTGRES_USER=temps \
   -e POSTGRES_PASSWORD=temps \
   -e POSTGRES_DB=temps \
-  timescale/timescaledb:latest-pg16
+  timescale/timescaledb-ha:pg18
 ```
 
 ### Run the Server

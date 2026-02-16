@@ -26,7 +26,7 @@ impl TestDatabase {
             Uuid::new_v4().to_string().replace('-', "")
         );
 
-        let postgres_container = GenericImage::new("timescale/timescaledb", "latest-pg17")
+        let postgres_container = GenericImage::new("timescale/timescaledb-ha", "pg18")
             .with_exposed_port(ContainerPort::Tcp(5432))
             .with_env_var("POSTGRES_DB", "test_db")
             .with_env_var("POSTGRES_USER", "test_user")

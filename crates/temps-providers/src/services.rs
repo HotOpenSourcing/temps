@@ -148,7 +148,7 @@ pub struct ImportExternalServiceRequest {
 pub struct UpdateExternalServiceRequest {
     pub name: Option<String>,
     pub parameters: HashMap<String, serde_json::Value>,
-    /// Docker image to use for the service (e.g., "postgres:17-alpine", "timescale/timescaledb-ha:pg17")
+    /// Docker image to use for the service (e.g., "postgres:18-alpine", "timescale/timescaledb-ha:pg18")
     /// When provided, the service container will be recreated with the new image
     pub docker_image: Option<String>,
 }

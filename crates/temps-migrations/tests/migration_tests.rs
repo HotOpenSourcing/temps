@@ -17,7 +17,7 @@ async fn test_migration_up() -> anyhow::Result<()> {
     }
 
     // Start TimescaleDB container
-    let postgres_container = GenericImage::new("timescale/timescaledb", "latest-pg17")
+    let postgres_container = GenericImage::new("timescale/timescaledb-ha", "pg18")
         .with_env_var("POSTGRES_DB", "postgres")
         .with_env_var("POSTGRES_USER", "postgres")
         .with_env_var("POSTGRES_PASSWORD", "postgres")
@@ -88,7 +88,7 @@ async fn test_migration_down() -> anyhow::Result<()> {
     }
 
     // Start TimescaleDB container
-    let postgres_container = GenericImage::new("timescale/timescaledb", "latest-pg17")
+    let postgres_container = GenericImage::new("timescale/timescaledb-ha", "pg18")
         .with_env_var("POSTGRES_DB", "postgres")
         .with_env_var("POSTGRES_USER", "postgres")
         .with_env_var("POSTGRES_PASSWORD", "postgres")
@@ -162,7 +162,7 @@ async fn test_migration_status() -> anyhow::Result<()> {
     }
 
     // Start TimescaleDB container
-    let postgres_container = GenericImage::new("timescale/timescaledb", "latest-pg17")
+    let postgres_container = GenericImage::new("timescale/timescaledb-ha", "pg18")
         .with_env_var("POSTGRES_DB", "postgres")
         .with_env_var("POSTGRES_USER", "postgres")
         .with_env_var("POSTGRES_PASSWORD", "postgres")
@@ -226,7 +226,7 @@ async fn test_migration_status() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_pgvector_extension() -> anyhow::Result<()> {
     // Start TimescaleDB container
-    let postgres_container = GenericImage::new("timescale/timescaledb", "latest-pg17")
+    let postgres_container = GenericImage::new("timescale/timescaledb-ha", "pg18")
         .with_env_var("POSTGRES_DB", "postgres")
         .with_env_var("POSTGRES_USER", "postgres")
         .with_env_var("POSTGRES_PASSWORD", "postgres")
@@ -336,7 +336,7 @@ async fn test_table_constraints() -> anyhow::Result<()> {
     }
 
     // Start TimescaleDB container
-    let postgres_container = GenericImage::new("timescale/timescaledb", "latest-pg17")
+    let postgres_container = GenericImage::new("timescale/timescaledb-ha", "pg18")
         .with_env_var("POSTGRES_DB", "postgres")
         .with_env_var("POSTGRES_USER", "postgres")
         .with_env_var("POSTGRES_PASSWORD", "postgres")

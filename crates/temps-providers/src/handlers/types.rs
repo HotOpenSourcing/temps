@@ -241,7 +241,7 @@ pub struct CreateExternalServiceRequest {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UpdateExternalServiceRequest {
     pub parameters: HashMap<String, serde_json::Value>,
-    /// Docker image to use for the service (e.g., "postgres:17-alpine", "timescale/timescaledb-ha:pg17")
+    /// Docker image to use for the service (e.g., "postgres:18-alpine", "timescale/timescaledb-ha:pg18")
     /// When provided, the service will be recreated with the new image while preserving data
     #[serde(skip_serializing_if = "Option::is_none")]
     pub docker_image: Option<String>,

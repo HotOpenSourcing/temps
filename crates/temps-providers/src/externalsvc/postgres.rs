@@ -69,7 +69,7 @@ pub struct PostgresInputConfig {
     #[schemars(example = "example_ssl_mode", default = "default_ssl_mode_string")]
     pub ssl_mode: Option<String>,
 
-    /// Docker image to use (defaults to postgres:18-alpine, supports timescaledb/timescaledb-ha:pg17)
+    /// Docker image to use (defaults to postgres:18-alpine, supports timescale/timescaledb-ha:pg18)
     #[serde(default = "default_docker_image")]
     #[schemars(example = "example_docker_image", default = "default_docker_image")]
     pub docker_image: Option<String>,
@@ -557,7 +557,7 @@ impl PostgresService {
     }
 
     /// Extract PostgreSQL major version from Docker image name
-    /// Examples: "postgres:16-alpine" -> 16, "timescale/timescaledb-ha:pg17" -> 17
+    /// Examples: "postgres:16-alpine" -> 16, "timescale/timescaledb-ha:pg18" -> 18
     fn extract_postgres_version(docker_image: &str) -> Result<u32> {
         // Try to extract version from image name
         if let Some(tag) = docker_image.split(':').nth(1) {
@@ -1849,12 +1849,12 @@ mod tests {
             password: Some("mypass".to_string()),
             max_connections: 50,
             ssl_mode: Some("disable".to_string()),
-            docker_image: Some("timescale/timescaledb-ha:pg17".to_string()),
+            docker_image: Some("timescale/timescaledb-ha:pg18".to_string()),
         };
 
         let runtime_config: PostgresConfig = config.into();
 
-        assert_eq!(runtime_config.docker_image, "timescale/timescaledb-ha:pg17");
+        assert_eq!(runtime_config.docker_image, "timescale/timescaledb-ha:pg18");
     }
 
     #[test]
@@ -2073,7 +2073,7 @@ mod tests {
             ("postgres:16.0-alpine", 16),
             ("postgres:17.2-alpine", 17),
             ("timescale/timescaledb-ha:pg16", 16),
-            ("timescale/timescaledb-ha:pg17", 17),
+            ("timescale/timescaledb-ha:pg18", 18),
             ("postgres:15", 15),
             ("postgres:14.5", 14),
         ];
