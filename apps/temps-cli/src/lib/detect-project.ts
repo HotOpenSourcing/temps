@@ -273,6 +273,8 @@ export function isGitRepo(dir?: string): boolean {
   }
 }
 
+// ─── Git Commit Detection ────────────────────────────────────────────────────
+
 // ─── Service Hints Detection ─────────────────────────────────────────────────
 
 import type { ServiceTypeRoute } from '../api/types.gen.js'

@@ -1,5 +1,6 @@
 import { requireAuth, config, credentials } from '../../config/store.js'
-import { setupClient, client } from '../../lib/api-client.js'
+import { setupClient, client, normalizeApiUrl } from '../../lib/api-client.js'
+import { resolveProjectSlug } from '../../config/resolve-project.js'
 import { watchDeployment } from '../../lib/deployment-watcher.jsx'
 import { getProjectBySlug, getProject, getEnvironments } from '../../api/sdk.gen.js'
 import type { EnvironmentResponse } from '../../api/types.gen.js'
@@ -62,15 +63,20 @@ export async function deployStatic(options: DeployStaticOptions): Promise<void> 
     return
   }
 
-  // Get project name
-  const projectName = options.project ?? config.get('defaultProject')
+  // Resolve project
+  const resolved = await resolveProjectSlug(options.project)
 
-  if (!projectName) {
+  if (!resolved) {
     warning('No project specified')
-    info(
-      'Use: temps deploy static --project <project> or set a default with temps configure'
-    )
+    info('Use: bunx @temps-sdk/cli deploy:static --project <slug>')
+    info('Or link this directory: bunx @temps-sdk/cli link <slug>')
     return
+  }
+
+  const projectName = resolved.slug
+
+  if (resolved.source !== 'flag') {
+    info(`Using project ${colors.bold(projectName)} (from ${resolved.source})`)
   }
 
   // Fetch project details
@@ -253,7 +259,7 @@ export async function deployStatic(options: DeployStaticOptions): Promise<void> 
   // Upload static bundle
   startSpinner('Uploading static bundle...')
 
-  const apiUrl = config.get('apiUrl')
+  const apiUrl = normalizeApiUrl(config.get('apiUrl'))
   const apiKey = await credentials.getApiKey()
 
   try {

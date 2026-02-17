@@ -41,8 +41,8 @@ export function VisitorSparkline({
     }
 
     // Process the rolling 24-hour window data
-    // Data comes sorted from newest to oldest, so we reverse it
-    return [...data].reverse().map((item) => ({
+    // Data comes sorted oldest-to-newest (ASC) from the backend
+    return data.map((item) => ({
       hour: item.hour,
       value: item.count || 0,
     }))
@@ -72,6 +72,10 @@ export function VisitorSparkline({
   // Calculate max value for proper scaling
   const maxValue = Math.max(...chartData.map((d) => d.value), 1)
 
+  // Count how many hours have non-zero values to decide whether to show dots
+  const nonZeroCount = chartData.filter((d) => d.value > 0).length
+  const showActiveDot = nonZeroCount <= 3
+
   return (
     <div className={cn('w-full', className)} style={{ height }}>
       <ChartContainer config={chartConfig} className="h-full w-full">
@@ -81,12 +85,12 @@ export function VisitorSparkline({
           margin={{
             left: 0,
             right: 0,
-            top: 0,
+            top: 4,
             bottom: 0,
           }}
           height={height}
         >
-          <YAxis hide domain={[0, maxValue]} />
+          <YAxis hide domain={[0, Math.ceil(maxValue * 1.1)]} />
           <ChartTooltip
             cursor={false}
             content={
@@ -109,7 +113,28 @@ export function VisitorSparkline({
             type="monotone"
             stroke="var(--color-hour)"
             strokeWidth={1.5}
-            dot={false}
+            dot={
+              showActiveDot
+                ? (props: Record<string, unknown>) => {
+                    const { cx, cy, payload } = props as {
+                      cx: number
+                      cy: number
+                      payload: { value: number }
+                    }
+                    if (!payload || payload.value === 0) return <g key={`dot-${cx}`} />
+                    return (
+                      <circle
+                        key={`dot-${cx}`}
+                        cx={cx}
+                        cy={cy}
+                        r={2.5}
+                        fill="var(--color-hour)"
+                        stroke="none"
+                      />
+                    )
+                  }
+                : false
+            }
           />
         </LineChart>
       </ChartContainer>

@@ -1,6 +1,7 @@
 import type { Command } from 'commander'
 import { requireAuth, config, credentials } from '../../config/store.js'
-import { setupClient, getErrorMessage } from '../../lib/api-client.js'
+import { setupClient, normalizeApiUrl, getWebUrl, getErrorMessage } from '../../lib/api-client.js'
+import { requireProjectSlug } from '../../config/resolve-project.js'
 import { colors, header, icons, info, json, keyValue, newline, success, warning, error as errorOutput } from '../../ui/output.js'
 import { promptConfirm, promptSelect, promptText } from '../../ui/prompts.js'
 import { withSpinner } from '../../ui/spinner.js'
@@ -48,7 +49,7 @@ const PERMISSIONS = [
 ]
 
 interface CreateOptions {
-  project: string
+  project?: string
   name?: string
   permissions?: string
   expiresIn?: string
@@ -56,18 +57,18 @@ interface CreateOptions {
 }
 
 interface ListOptions {
-  project: string
+  project?: string
   json?: boolean
 }
 
 interface ShowOptions {
-  project: string
+  project?: string
   id: string
   json?: boolean
 }
 
 interface RemoveOptions {
-  project: string
+  project?: string
   id: string
   force?: boolean
   yes?: boolean
@@ -78,7 +79,7 @@ async function makeRequest<T>(
   path: string,
   body?: unknown
 ): Promise<T> {
-  const apiUrl = config.get('apiUrl')
+  const apiUrl = normalizeApiUrl(config.get('apiUrl'))
   const apiKey = await credentials.getApiKey()
 
   const response = await fetch(`${apiUrl}${path}`, {
@@ -102,34 +103,25 @@ async function makeRequest<T>(
   return response.json() as Promise<T>
 }
 
-async function resolveProjectId(projectIdentifier: string): Promise<number> {
+async function resolveProjectId(projectSlug: string): Promise<number> {
   // Try to parse as number first
-  const numId = parseInt(projectIdentifier, 10)
+  const numId = parseInt(projectSlug, 10)
   if (!isNaN(numId)) {
     return numId
   }
 
   // Otherwise, look up by slug
-  const apiUrl = config.get('apiUrl')
-  const apiKey = await credentials.getApiKey()
+  const projects = await makeRequest<{ projects?: Array<{ slug: string; id: number }> }>(
+    'GET',
+    `/projects?page_size=100`
+  )
 
-  const response = await fetch(`${apiUrl}/api/projects?page_size=100`, {
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-    },
-  })
-
-  if (!response.ok) {
-    throw new Error('Failed to fetch projects')
-  }
-
-  const data = await response.json() as { projects?: Array<{ slug: string; id: number }> }
-  const project = data.projects?.find((p) =>
-    p.slug === projectIdentifier || p.slug.toLowerCase() === projectIdentifier.toLowerCase()
+  const project = projects.projects?.find((p) =>
+    p.slug === projectSlug || p.slug.toLowerCase() === projectSlug.toLowerCase()
   )
 
   if (!project) {
-    throw new Error(`Project "${projectIdentifier}" not found`)
+    throw new Error(`Project "${projectSlug}" not found`)
   }
 
   return project.id
@@ -145,7 +137,7 @@ export function registerTokensCommands(program: Command): void {
     .command('list')
     .alias('ls')
     .description('List deployment tokens for a project')
-    .requiredOption('-p, --project <project>', 'Project slug or ID')
+    .option('-p, --project <project>', 'Project slug or ID')
     .option('--json', 'Output in JSON format')
     .action(listTokensAction)
 
@@ -153,7 +145,7 @@ export function registerTokensCommands(program: Command): void {
     .command('create')
     .alias('add')
     .description('Create a new deployment token')
-    .requiredOption('-p, --project <project>', 'Project slug or ID')
+    .option('-p, --project <project>', 'Project slug or ID')
     .option('-n, --name <name>', 'Token name')
     .option('--permissions <permissions>', 'Comma-separated permissions (e.g., "visitors:enrich,emails:send" or "*" for full access)')
     .option('-e, --expires-in <days>', 'Expires in N days (7, 30, 90, 365, or "never")')
@@ -164,7 +156,7 @@ export function registerTokensCommands(program: Command): void {
     .command('show')
     .alias('get')
     .description('Show deployment token details')
-    .requiredOption('-p, --project <project>', 'Project slug or ID')
+    .option('-p, --project <project>', 'Project slug or ID')
     .requiredOption('--id <id>', 'Token ID')
     .option('--json', 'Output in JSON format')
     .action(showTokenAction)
@@ -173,7 +165,7 @@ export function registerTokensCommands(program: Command): void {
     .command('delete')
     .alias('rm')
     .description('Delete a deployment token')
-    .requiredOption('-p, --project <project>', 'Project slug or ID')
+    .option('-p, --project <project>', 'Project slug or ID')
     .requiredOption('--id <id>', 'Token ID')
     .option('-f, --force', 'Skip confirmation')
     .option('-y, --yes', 'Skip confirmation (alias for --force)')
@@ -190,14 +182,20 @@ async function listTokensAction(options: ListOptions): Promise<void> {
   await requireAuth()
   await setupClient()
 
+  const resolved = await requireProjectSlug(options.project)
+
+  if (resolved.source !== 'flag') {
+    info(`Using project ${colors.bold(resolved.slug)} (from ${resolved.source})`)
+  }
+
   const projectId = await withSpinner('Resolving project...', async () => {
-    return resolveProjectId(options.project)
+    return resolveProjectId(resolved.slug)
   })
 
   const response = await withSpinner('Fetching deployment tokens...', async () => {
     return makeRequest<DeploymentTokenListResponse>(
       'GET',
-      `/api/projects/${projectId}/deployment-tokens`
+      `/projects/${projectId}/deployment-tokens`
     )
   })
 
@@ -213,7 +211,7 @@ async function listTokensAction(options: ListOptions): Promise<void> {
 
   if (tokensList.length === 0) {
     info('No deployment tokens found')
-    info(`Run: temps tokens create -p ${options.project} --name my-token -y`)
+    info(`Run: temps tokens create -p ${resolved.slug} --name my-token -y`)
     newline()
     return
   }
@@ -236,8 +234,14 @@ async function createTokenAction(options: CreateOptions): Promise<void> {
   await requireAuth()
   await setupClient()
 
+  const resolved = await requireProjectSlug(options.project)
+
+  if (resolved.source !== 'flag') {
+    info(`Using project ${colors.bold(resolved.slug)} (from ${resolved.source})`)
+  }
+
   const projectId = await withSpinner('Resolving project...', async () => {
-    return resolveProjectId(options.project)
+    return resolveProjectId(resolved.slug)
   })
 
   let name: string
@@ -317,7 +321,7 @@ async function createTokenAction(options: CreateOptions): Promise<void> {
   const result = await withSpinner('Creating deployment token...', async () => {
     return makeRequest<CreateDeploymentTokenResponse>(
       'POST',
-      `/api/projects/${projectId}/deployment-tokens`,
+      `/projects/${projectId}/deployment-tokens`,
       {
         name,
         permissions,
@@ -354,8 +358,14 @@ async function showTokenAction(options: ShowOptions): Promise<void> {
   await requireAuth()
   await setupClient()
 
+  const resolved = await requireProjectSlug(options.project)
+
+  if (resolved.source !== 'flag') {
+    info(`Using project ${colors.bold(resolved.slug)} (from ${resolved.source})`)
+  }
+
   const projectId = await withSpinner('Resolving project...', async () => {
-    return resolveProjectId(options.project)
+    return resolveProjectId(resolved.slug)
   })
 
   const tokenId = parseInt(options.id, 10)
@@ -367,7 +377,7 @@ async function showTokenAction(options: ShowOptions): Promise<void> {
   const token = await withSpinner('Fetching token...', async () => {
     return makeRequest<DeploymentToken>(
       'GET',
-      `/api/projects/${projectId}/deployment-tokens/${tokenId}`
+      `/projects/${projectId}/deployment-tokens/${tokenId}`
     )
   })
 
@@ -392,8 +402,14 @@ async function deleteTokenAction(options: RemoveOptions): Promise<void> {
   await requireAuth()
   await setupClient()
 
+  const resolved = await requireProjectSlug(options.project)
+
+  if (resolved.source !== 'flag') {
+    info(`Using project ${colors.bold(resolved.slug)} (from ${resolved.source})`)
+  }
+
   const projectId = await withSpinner('Resolving project...', async () => {
-    return resolveProjectId(options.project)
+    return resolveProjectId(resolved.slug)
   })
 
   const tokenId = parseInt(options.id, 10)
@@ -406,7 +422,7 @@ async function deleteTokenAction(options: RemoveOptions): Promise<void> {
   const token = await withSpinner('Fetching token...', async () => {
     return makeRequest<DeploymentToken>(
       'GET',
-      `/api/projects/${projectId}/deployment-tokens/${tokenId}`
+      `/projects/${projectId}/deployment-tokens/${tokenId}`
     )
   })
 
@@ -427,7 +443,7 @@ async function deleteTokenAction(options: RemoveOptions): Promise<void> {
   await withSpinner('Deleting token...', async () => {
     return makeRequest<void>(
       'DELETE',
-      `/api/projects/${projectId}/deployment-tokens/${tokenId}`
+      `/projects/${projectId}/deployment-tokens/${tokenId}`
     )
   })
 

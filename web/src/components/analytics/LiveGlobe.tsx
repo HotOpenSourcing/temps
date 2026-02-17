@@ -259,7 +259,7 @@ export function LiveGlobePage({ project }: LiveGlobePageProps) {
       query: {
         project_id: project.id,
         environment_id: selectedEnvironment,
-        window_minutes: 30,
+        window_minutes: 5,
       },
     }),
     refetchInterval: isPaused ? false : 10000,

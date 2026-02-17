@@ -458,6 +458,16 @@ pub trait GitProviderService: Send + Sync {
         commit_sha: &str,
     ) -> Result<bool, GitProviderError>;
 
+    /// List recent commits for a branch
+    async fn list_commits(
+        &self,
+        access_token: &str,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+        per_page: u32,
+    ) -> Result<Vec<Commit>, GitProviderError>;
+
     /// Create a webhook for repository
     async fn create_webhook(
         &self,

@@ -55,12 +55,14 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock,
+  ExternalLink,
   Globe as MapPinIcon,
   Loader2,
   Monitor,
   Pencil,
   PlayCircle,
   Plus,
+  Share2,
   Smartphone,
   Users as UserIcon,
 } from 'lucide-react'
@@ -404,7 +406,7 @@ export function VisitorDetail({ project, visitorId }: VisitorDetailProps) {
       ) : visitorDetails ? (
         <>
           {/* Visitor Info Cards - Redesigned with better layout */}
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
             {/* Location Card */}
             <Card>
               <CardHeader className="pb-3">
@@ -420,6 +422,29 @@ export function VisitorDetail({ project, visitorId }: VisitorDetailProps) {
                 {visitorDetails?.city && (
                   <div className="text-sm text-muted-foreground mt-1">
                     {visitorDetails.city}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Source / Referrer Card */}
+            <Card>
+              <CardHeader className="pb-3">
+                <CardDescription className="flex items-center gap-1.5">
+                  <Share2 className="h-4 w-4" />
+                  Source
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="text-xl font-semibold">
+                  {visitorDetails?.first_channel || 'Direct'}
+                </div>
+                {visitorDetails?.first_referrer_hostname && (
+                  <div className="flex items-center gap-1 mt-1">
+                    <ExternalLink className="h-3 w-3 text-muted-foreground flex-shrink-0" />
+                    <span className="text-sm text-muted-foreground truncate">
+                      {visitorDetails.first_referrer_hostname}
+                    </span>
                   </div>
                 )}
               </CardContent>

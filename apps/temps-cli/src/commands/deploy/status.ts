@@ -1,8 +1,9 @@
 import { requireAuth } from '../../config/store.js'
 import { setupClient, client, getErrorMessage } from '../../lib/api-client.js'
+import { requireProjectSlug } from '../../config/resolve-project.js'
 import { getDeployment, getProjectBySlug } from '../../api/sdk.gen.js'
 import { withSpinner } from '../../ui/spinner.js'
-import { newline, header, icons, json, colors, formatDate } from '../../ui/output.js'
+import { newline, header, icons, json, colors, info, formatDate } from '../../ui/output.js'
 import { detailsTable, statusBadge } from '../../ui/table.js'
 
 interface StatusOptions {
@@ -15,22 +16,24 @@ export async function status(options: StatusOptions): Promise<void> {
   await requireAuth()
   await setupClient()
 
-  if (!options.project) {
-    throw new Error('Project is required. Use: temps deployments status --project <project> --deployment-id <id>')
+  const resolved = await requireProjectSlug(options.project)
+
+  if (resolved.source !== 'flag') {
+    info(`Using project ${colors.bold(resolved.slug)} (from ${resolved.source})`)
   }
 
   if (!options.deploymentId) {
-    throw new Error('Deployment ID is required. Use: temps deployments status --project <project> --deployment-id <id>')
+    throw new Error('Deployment ID is required. Use: temps deployments status --deployment-id <id>')
   }
 
   // Get project ID from slug
   const { data: projectData, error: projectError } = await getProjectBySlug({
     client,
-    path: { slug: options.project },
+    path: { slug: resolved.slug },
   })
 
   if (projectError || !projectData) {
-    throw new Error(`Project "${options.project}" not found`)
+    throw new Error(`Project "${resolved.slug}" not found`)
   }
 
   const projectId = projectData.id

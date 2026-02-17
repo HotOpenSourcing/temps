@@ -1,12 +1,13 @@
 'use client'
 
-import * as React from 'react'
 import { format } from 'date-fns'
 import { Calendar as CalendarIcon } from 'lucide-react'
 import { DateRange } from 'react-day-picker'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Calendar } from '@/components/ui/calendar'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import {
   Popover,
   PopoverContent,
@@ -72,6 +73,54 @@ export function DateRangePicker({
             numberOfMonths={2}
             className="max-w-screen"
           />
+          {showTime && (
+            <div className="border-t p-3 flex items-end gap-4">
+              <div className="flex-1 space-y-1">
+                <Label className="text-xs text-muted-foreground">
+                  Start time
+                </Label>
+                <Input
+                  type="time"
+                  className="h-8 text-xs"
+                  value={
+                    date?.from ? format(date.from, 'HH:mm') : '00:00'
+                  }
+                  onChange={(e) => {
+                    if (!date?.from || !onDateChange) return
+                    const [hours, minutes] = e.target.value
+                      .split(':')
+                      .map(Number)
+                    const updated = new Date(date.from)
+                    updated.setHours(hours, minutes, 0, 0)
+                    onDateChange({ from: updated, to: date.to })
+                  }}
+                  disabled={!date?.from}
+                />
+              </div>
+              <div className="flex-1 space-y-1">
+                <Label className="text-xs text-muted-foreground">
+                  End time
+                </Label>
+                <Input
+                  type="time"
+                  className="h-8 text-xs"
+                  value={
+                    date?.to ? format(date.to, 'HH:mm') : '23:59'
+                  }
+                  onChange={(e) => {
+                    if (!date?.to || !onDateChange) return
+                    const [hours, minutes] = e.target.value
+                      .split(':')
+                      .map(Number)
+                    const updated = new Date(date.to)
+                    updated.setHours(hours, minutes, 59, 999)
+                    onDateChange({ from: date.from, to: updated })
+                  }}
+                  disabled={!date?.to}
+                />
+              </div>
+            </div>
+          )}
         </PopoverContent>
       </Popover>
     </div>

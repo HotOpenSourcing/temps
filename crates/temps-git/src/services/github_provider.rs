@@ -1267,6 +1267,79 @@ impl GitProviderService for GitHubProvider {
         }
     }
 
+    async fn list_commits(
+        &self,
+        access_token: &str,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+        per_page: u32,
+    ) -> Result<Vec<Commit>, GitProviderError> {
+        let client = self.get_client();
+        let headers = self.get_headers(access_token);
+
+        let url = format!(
+            "{}/repos/{}/{}/commits?sha={}&per_page={}",
+            self.api_url, owner, repo, branch, per_page
+        );
+
+        let response = self
+            .send_with_retry(|| client.get(&url).headers(headers.clone()))
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(GitProviderError::ApiError(format!(
+                "Failed to list commits: {}",
+                response.status()
+            )));
+        }
+
+        #[derive(Deserialize)]
+        struct GitHubCommitItem {
+            sha: String,
+            commit: GitHubCommitItemDetails,
+        }
+
+        #[derive(Deserialize)]
+        struct GitHubCommitItemDetails {
+            message: String,
+            author: Option<GitHubCommitItemAuthor>,
+        }
+
+        #[derive(Deserialize)]
+        struct GitHubCommitItemAuthor {
+            name: Option<String>,
+            email: Option<String>,
+            date: Option<String>,
+        }
+
+        let items: Vec<GitHubCommitItem> = response
+            .json()
+            .await
+            .map_err(|e| GitProviderError::ApiError(e.to_string()))?;
+
+        let commits = items
+            .into_iter()
+            .map(|item| {
+                let author = item.commit.author.as_ref();
+                let date_str = author.and_then(|a| a.date.as_deref()).unwrap_or("");
+                let date = chrono::DateTime::parse_from_rfc3339(date_str)
+                    .map(|dt| dt.into())
+                    .unwrap_or_else(|_| chrono::Utc::now());
+
+                Commit {
+                    sha: item.sha,
+                    message: item.commit.message,
+                    author: author.and_then(|a| a.name.clone()).unwrap_or_default(),
+                    author_email: author.and_then(|a| a.email.clone()).unwrap_or_default(),
+                    date,
+                }
+            })
+            .collect();
+
+        Ok(commits)
+    }
+
     async fn download_archive(
         &self,
         access_token: &str,

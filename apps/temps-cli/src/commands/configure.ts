@@ -110,22 +110,49 @@ async function runConfigureWizard(options: ConfigureOptions & { disableColors?: 
   console.log(colors.muted('This wizard will help you configure the CLI.\n'))
 
   // API URL (skip prompt if provided via flag)
-  const apiUrl = options.apiUrl ?? await promptUrl(
-    `API URL [${colors.muted(currentConfig.apiUrl)}]`,
-    currentConfig.apiUrl
-  )
+  // Use effective value (env var > stored config) as the default
+  const envApiUrl = process.env.TEMPS_API_URL
+  let apiUrl: string
+
+  if (options.apiUrl) {
+    apiUrl = options.apiUrl
+  } else if (envApiUrl) {
+    console.log(`  API URL: ${colors.bold(envApiUrl)} ${colors.muted('(env: TEMPS_API_URL)')}`)
+    console.log(colors.muted('  To change, unset TEMPS_API_URL or use --api-url flag\n'))
+    apiUrl = envApiUrl
+  } else {
+    apiUrl = await promptUrl(
+      `API URL [${colors.muted(currentConfig.apiUrl)}]`,
+      currentConfig.apiUrl
+    )
+  }
 
   // Save API URL first (needed for token validation)
-  config.set('apiUrl', apiUrl)
+  // Don't overwrite stored config if env var is active (env var takes precedence at runtime)
+  if (!envApiUrl || options.apiUrl) {
+    config.set('apiUrl', apiUrl)
+  }
 
   // API Token configuration
   let authStatus = 'Not authenticated'
+  const envApiToken = process.env.TEMPS_TOKEN || process.env.TEMPS_API_TOKEN || process.env.TEMPS_API_KEY
+  const envApiTokenName = process.env.TEMPS_TOKEN ? 'TEMPS_TOKEN'
+    : process.env.TEMPS_API_TOKEN ? 'TEMPS_API_TOKEN'
+    : process.env.TEMPS_API_KEY ? 'TEMPS_API_KEY'
+    : null
+
   if (options.apiToken) {
     // Token provided via flag
     const tokenValid = await validateAndSaveToken(options.apiToken, apiUrl)
     if (tokenValid) {
       authStatus = `Authenticated as ${await credentials.get('email') ?? 'unknown'}`
     }
+  } else if (envApiToken) {
+    // Token from environment variable — skip prompt
+    const email = await credentials.get('email')
+    authStatus = `Authenticated as ${email ?? 'unknown'} ${colors.muted(`(env: ${envApiTokenName})`)}`
+    console.log(`\n  API Token: ${colors.muted('***')} ${colors.muted(`(env: ${envApiTokenName})`)}`)
+    console.log(colors.muted(`  To change, unset ${envApiTokenName} or use --api-token flag`))
   } else if (isAuthenticated) {
     // Already authenticated, ask if they want to update
     console.log(colors.muted(`\nCurrently authenticated as: ${colors.bold(currentEmail ?? 'unknown')}`))
@@ -190,12 +217,12 @@ async function runConfigureWizard(options: ConfigureOptions & { disableColors?: 
     default: currentConfig.colorEnabled,
   })
 
-  // Save configuration
-  config.setAll({
-    apiUrl,
-    outputFormat,
-    colorEnabled,
-  })
+  // Save configuration (don't overwrite apiUrl if env var is active)
+  const configToSave: Partial<TempsConfig> = { outputFormat, colorEnabled }
+  if (!envApiUrl || options.apiUrl) {
+    configToSave.apiUrl = apiUrl
+  }
+  config.setAll(configToSave)
 
   newline()
   box(
@@ -256,13 +283,22 @@ function setConfigValue(key: string, value: string): void {
 }
 
 function listConfig(): void {
-  const allConfig = config.getAll()
+  const storedConfig = config.getAll()
 
   newline()
   header(`${icons.folder} Configuration`)
 
-  for (const [key, value] of Object.entries(allConfig)) {
-    keyValue(key, value)
+  // Show effective values with env var override annotations
+  for (const [key, storedValue] of Object.entries(storedConfig)) {
+    const effectiveValue = config.get(key as keyof TempsConfig)
+    const isOverridden = key === 'apiUrl' && process.env.TEMPS_API_URL
+
+    if (isOverridden) {
+      keyValue(key, `${effectiveValue} ${colors.muted('(env: TEMPS_API_URL)')}`)
+      keyValue(`  ${colors.muted('stored')}`, colors.muted(String(storedValue)))
+    } else {
+      keyValue(key, effectiveValue)
+    }
   }
 
   newline()
@@ -279,9 +315,13 @@ async function showConfig(options: { json?: boolean }): Promise<void> {
   const apiUrlSource = envApiUrl ? 'env' : 'config'
   const apiUrl = envApiUrl || allConfig.apiUrl
 
-  // Check if API key is from environment variable
-  const envApiKey = process.env.TEMPS_API_TOKEN || process.env.TEMPS_API_KEY
+  // Check if API key is from environment variable (must match getApiKey() priority)
+  const envApiKey = process.env.TEMPS_TOKEN || process.env.TEMPS_API_TOKEN || process.env.TEMPS_API_KEY
   const apiKeySource = envApiKey ? 'env' : 'config'
+  const apiKeyEnvName = process.env.TEMPS_TOKEN ? 'TEMPS_TOKEN'
+    : process.env.TEMPS_API_TOKEN ? 'TEMPS_API_TOKEN'
+    : process.env.TEMPS_API_KEY ? 'TEMPS_API_KEY'
+    : null
 
   // Mask API key - show first 8 characters
   let maskedApiKey = 'Not configured'
@@ -315,7 +355,7 @@ async function showConfig(options: { json?: boolean }): Promise<void> {
 
   // API URL
   if (apiUrlSource === 'env') {
-    keyValue('API URL', `${apiUrl} ${colors.muted('(from TEMPS_API_URL)')}`)
+    keyValue('API URL', `${apiUrl} ${colors.muted('(env: TEMPS_API_URL)')}`)
   } else {
     keyValue('API URL', apiUrl)
   }
@@ -323,8 +363,8 @@ async function showConfig(options: { json?: boolean }): Promise<void> {
   // API Key
   if (apiKey) {
     const sourceNote = apiKeySource === 'env'
-      ? colors.muted('(from TEMPS_API_TOKEN)')
-      : colors.muted('(from config)')
+      ? colors.muted(`(env: ${apiKeyEnvName})`)
+      : colors.muted('(config)')
     keyValue('API Key', `${maskedApiKey} ${sourceNote}`)
   } else {
     keyValue('API Key', colors.warning('Not configured'))

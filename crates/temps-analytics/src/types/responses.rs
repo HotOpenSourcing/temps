@@ -147,6 +147,13 @@ pub struct VisitorInfo {
     pub is_eu: Option<bool>,
     /// Most recent page path visited by this visitor
     pub current_page: Option<String>,
+    // First-visit attribution
+    /// Full referrer URL from the visitor's first session
+    pub first_referrer: Option<String>,
+    /// Hostname extracted from first_referrer
+    pub first_referrer_hostname: Option<String>,
+    /// Marketing channel from the first visit (e.g. "Organic Search", "Direct")
+    pub first_channel: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -181,6 +188,13 @@ pub struct VisitorDetails {
     pub country_code: Option<String>,
     pub timezone: Option<String>,
     pub is_eu: Option<bool>,
+    // First-visit attribution
+    /// Full referrer URL from the visitor's first session
+    pub first_referrer: Option<String>,
+    /// Hostname extracted from first_referrer
+    pub first_referrer_hostname: Option<String>,
+    /// Marketing channel from the first visit (e.g. "Organic Search", "Direct")
+    pub first_channel: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -447,6 +461,13 @@ pub struct VisitorWithGeolocation {
     pub country_code: Option<String>,
     pub timezone: Option<String>,
     pub is_eu: Option<bool>,
+    // First-visit attribution
+    /// Full referrer URL from the visitor's first session
+    pub first_referrer: Option<String>,
+    /// Hostname extracted from first_referrer
+    pub first_referrer_hostname: Option<String>,
+    /// Marketing channel from the first visit (e.g. "Organic Search", "Direct")
+    pub first_channel: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -507,6 +528,13 @@ pub struct LiveVisitorInfo {
     pub is_eu: Option<bool>,
     /// Most recent page path visited by this visitor
     pub current_page: Option<String>,
+    // First-visit attribution
+    /// Full referrer URL from the visitor's first session
+    pub first_referrer: Option<String>,
+    /// Hostname extracted from first_referrer
+    pub first_referrer_hostname: Option<String>,
+    /// Marketing channel from the first visit (e.g. "Organic Search", "Direct")
+    pub first_channel: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -826,6 +854,124 @@ pub struct RecentActivityResponse {
     pub events: Vec<ActivityEvent>,
     /// Total events returned
     pub count: usize,
+}
+
+// ============================================================================
+// Event Detail types
+// ============================================================================
+
+/// Summary response for a specific event's analytics
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct EventDetailResponse {
+    /// The event name being analyzed
+    pub event_name: String,
+    /// Total number of times this event was triggered in the date range
+    pub total_count: i64,
+    /// Number of unique visitors who triggered this event
+    pub unique_visitors: i64,
+    /// Number of unique sessions where this event occurred
+    pub unique_sessions: i64,
+    /// Time series data for event activity graph
+    pub activity_over_time: Vec<EventActivityBucket>,
+    /// Top referrer hostnames for visitors who triggered this event
+    pub referrers: Vec<EventReferrerStats>,
+    /// Geographic distribution of visitors who triggered this event
+    pub countries: Vec<EventCountryStats>,
+    /// Browser distribution of visitors who triggered this event
+    pub browsers: Vec<EventBrowserStats>,
+    /// Bucket interval used for time series ('hour', 'day', etc.)
+    pub bucket_interval: String,
+}
+
+/// Time bucket data point for event activity graph
+#[derive(Debug, Serialize, Deserialize, ToSchema, Clone)]
+pub struct EventActivityBucket {
+    /// Timestamp for this bucket (ISO 8601)
+    #[schema(value_type = String)]
+    pub timestamp: UtcDateTime,
+    /// Number of event occurrences in this bucket
+    pub count: i64,
+    /// Number of unique visitors in this bucket
+    pub unique_visitors: i64,
+}
+
+/// Referrer stats for an event
+#[derive(Debug, Serialize, Deserialize, ToSchema, Clone)]
+pub struct EventReferrerStats {
+    /// Referrer hostname or "Direct"
+    pub referrer: String,
+    /// Number of event occurrences from this referrer
+    pub count: i64,
+    /// Percentage of total events
+    pub percentage: f64,
+}
+
+/// Country stats for an event
+#[derive(Debug, Serialize, Deserialize, ToSchema, Clone)]
+pub struct EventCountryStats {
+    /// Country name
+    pub country: String,
+    /// ISO country code (2-letter)
+    pub country_code: Option<String>,
+    /// Number of event occurrences from this country
+    pub count: i64,
+    /// Percentage of total events
+    pub percentage: f64,
+}
+
+/// Browser stats for an event
+#[derive(Debug, Serialize, Deserialize, ToSchema, Clone)]
+pub struct EventBrowserStats {
+    /// Browser name
+    pub browser: String,
+    /// Number of event occurrences from this browser
+    pub count: i64,
+    /// Percentage of total events
+    pub percentage: f64,
+}
+
+/// A visitor who triggered a specific event
+#[derive(Debug, Serialize, Deserialize, ToSchema, Clone)]
+pub struct EventVisitorInfo {
+    /// Visitor numeric ID
+    pub visitor_id: i32,
+    /// Visitor UUID
+    pub visitor_uuid: String,
+    /// Number of times this visitor triggered the event
+    pub event_count: i64,
+    /// When the visitor first triggered the event in the date range
+    #[schema(value_type = String, format = "date-time")]
+    pub first_triggered: UtcDateTime,
+    /// When the visitor last triggered the event in the date range
+    #[schema(value_type = String, format = "date-time")]
+    pub last_triggered: UtcDateTime,
+    /// Visitor's country
+    pub country: Option<String>,
+    /// Visitor's country code
+    pub country_code: Option<String>,
+    /// Visitor's city
+    pub city: Option<String>,
+    /// Browser name
+    pub browser: Option<String>,
+    /// Device type (Desktop, Mobile, Tablet)
+    pub device_type: Option<String>,
+    /// Referrer hostname for the event
+    pub referrer_hostname: Option<String>,
+}
+
+/// Paginated response for event visitors
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct EventVisitorsResponse {
+    /// The event name
+    pub event_name: String,
+    /// Total number of unique visitors who triggered this event
+    pub total_count: i64,
+    /// Current page number
+    pub page: u64,
+    /// Items per page
+    pub per_page: u64,
+    /// Individual visitors who triggered this event
+    pub visitors: Vec<EventVisitorInfo>,
 }
 
 /// Complete page flow analytics response

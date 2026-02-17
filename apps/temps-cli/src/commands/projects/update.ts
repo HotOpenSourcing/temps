@@ -1,4 +1,5 @@
 import { requireAuth } from '../../config/store.js'
+import { requireProjectSlug } from '../../config/resolve-project.js'
 import { setupClient, client, getErrorMessage } from '../../lib/api-client.js'
 import {
   getProject,
@@ -13,12 +14,18 @@ import { promptText, promptConfirm, promptSelect } from '../../ui/prompts.js'
 import { newline, header, icons, json, colors, success, info, warning, keyValue } from '../../ui/output.js'
 
 export async function updateProjectAction(
-  options: { project: string; name?: string; json?: boolean; yes?: boolean }
+  options: { project?: string; name?: string; json?: boolean; yes?: boolean }
 ): Promise<void> {
   await requireAuth()
   await setupClient()
 
-  const projectIdOrSlug = options.project
+  const resolved = await requireProjectSlug(options.project)
+
+  if (resolved.source !== 'flag') {
+    info(`Using project ${colors.bold(resolved.slug)} (from ${resolved.source})`)
+  }
+
+  const projectIdOrSlug = resolved.slug
 
   // Get project first
   const project = await withSpinner('Fetching project...', async () => {
@@ -88,7 +95,7 @@ export async function updateProjectAction(
 
 export async function updateSettingsAction(
   options: {
-    project: string
+    project?: string
     slug?: string
     attackMode?: boolean
     previewEnvs?: boolean
@@ -99,7 +106,13 @@ export async function updateSettingsAction(
   await requireAuth()
   await setupClient()
 
-  const projectIdOrSlug = options.project
+  const resolved = await requireProjectSlug(options.project)
+
+  if (resolved.source !== 'flag') {
+    info(`Using project ${colors.bold(resolved.slug)} (from ${resolved.source})`)
+  }
+
+  const projectIdOrSlug = resolved.slug
 
   // Get project first
   const project = await withSpinner('Fetching project...', async () => {
@@ -184,7 +197,7 @@ export async function updateSettingsAction(
 
 export async function updateGitAction(
   options: {
-    project: string
+    project?: string
     owner?: string
     repo?: string
     branch?: string
@@ -197,7 +210,13 @@ export async function updateGitAction(
   await requireAuth()
   await setupClient()
 
-  const projectIdOrSlug = options.project
+  const resolved = await requireProjectSlug(options.project)
+
+  if (resolved.source !== 'flag') {
+    info(`Using project ${colors.bold(resolved.slug)} (from ${resolved.source})`)
+  }
+
+  const projectIdOrSlug = resolved.slug
 
   // Get project first
   const project = await withSpinner('Fetching project...', async () => {
@@ -320,7 +339,7 @@ export async function updateGitAction(
 
 export async function updateConfigAction(
   options: {
-    project: string
+    project?: string
     replicas?: string
     cpuLimit?: string
     memoryLimit?: string
@@ -332,7 +351,13 @@ export async function updateConfigAction(
   await requireAuth()
   await setupClient()
 
-  const projectIdOrSlug = options.project
+  const resolved = await requireProjectSlug(options.project)
+
+  if (resolved.source !== 'flag') {
+    info(`Using project ${colors.bold(resolved.slug)} (from ${resolved.source})`)
+  }
+
+  const projectIdOrSlug = resolved.slug
 
   // Get project first
   const project = await withSpinner('Fetching project...', async () => {

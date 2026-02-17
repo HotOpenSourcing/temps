@@ -18,8 +18,10 @@ import {
   unlinkServiceFromProject,
   getServiceEnvironmentVariables,
   getServiceEnvironmentVariable,
+  getProjectBySlug,
 } from '../../api/sdk.gen.js'
 import type { ExternalServiceInfo, ServiceTypeRoute } from '../../api/types.gen.js'
+import { requireProjectSlug } from '../../config/resolve-project.js'
 import { withSpinner } from '../../ui/spinner.js'
 import { printTable, statusBadge, type TableColumn } from '../../ui/table.js'
 import { promptText, promptSelect, promptConfirm } from '../../ui/prompts.js'
@@ -32,10 +34,94 @@ const SERVICE_TYPE_LABELS: Record<ServiceTypeRoute, string> = {
   s3: 'MinIO (S3)',
 }
 
+// Default parameters for each service type when using automation mode (-y)
+// These match the backend's required fields + sensible defaults
+const SERVICE_TYPE_DEFAULTS: Record<string, Record<string, unknown>> = {
+  postgres: { database: 'myapp', username: 'postgres' },
+  mongodb: { database: 'myapp', username: 'mongoadmin' },
+  redis: {},
+  s3: {},
+}
+
+// JSON Schema → interactive prompt parameters
+interface SchemaProperty {
+  type?: string
+  description?: string
+  default?: unknown
+  example?: unknown
+  enum?: string[]
+}
+
+interface JsonSchema {
+  type?: string
+  title?: string
+  properties?: Record<string, SchemaProperty>
+  required?: string[]
+  readonly?: string[]
+}
+
+interface PromptParam {
+  name: string
+  label: string
+  description?: string
+  default_value?: unknown
+  required: boolean
+  readonly: boolean
+  enum_values?: string[]
+  param_type: string
+}
+
+function schemaToPromptParams(schema: JsonSchema): PromptParam[] {
+  if (!schema?.properties) return []
+  const required = new Set(schema.required ?? [])
+  const readonly = new Set(schema.readonly ?? [])
+  return Object.entries(schema.properties).map(([name, prop]) => ({
+    name,
+    label: name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+    description: prop.description,
+    default_value: prop.default ?? prop.example,
+    required: required.has(name),
+    readonly: readonly.has(name),
+    enum_values: prop.enum,
+    param_type: prop.type ?? 'string',
+  }))
+}
+
+/**
+ * Parse repeatable --set key=value pairs into a Record.
+ * Supports type coercion: numbers → number, true/false → boolean, rest → string.
+ */
+function parseSetPairs(pairs: string[]): Record<string, unknown> {
+  const result: Record<string, unknown> = {}
+  for (const pair of pairs) {
+    const eqIdx = pair.indexOf('=')
+    if (eqIdx === -1) {
+      throw new Error(`Invalid parameter "${pair}". Expected format: key=value`)
+    }
+    const key = pair.slice(0, eqIdx).trim()
+    const raw = pair.slice(eqIdx + 1)
+    if (!key) {
+      throw new Error(`Invalid parameter "${pair}". Key cannot be empty`)
+    }
+    // Type coercion
+    if (raw === 'true') result[key] = true
+    else if (raw === 'false') result[key] = false
+    else if (raw === '0') result[key] = 0
+    else if (raw !== '' && !isNaN(Number(raw)) && !raw.startsWith('0')) result[key] = Number(raw)
+    else result[key] = raw
+  }
+  return result
+}
+
+/** Collect repeatable --set values into an array */
+function collectSet(value: string, previous: string[]): string[] {
+  return previous.concat([value])
+}
+
 interface CreateOptions {
   type?: string
   name?: string
-  parameters?: string
+  set?: string[]
   yes?: boolean
 }
 
@@ -62,7 +148,7 @@ interface ProjectsOptions {
 interface UpdateOptions {
   id: string
   name?: string
-  parameters?: string
+  set?: string[]
 }
 
 interface UpgradeOptions {
@@ -74,34 +160,50 @@ interface ImportOptions {
   type?: string
   name?: string
   containerId?: string
-  parameters?: string
+  set?: string[]
   version?: string
   yes?: boolean
 }
 
 interface LinkOptions {
   id: string
-  projectId: string
+  project?: string
 }
 
 interface UnlinkOptions {
   id: string
-  projectId: string
+  project?: string
   force?: boolean
   yes?: boolean
 }
 
 interface EnvOptions {
   id: string
-  projectId: string
+  project?: string
   json?: boolean
 }
 
 interface EnvVarOptions {
   id: string
-  projectId: string
+  project?: string
   var: string
   json?: boolean
+}
+
+/** Resolve project slug (from flag, .temps/config.json, env, global) → project ID */
+async function resolveProjectId(flagValue?: string): Promise<{ id: number; slug: string }> {
+  const resolved = await requireProjectSlug(flagValue)
+  if (resolved.source !== 'flag') {
+    info(`Using project ${colors.bold(resolved.slug)} (from ${resolved.source})`)
+  }
+  const { data, error } = await getProjectBySlug({
+    client,
+    path: { slug: resolved.slug },
+  })
+  if (error || !data) {
+    throw new Error(`Project "${resolved.slug}" not found`)
+  }
+  return { id: data.id, slug: resolved.slug }
 }
 
 export function registerServicesCommands(program: Command): void {
@@ -123,7 +225,7 @@ export function registerServicesCommands(program: Command): void {
     .description('Create a new external service')
     .option('-t, --type <type>', 'Service type (postgres, mongodb, redis, s3)')
     .option('-n, --name <name>', 'Service name')
-    .option('--parameters <json>', 'Service parameters as JSON string')
+    .option('-s, --set <key=value>', 'Set a parameter (repeatable)', collectSet, [])
     .option('-y, --yes', 'Skip confirmation prompts (for automation)')
     .action(createServiceAction)
 
@@ -155,11 +257,17 @@ export function registerServicesCommands(program: Command): void {
     .requiredOption('--id <id>', 'Service ID')
     .action(stopServiceAction)
 
-  services
+  const typesCmd = services
     .command('types')
     .description('List available service types')
     .option('--json', 'Output in JSON format')
     .action(listServiceTypes)
+
+  typesCmd
+    .command('info <type>')
+    .description('Show parameters schema for a service type (useful for automation)')
+    .option('--json', 'Output as raw JSON schema (default)')
+    .action(showServiceTypeInfo)
 
   services
     .command('projects')
@@ -173,7 +281,7 @@ export function registerServicesCommands(program: Command): void {
     .description('Update a service')
     .requiredOption('--id <id>', 'Service ID')
     .option('-n, --name <name>', 'Docker image name (e.g., postgres:18-alpine)')
-    .option('--parameters <json>', 'Service parameters as JSON string')
+    .option('-s, --set <key=value>', 'Set a parameter (repeatable)', collectSet, [])
     .action(updateServiceAction)
 
   services
@@ -189,7 +297,7 @@ export function registerServicesCommands(program: Command): void {
     .option('-t, --type <type>', 'Service type (postgres, mongodb, redis, s3)')
     .option('-n, --name <name>', 'Service name')
     .option('--container-id <id>', 'Container ID or name to import')
-    .option('--parameters <json>', 'Service parameters as JSON string')
+    .option('-s, --set <key=value>', 'Set a parameter (repeatable)', collectSet, [])
     .option('--version <version>', 'Optional version override')
     .option('-y, --yes', 'Skip confirmation prompts (for automation)')
     .action(importServiceAction)
@@ -198,14 +306,14 @@ export function registerServicesCommands(program: Command): void {
     .command('link')
     .description('Link a service to a project')
     .requiredOption('--id <id>', 'Service ID')
-    .requiredOption('--project-id <id>', 'Project ID')
+    .option('-p, --project <slug>', 'Project slug (auto-detected from .temps/config.json)')
     .action(linkServiceAction)
 
   services
     .command('unlink')
     .description('Unlink a service from a project')
     .requiredOption('--id <id>', 'Service ID')
-    .requiredOption('--project-id <id>', 'Project ID')
+    .option('-p, --project <slug>', 'Project slug (auto-detected from .temps/config.json)')
     .option('-f, --force', 'Skip confirmation')
     .option('-y, --yes', 'Skip confirmation prompts (alias for --force)')
     .action(unlinkServiceAction)
@@ -214,7 +322,7 @@ export function registerServicesCommands(program: Command): void {
     .command('env')
     .description('Show environment variables for a linked service')
     .requiredOption('--id <id>', 'Service ID')
-    .requiredOption('--project-id <id>', 'Project ID')
+    .option('-p, --project <slug>', 'Project slug (auto-detected from .temps/config.json)')
     .option('--json', 'Output in JSON format')
     .action(envAction)
 
@@ -222,7 +330,7 @@ export function registerServicesCommands(program: Command): void {
     .command('env-var')
     .description('Get a specific environment variable')
     .requiredOption('--id <id>', 'Service ID')
-    .requiredOption('--project-id <id>', 'Project ID')
+    .option('-p, --project <slug>', 'Project slug (auto-detected from .temps/config.json)')
     .requiredOption('--var <name>', 'Environment variable name')
     .option('--json', 'Output in JSON format')
     .action(envVarAction)
@@ -289,8 +397,11 @@ async function createServiceAction(options: CreateOptions): Promise<void> {
   let name: string
   let parameters: Record<string, unknown> = {}
 
-  // Check if automation mode (all required params provided)
-  const isAutomation = options.yes && options.type && options.name
+  const hasSetParams = options.set && options.set.length > 0
+
+  // Automation mode: -y with type+name, OR type+name+set (explicit params = no need for -y)
+  const isAutomation = (options.yes && options.type && options.name) ||
+    (options.type && options.name && hasSetParams)
 
   if (isAutomation) {
     // Validate service type
@@ -301,60 +412,67 @@ async function createServiceAction(options: CreateOptions): Promise<void> {
     serviceType = options.type as ServiceTypeRoute
     name = options.name!
 
-    // Parse parameters if provided
-    if (options.parameters) {
+    // Parse --set key=value pairs if provided, otherwise use smart defaults
+    if (hasSetParams) {
       try {
-        parameters = JSON.parse(options.parameters)
-      } catch {
-        warning('Invalid JSON in --parameters')
+        parameters = parseSetPairs(options.set!)
+      } catch (e) {
+        warning((e as Error).message)
         return
       }
+    } else {
+      // Apply default parameters for this service type (e.g., database/username for postgres)
+      parameters = { ...(SERVICE_TYPE_DEFAULTS[serviceType] ?? {}) }
     }
   } else {
-    // Interactive mode
-    serviceType = await promptSelect({
-      message: 'Service type',
-      choices: types.map(t => ({
-        name: SERVICE_TYPE_LABELS[t] || t,
-        value: t,
-      })),
-    }) as ServiceTypeRoute
+    // Interactive mode — use --type and --name if provided, prompt for the rest
+    if (options.type) {
+      if (!types.includes(options.type as ServiceTypeRoute)) {
+        warning(`Invalid service type: ${options.type}. Available: ${types.join(', ')}`)
+        return
+      }
+      serviceType = options.type as ServiceTypeRoute
+      info(`Service type: ${colors.bold(SERVICE_TYPE_LABELS[serviceType] || serviceType)}`)
+    } else {
+      serviceType = await promptSelect({
+        message: 'Service type',
+        choices: types.map(t => ({
+          name: SERVICE_TYPE_LABELS[t] || t,
+          value: t,
+        })),
+      }) as ServiceTypeRoute
+    }
 
-    name = await promptText({
-      message: 'Service name',
-      default: `my-${serviceType}`,
-      required: true,
-    })
+    if (options.name) {
+      name = options.name
+    } else {
+      name = await promptText({
+        message: 'Service name',
+        default: `my-${serviceType}`,
+        required: true,
+      })
+    }
 
-    // Get parameters schema for the service type
+    // Get parameters schema for the service type (returns JSON Schema)
     const { data: typeInfo } = await getServiceTypeParameters({
       client,
       path: { service_type: serviceType },
     })
 
-    // Type guard for parameters response
-    interface ServiceTypeParameter {
-      name: string
-      label?: string
-      default_value?: unknown
-      required?: boolean
-      enum_values?: string[]
-      param_type?: string
-    }
-    interface ServiceTypeParametersResponse {
-      parameters?: ServiceTypeParameter[]
-    }
-    const paramResponse = typeInfo as ServiceTypeParametersResponse | undefined
+    const schema = typeInfo as JsonSchema | undefined
+    const promptParams = schemaToPromptParams(schema ?? {})
+    // Only show user-configurable params (skip readonly ones the backend auto-generates)
+    const configurableParams = promptParams.filter(p => !p.readonly || p.required)
 
-    if (paramResponse?.parameters && paramResponse.parameters.length > 0) {
+    if (configurableParams.length > 0) {
       info(`\nConfigure ${SERVICE_TYPE_LABELS[serviceType] || serviceType} parameters:`)
       newline()
 
-      for (const param of paramResponse.parameters) {
-        // Skip parameters that have defaults and aren't required
+      for (const param of configurableParams) {
+        // Skip non-required params that have defaults — use the default automatically
         if (param.default_value !== undefined && !param.required) {
           const useDefault = await promptConfirm({
-            message: `${param.label || param.name}: Use default "${param.default_value}"?`,
+            message: `${param.label}${param.description ? ` (${param.description})` : ''}: Use default "${param.default_value}"?`,
             default: true,
           })
           if (useDefault) {
@@ -367,19 +485,18 @@ async function createServiceAction(options: CreateOptions): Promise<void> {
 
         if (param.enum_values && param.enum_values.length > 0) {
           value = await promptSelect({
-            message: param.label || param.name,
+            message: param.label,
             choices: param.enum_values.map((v: string) => ({ name: v, value: v })),
           })
         } else {
           value = await promptText({
-            message: param.label || param.name,
-            default: param.default_value?.toString() || '',
-            required: param.required || false,
+            message: `${param.label}${param.description ? ` (${param.description})` : ''}`,
+            default: param.default_value?.toString() ?? '',
+            required: param.required,
           })
         }
 
         if (value) {
-          // Try to parse as number if the param type suggests it
           if (param.param_type === 'integer' || param.param_type === 'number') {
             parameters[param.name] = parseInt(value, 10)
           } else if (param.param_type === 'boolean') {
@@ -580,6 +697,76 @@ async function listServiceTypes(options: { json?: boolean }): Promise<void> {
     console.log(`  ${colors.bold(SERVICE_TYPE_LABELS[t] || t)} ${colors.muted(`(${t})`)}`)
   }
   newline()
+  info(`Run ${colors.bold('services types info <type>')} to see parameters for a specific type`)
+}
+
+/** Build an example `services create` command using --set flags with all schema defaults */
+function buildExampleCommand(type: string, schema?: JsonSchema): string {
+  const setParts: string[] = []
+  if (schema?.properties) {
+    for (const [key, prop] of Object.entries(schema.properties)) {
+      // Skip params with null defaults (auto-generated like password, port)
+      if (prop.default === null || prop.default === undefined) continue
+      setParts.push(`--set ${key}=${prop.default}`)
+    }
+  }
+  const setsStr = setParts.length > 0 ? ` ${setParts.join(' ')}` : ''
+  return `bunx @temps-sdk/cli services create -t ${type} -n my-${type}${setsStr}`
+}
+
+async function showServiceTypeInfo(type: string): Promise<void> {
+  await requireAuth()
+  await setupClient()
+
+  const { data, error } = await getServiceTypeParameters({
+    client,
+    path: { service_type: type as ServiceTypeRoute },
+  })
+
+  if (error) {
+    warning(`Failed to get parameters for "${type}": ${getErrorMessage(error)}`)
+    return
+  }
+
+  const schema = data as JsonSchema | undefined
+  if (!schema?.properties) {
+    json({ type, parameters: {}, defaults: SERVICE_TYPE_DEFAULTS[type] ?? {} })
+    return
+  }
+
+  // Build a clean output for agents: each parameter with its metadata
+  const params: Record<string, {
+    type: string
+    description?: string
+    required: boolean
+    readonly: boolean
+    default?: unknown
+    example?: unknown
+  }> = {}
+
+  const requiredKeys = new Set(schema.required ?? [])
+  const readonlyKeys = new Set(schema.readonly ?? [])
+
+  for (const [name, prop] of Object.entries(schema.properties)) {
+    params[name] = {
+      type: prop.type ?? 'string',
+      ...(prop.description ? { description: prop.description } : {}),
+      required: requiredKeys.has(name),
+      readonly: readonlyKeys.has(name),
+      ...(prop.default !== undefined ? { default: prop.default } : {}),
+      ...(prop.example !== undefined ? { example: prop.example } : {}),
+    }
+  }
+
+  const output = {
+    service_type: type,
+    label: SERVICE_TYPE_LABELS[type as ServiceTypeRoute] || type,
+    parameters: params,
+    defaults: SERVICE_TYPE_DEFAULTS[type] ?? {},
+    example_create: buildExampleCommand(type, schema),
+  }
+
+  json(output)
 }
 
 async function listLinkedProjects(options: ProjectsOptions): Promise<void> {
@@ -634,11 +821,11 @@ async function updateServiceAction(options: UpdateOptions): Promise<void> {
   }
 
   let parameters: Record<string, unknown> = {}
-  if (options.parameters) {
+  if (options.set && options.set.length > 0) {
     try {
-      parameters = JSON.parse(options.parameters)
-    } catch {
-      warning('Invalid JSON in --parameters')
+      parameters = parseSetPairs(options.set)
+    } catch (e) {
+      warning((e as Error).message)
       return
     }
   }
@@ -728,11 +915,11 @@ async function importServiceAction(options: ImportOptions): Promise<void> {
     name = options.name!
     containerId = options.containerId!
 
-    if (options.parameters) {
+    if (options.set && options.set.length > 0) {
       try {
-        parameters = JSON.parse(options.parameters)
-      } catch {
-        warning('Invalid JSON in --parameters')
+        parameters = parseSetPairs(options.set)
+      } catch (e) {
+        warning((e as Error).message)
         return
       }
     }
@@ -770,11 +957,11 @@ async function importServiceAction(options: ImportOptions): Promise<void> {
       required: true,
     })
 
-    if (options.parameters) {
+    if (options.set && options.set.length > 0) {
       try {
-        parameters = JSON.parse(options.parameters)
-      } catch {
-        warning('Invalid JSON in --parameters')
+        parameters = parseSetPairs(options.set)
+      } catch (e) {
+        warning((e as Error).message)
         return
       }
     }
@@ -810,18 +997,14 @@ async function linkServiceAction(options: LinkOptions): Promise<void> {
     return
   }
 
-  const projectId = parseInt(options.projectId, 10)
-  if (isNaN(projectId)) {
-    warning('Invalid project ID')
-    return
-  }
+  const project = await resolveProjectId(options.project)
 
-  await withSpinner('Linking service to project...', async () => {
+  await withSpinner(`Linking service to project ${colors.bold(project.slug)}...`, async () => {
     const { error } = await linkServiceToProject({
       client,
       path: { id },
       body: {
-        project_id: projectId,
+        project_id: project.id,
       },
     })
     if (error) {
@@ -829,7 +1012,7 @@ async function linkServiceAction(options: LinkOptions): Promise<void> {
     }
   })
 
-  success(`Service ${options.id} linked to project ${options.projectId}`)
+  success(`Service ${options.id} linked to project ${project.slug}`)
 }
 
 async function unlinkServiceAction(options: UnlinkOptions): Promise<void> {
@@ -842,17 +1025,13 @@ async function unlinkServiceAction(options: UnlinkOptions): Promise<void> {
     return
   }
 
-  const projectId = parseInt(options.projectId, 10)
-  if (isNaN(projectId)) {
-    warning('Invalid project ID')
-    return
-  }
+  const project = await resolveProjectId(options.project)
 
   const skipConfirmation = options.force || options.yes
 
   if (!skipConfirmation) {
     const confirmed = await promptConfirm({
-      message: `Unlink service ${options.id} from project ${options.projectId}?`,
+      message: `Unlink service ${options.id} from project ${project.slug}?`,
       default: false,
     })
     if (!confirmed) {
@@ -861,17 +1040,17 @@ async function unlinkServiceAction(options: UnlinkOptions): Promise<void> {
     }
   }
 
-  await withSpinner('Unlinking service from project...', async () => {
+  await withSpinner(`Unlinking service from project ${colors.bold(project.slug)}...`, async () => {
     const { error } = await unlinkServiceFromProject({
       client,
-      path: { id, project_id: projectId },
+      path: { id, project_id: project.id },
     })
     if (error) {
       throw new Error(getErrorMessage(error))
     }
   })
 
-  success(`Service ${options.id} unlinked from project ${options.projectId}`)
+  success(`Service ${options.id} unlinked from project ${project.slug}`)
 }
 
 async function envAction(options: EnvOptions): Promise<void> {
@@ -884,16 +1063,12 @@ async function envAction(options: EnvOptions): Promise<void> {
     return
   }
 
-  const projectId = parseInt(options.projectId, 10)
-  if (isNaN(projectId)) {
-    warning('Invalid project ID')
-    return
-  }
+  const project = await resolveProjectId(options.project)
 
   const envVars = await withSpinner('Fetching environment variables...', async () => {
     const { data, error } = await getServiceEnvironmentVariables({
       client,
-      path: { id, project_id: projectId },
+      path: { id, project_id: project.id },
     })
     if (error) {
       throw new Error(getErrorMessage(error))
@@ -932,16 +1107,12 @@ async function envVarAction(options: EnvVarOptions): Promise<void> {
     return
   }
 
-  const projectId = parseInt(options.projectId, 10)
-  if (isNaN(projectId)) {
-    warning('Invalid project ID')
-    return
-  }
+  const project = await resolveProjectId(options.project)
 
   const envVar = await withSpinner('Fetching environment variable...', async () => {
     const { data, error } = await getServiceEnvironmentVariable({
       client,
-      path: { id, project_id: projectId, var_name: options.var },
+      path: { id, project_id: project.id, var_name: options.var },
     })
     if (error) {
       throw new Error(getErrorMessage(error))

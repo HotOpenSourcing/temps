@@ -324,6 +324,7 @@ export default function ApiKeyCreate() {
                 value={keyName}
                 onChange={(e) => setKeyName(e.target.value)}
                 className="max-w-md"
+                autoFocus
               />
               <p className="text-sm text-muted-foreground">
                 Choose a name that helps you remember what this key is used for

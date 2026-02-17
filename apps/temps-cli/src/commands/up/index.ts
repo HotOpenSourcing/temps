@@ -1,15 +1,22 @@
 import type { Command } from 'commander'
-import { requireAuth } from '../../config/store.js'
-import { setupClient, client } from '../../lib/api-client.js'
+import { requireAuth, config } from '../../config/store.js'
+import { setupClient, client, getErrorMessage } from '../../lib/api-client.js'
 import { resolveProjectSlug } from '../../config/resolve-project.js'
 import { hasProjectConfig, writeProjectConfig } from '../../config/project-config.js'
-import { deploy } from '../deploy/deploy.js'
 import { deployLocalImage } from '../deploy/deploy-local-image.js'
 import { runSetupWizard } from './setup-wizard.js'
 import { detectGitBranch } from '../../lib/detect-project.js'
-import { promptConfirm } from '../../ui/prompts.js'
-import { info, warning, newline, colors } from '../../ui/output.js'
-import { getProjectBySlug } from '../../api/sdk.gen.js'
+import { promptConfirm, promptSelect, promptText } from '../../ui/prompts.js'
+import { startSpinner, succeedSpinner, failSpinner } from '../../ui/spinner.js'
+import { info, warning, newline, colors, icons, box } from '../../ui/output.js'
+import {
+  getProjectBySlug,
+  getEnvironments,
+  triggerProjectPipeline,
+  getProjectDeployments,
+} from '../../api/sdk.gen.js'
+import type { ProjectResponse, EnvironmentResponse } from '../../api/types.gen.js'
+import { watchDeployment } from '../../lib/deployment-watcher.jsx'
 
 interface UpOptions {
   project?: string
@@ -50,22 +57,122 @@ async function up(projectArg: string | undefined, options: UpOptions): Promise<v
     return
   }
 
-  // Project is already linked — deploy as usual
+  // ─── Project is already linked — deploy it ──────────────────────────────
 
   if (resolved.source !== 'flag') {
     info(`Using project ${colors.bold(resolved.slug)} (from ${resolved.source})`)
   }
 
-  // Fetch project to check source type
-  const { data: project } = await getProjectBySlug({
-    client,
-    path: { slug: resolved.slug },
-  })
+  newline()
 
-  const sourceType = project?.source_type
+  // Fetch project details
+  startSpinner('Fetching project details...')
+
+  let project: ProjectResponse
+  let environments: EnvironmentResponse[] = []
+
+  try {
+    const { data, error } = await getProjectBySlug({
+      client,
+      path: { slug: resolved.slug },
+    })
+
+    if (error || !data) {
+      const rawApiUrl = config.get('apiUrl')
+      const baseUrl = client.getConfig().baseUrl ?? rawApiUrl
+      failSpinner(`Project "${resolved.slug}" not found`)
+      info(`API: ${colors.muted(`${baseUrl}/projects/by-slug/${resolved.slug}`)}`)
+      if (error) {
+        info(`Error: ${getErrorMessage(error)}`)
+      }
+      return
+    }
+
+    project = data
+    succeedSpinner(`Found project: ${project.name}`)
+
+    // Fetch environments
+    const { data: envData } = await getEnvironments({
+      client,
+      path: { project_id: project.id },
+    })
+    environments = envData ?? []
+  } catch (err) {
+    failSpinner('Failed to fetch project')
+    throw err
+  }
+
+  // Show project context
+  const sourceType = project.source_type
+  const isGitBased = sourceType !== 'manual' && sourceType !== 'docker_image'
+
+  if (isGitBased && project.repo_owner && project.repo_name) {
+    info(`Repository: ${colors.muted(`${project.repo_owner}/${project.repo_name}`)}`)
+  } else if (isGitBased && !project.git_provider_connection_id) {
+    warning('No git provider connected to this project')
+    info(`Connect one with: ${colors.muted('bunx @temps-sdk/cli providers add')}`)
+    info(`Or deploy manually: ${colors.muted(`bunx @temps-sdk/cli deploy:local-image -p ${resolved.slug}`)}`)
+    newline()
+  }
+
+  if (project.preset) {
+    info(`Preset: ${colors.muted(project.preset)}`)
+  }
+
+  // ─── Select environment ─────────────────────────────────────────────────
+
+  let environmentId: number | undefined
+  let environmentName = options.environment || 'production'
+
+  if (environments.length > 0) {
+    if (options.environment) {
+      const env = environments.find(e => e.name === options.environment)
+      if (env) {
+        environmentId = env.id
+        environmentName = env.name
+      }
+    } else if (!options.yes) {
+      const selectedEnv = await promptSelect({
+        message: 'Select environment',
+        choices: environments.map((env) => ({
+          name: env.name,
+          value: String(env.id),
+          description: env.is_preview ? 'Preview environment' : undefined,
+        })),
+        default: String(environments.find(e => e.name === 'production')?.id ?? environments[0]?.id ?? ''),
+      })
+      environmentId = parseInt(selectedEnv, 10)
+      environmentName = environments.find(e => e.id === environmentId)?.name ?? 'production'
+    } else {
+      const prodEnv = environments.find(e => e.name === 'production')
+      if (prodEnv) {
+        environmentId = prodEnv.id
+        environmentName = prodEnv.name
+      } else if (environments[0]) {
+        environmentId = environments[0].id
+        environmentName = environments[0].name
+      }
+    }
+  }
+
+  // ─── Deploy based on source type ────────────────────────────────────────
 
   if (sourceType === 'manual' || sourceType === 'docker_image') {
-    // Manual/docker_image projects deploy via local image build + upload
+    // Show deployment preview
+    newline()
+    box(
+      [
+        `Project:     ${colors.bold(project.name)}`,
+        `Environment: ${colors.bold(environmentName)}`,
+        project.preset ? `Preset:      ${colors.bold(project.preset)}` : null,
+        `Deploy:      ${colors.bold('Manual (local image upload)')}`,
+      ]
+        .filter(Boolean)
+        .join('\n'),
+      `${icons.rocket} Deployment Preview`
+    )
+    newline()
+
     await deployLocalImage({
       project: resolved.slug,
       environment: options.environment,
@@ -73,7 +180,7 @@ async function up(projectArg: string | undefined, options: UpOptions): Promise<v
       yes: options.yes,
     })
   } else {
-    // Git-based projects trigger the pipeline
+    // Git-based deploy
     let branch = options.branch
     if (!branch) {
       const detectedBranch = detectGitBranch()
@@ -82,13 +189,116 @@ async function up(projectArg: string | undefined, options: UpOptions): Promise<v
       }
     }
 
-    await deploy({
-      project: resolved.slug,
-      environment: options.environment,
-      branch,
-      wait: options.wait,
-      yes: options.yes,
-    })
+    if (!branch) {
+      if (options.yes) {
+        branch = project.main_branch || 'main'
+      } else {
+        branch = await promptText({
+          message: 'Branch to deploy',
+          default: project.main_branch || 'main',
+        })
+      }
+    }
+
+    // Show deployment preview
+    newline()
+    box(
+      [
+        `Project:     ${colors.bold(project.name)}`,
+        `Environment: ${colors.bold(environmentName)}`,
+        `Branch:      ${colors.bold(branch)}`,
+        project.preset ? `Preset:      ${colors.bold(project.preset)}` : null,
+        project.repo_owner && project.repo_name
+          ? `Repository:  ${colors.bold(`${project.repo_owner}/${project.repo_name}`)}`
+          : null,
+      ]
+        .filter(Boolean)
+        .join('\n'),
+      `${icons.rocket} Deployment Preview`
+    )
+    newline()
+
+    // Trigger the pipeline
+    startSpinner('Starting deployment...')
+
+    try {
+      const { data: pipelineData, error: pipelineError } = await triggerProjectPipeline({
+        client,
+        path: { id: project.id },
+        body: {
+          branch,
+          environment_id: environmentId,
+        },
+      })
+
+      if (pipelineError || !pipelineData) {
+        failSpinner('Failed to start deployment')
+        const msg = getErrorMessage(pipelineError)
+        if (msg) {
+          info(`Reason: ${msg}`)
+        }
+        return
+      }
+
+      succeedSpinner('Deployment started')
+      info(pipelineData.message ?? 'Pipeline triggered successfully')
+
+      if (options.wait === false) {
+        newline()
+        info('Deployment running in background')
+        info(`Check status: ${colors.muted('bunx @temps-sdk/cli status')}`)
+        return
+      }
+
+      // Find the deployment ID so we can watch it with the rich TUI
+      startSpinner('Waiting for deployment to start...')
+      let deploymentId: number | null = null
+
+      for (let attempt = 0; attempt < 15; attempt++) {
+        const { data: deployList, error: deployError } = await getProjectDeployments({
+          client,
+          path: { id: project.id },
+          query: {
+            per_page: 1,
+            ...(environmentId ? { environment_id: environmentId } : {}),
+          },
+        })
+
+        if (deployError) {
+          failSpinner('Failed to fetch deployment status')
+          info(`Error: ${getErrorMessage(deployError)}`)
+          return
+        }
+
+        const latest = deployList?.deployments?.[0]
+        if (latest?.id) {
+          deploymentId = latest.id
+          break
+        }
+
+        await new Promise((r) => setTimeout(r, 2000))
+      }
+
+      if (deploymentId) {
+        succeedSpinner(`Deployment #${deploymentId} found`)
+        const result = await watchDeployment({
+          projectId: project.id,
+          deploymentId,
+          timeoutSecs: 600,
+          projectName: resolved.slug,
+        })
+
+        if (!result.success) {
+          process.exitCode = 1
+        }
+      } else {
+        failSpinner('Could not locate the deployment to track')
+        info(`Check status: ${colors.muted('bunx @temps-sdk/cli status')}`)
+      }
+    } catch (err) {
+      failSpinner('Deployment failed')
+      throw err
+    }
   }
 
   // Offer to save config if it doesn't exist

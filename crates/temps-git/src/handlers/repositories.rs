@@ -608,6 +608,139 @@ pub async fn check_commit_exists(
     }))
 }
 
+#[derive(Debug, Deserialize, IntoParams)]
+pub struct CommitListQueryParams {
+    /// Branch name to list commits for
+    pub branch: String,
+    /// Number of commits to return (default: 20, max: 100)
+    pub per_page: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CommitInfo {
+    /// Commit SHA hash
+    pub sha: String,
+    /// Commit message
+    pub message: String,
+    /// Author name
+    pub author: String,
+    /// Author email
+    pub author_email: String,
+    /// Commit date in ISO 8601 format
+    #[schema(value_type = String, format = DateTime, example = "2025-10-12T12:15:47.609192Z")]
+    pub date: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CommitListResponse {
+    pub commits: Vec<CommitInfo>,
+}
+
+/// List recent commits for a repository branch
+#[utoipa::path(
+    get,
+    path = "repository/{repository_id}/commits",
+    params(
+        ("repository_id" = i32, Path, description = "Repository ID"),
+        CommitListQueryParams
+    ),
+    responses(
+        (status = 200, description = "List of commits", body = CommitListResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Repository not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    tag = "Repositories",
+    security(
+        ("bearer_auth" = [])
+    )
+)]
+pub async fn list_commits_by_repository_id(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Path(repository_id): Path<i32>,
+    Query(params): Query<CommitListQueryParams>,
+) -> Result<Json<CommitListResponse>, Problem> {
+    // Check permission
+    permission_check!(auth, Permission::GitRepositoriesRead);
+
+    // Find the repository by ID
+    let repository = state
+        .git_provider_manager
+        .get_repository_by_id(repository_id)
+        .await?;
+
+    // Get the connection and provider
+    let connection_id = repository.git_provider_connection_id;
+
+    let connection = state
+        .git_provider_manager
+        .get_connection(connection_id)
+        .await
+        .map_err(|e| {
+            ErrorBuilder::new(StatusCode::INTERNAL_SERVER_ERROR)
+                .title("Failed to get git provider connection")
+                .detail(format!("Error: {}", e))
+                .build()
+        })?;
+
+    let provider_service = state
+        .git_provider_manager
+        .get_provider_service(connection.provider_id)
+        .await
+        .map_err(|e| {
+            ErrorBuilder::new(StatusCode::INTERNAL_SERVER_ERROR)
+                .title("Failed to get git provider service")
+                .detail(format!("Error: {}", e))
+                .build()
+        })?;
+
+    let access_token = state
+        .git_provider_manager
+        .get_connection_token(connection_id)
+        .await
+        .map_err(|e| {
+            ErrorBuilder::new(StatusCode::INTERNAL_SERVER_ERROR)
+                .title("Failed to get access token")
+                .detail(format!("Error: {}", e))
+                .build()
+        })?;
+
+    let per_page = std::cmp::min(params.per_page.unwrap_or(20), 100);
+
+    // Get commits from the git provider
+    let commits = provider_service
+        .list_commits(
+            &access_token,
+            &repository.owner,
+            &repository.name,
+            &params.branch,
+            per_page,
+        )
+        .await
+        .map_err(|e| {
+            ErrorBuilder::new(StatusCode::INTERNAL_SERVER_ERROR)
+                .title("Failed to fetch commits")
+                .detail(format!("Error fetching commits from git provider: {}", e))
+                .build()
+        })?;
+
+    let commit_infos: Vec<CommitInfo> = commits
+        .into_iter()
+        .map(|commit| CommitInfo {
+            sha: commit.sha,
+            message: commit.message,
+            author: commit.author,
+            author_email: commit.author_email,
+            date: commit.date,
+        })
+        .collect();
+
+    Ok(Json(CommitListResponse {
+        commits: commit_infos,
+    }))
+}
+
 #[derive(OpenApi)]
 #[openapi(
     paths(
@@ -615,7 +748,8 @@ pub async fn check_commit_exists(
         get_repository_tags,
         get_branches_by_repository_id,
         get_tags_by_repository_id,
-        check_commit_exists
+        check_commit_exists,
+        list_commits_by_repository_id
     ),
     components(
         schemas(
@@ -623,7 +757,9 @@ pub async fn check_commit_exists(
             BranchListResponse,
             TagInfo,
             TagListResponse,
-            CommitExistsResponse
+            CommitExistsResponse,
+            CommitInfo,
+            CommitListResponse
         )
     ),
     tags(

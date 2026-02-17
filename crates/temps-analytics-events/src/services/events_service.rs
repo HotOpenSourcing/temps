@@ -497,6 +497,11 @@ impl AnalyticsEventsService {
                 "events e LEFT JOIN ip_geolocations ig ON e.ip_geolocation_id = ig.id",
                 format!("COALESCE(ig.{}, 'Unknown')", group_by_str),
             )
+        } else if is_referrer_column {
+            (
+                "events e",
+                format!("COALESCE(e.{}, 'Direct')", group_by_str),
+            )
         } else {
             ("events e", format!("e.{}", group_by_str))
         };
@@ -650,10 +655,16 @@ impl AnalyticsEventsService {
 
         // Check if we need to join with ip_geolocations
         let is_geo_column = matches!(group_by_str, "country" | "region" | "city");
+        let is_referrer_column = group_by_str == "referrer_hostname";
         let (from_clause, select_column) = if is_geo_column {
             (
                 "events e LEFT JOIN ip_geolocations ig ON e.ip_geolocation_id = ig.id",
                 format!("COALESCE(ig.{}, 'Unknown')", group_by_str),
+            )
+        } else if is_referrer_column {
+            (
+                "events e",
+                format!("COALESCE(e.{}, 'Direct')", group_by_str),
             )
         } else {
             ("events e", format!("e.{}", group_by_str))
@@ -1047,6 +1058,10 @@ WHERE project_id = $1
             .collect();
 
         // Query 3: Hourly sparkline data per project (current period — raw events for accuracy)
+        // Uses generate_series to produce the full hour grid and LEFT JOINs actual data.
+        // This guarantees every project gets a row for every hour in the range, even when
+        // a project has events in only a single bucket (time_bucket_gapfill inside
+        // CROSS JOIN LATERAL fails to fill gaps in that edge case).
         let gapfill_start_idx = project_ids.len() + 3;
         let gapfill_end_idx = gapfill_start_idx + 1;
 
@@ -1054,21 +1069,27 @@ WHERE project_id = $1
             r#"
             SELECT
                 p.project_id,
-                sub.bucket::timestamptz as bucket,
-                COALESCE(sub.count, 0) as count
+                h.bucket,
+                COALESCE(d.count, 0) as count
             FROM unnest(ARRAY[{in_clause}]) AS p(project_id)
-            CROSS JOIN LATERAL (
+            CROSS JOIN generate_series(
+                date_trunc('hour', ${gapfill_start_idx}::timestamptz),
+                date_trunc('hour', ${gapfill_end_idx}::timestamptz),
+                '1 hour'::interval
+            ) AS h(bucket)
+            LEFT JOIN (
                 SELECT
-                    time_bucket_gapfill('1 hour', timestamp, ${gapfill_start_idx}::timestamptz, ${gapfill_end_idx}::timestamptz) as bucket,
-                    COALESCE(COUNT(DISTINCT visitor_id) FILTER (WHERE visitor_id IS NOT NULL), 0) as count
+                    project_id,
+                    date_trunc('hour', timestamp) as bucket,
+                    COUNT(DISTINCT visitor_id) FILTER (WHERE visitor_id IS NOT NULL) as count
                 FROM events
-                WHERE project_id = p.project_id
-                  AND timestamp >= $1
+                WHERE timestamp >= $1
                   AND timestamp <= $2
+                  AND project_id IN ({in_clause})
                   AND event_type = 'page_view'
-                GROUP BY bucket
-            ) sub
-            ORDER BY p.project_id, sub.bucket ASC
+                GROUP BY project_id, date_trunc('hour', timestamp)
+            ) d ON d.project_id = p.project_id AND d.bucket = h.bucket
+            ORDER BY p.project_id, h.bucket ASC
             "#,
         );
 

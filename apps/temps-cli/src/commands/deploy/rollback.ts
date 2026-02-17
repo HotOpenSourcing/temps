@@ -1,5 +1,6 @@
 import { requireAuth } from '../../config/store.js'
 import { setupClient, client, getErrorMessage } from '../../lib/api-client.js'
+import { requireProjectSlug } from '../../config/resolve-project.js'
 import {
   getProjectBySlug,
   getProjectDeployments,
@@ -19,22 +20,24 @@ export async function rollback(options: RollbackOptions): Promise<void> {
   await requireAuth()
   await setupClient()
 
-  if (!options.project) {
-    throw new Error('Project is required. Use: temps deployments rollback --project <project>')
+  const resolved = await requireProjectSlug(options.project)
+
+  if (resolved.source !== 'flag') {
+    info(`Using project ${colors.bold(resolved.slug)} (from ${resolved.source})`)
   }
 
   newline()
-  warning(`Rolling back ${colors.bold(options.project)} in ${colors.bold(options.environment)}`)
+  warning(`Rolling back ${colors.bold(resolved.slug)} in ${colors.bold(options.environment)}`)
   newline()
 
   // Get project ID
   const { data: projectData, error: projectError } = await getProjectBySlug({
     client,
-    path: { slug: options.project },
+    path: { slug: resolved.slug },
   })
 
   if (projectError || !projectData) {
-    throw new Error(`Project "${options.project}" not found`)
+    throw new Error(`Project "${resolved.slug}" not found`)
   }
 
   let targetDeploymentId = options.to ? parseInt(options.to, 10) : undefined
@@ -51,30 +54,36 @@ export async function rollback(options: RollbackOptions): Promise<void> {
         throw new Error(getErrorMessage(error))
       }
 
-      // Filter by environment and status
+      // Filter by environment and completed status
       return data.deployments
         .filter(d =>
           d.environment?.name === options.environment &&
           (d.status === 'success' || d.status === 'completed' || d.status === 'deployed')
         )
-        .slice(0, 5)
+        .slice(0, 10)
     })
 
-    if (deployments.length < 2) {
-      warning('No previous deployments to rollback to')
+    if (deployments.length === 0) {
+      warning('No completed deployments found for this environment')
       return
     }
 
-    // Skip current, show previous deployments
-    const previousDeployments = deployments.slice(1)
-
+    // Show all deployments, mark which is current
     const selectedId = await promptSelect({
       message: 'Select deployment to rollback to',
-      choices: previousDeployments.map((d) => ({
-        name: `#${d.id} - ${d.branch ?? 'unknown'} (${d.commit_hash?.substring(0, 7) ?? 'unknown'})`,
-        value: String(d.id),
-        description: new Date(d.created_at * 1000).toLocaleString(),
-      })),
+      choices: deployments.map((d) => {
+        const isRollback = d.metadata?.isRollback
+        const branch = d.branch ?? (isRollback ? 'rollback' : 'unknown')
+        const commit = d.commit_hash?.substring(0, 7) ?? (isRollback ? `from #${d.metadata?.rolledBackFromId ?? '?'}` : '-')
+        const currentTag = d.is_current ? ' (current)' : ''
+        const date = new Date(d.created_at * 1000).toLocaleString()
+
+        return {
+          name: `#${d.id} - ${branch} (${commit})${currentTag}`,
+          value: String(d.id),
+          description: date,
+        }
+      }),
     })
 
     targetDeploymentId = parseInt(selectedId, 10)
@@ -112,5 +121,5 @@ export async function rollback(options: RollbackOptions): Promise<void> {
   keyValue('Status', newDeployment.status)
   newline()
 
-  info(`Track progress with: temps deployments status --project ${options.project} --deployment-id ${newDeployment.id}`)
+  info(`Track progress with: temps deployments status --project ${resolved.slug} --deployment-id ${newDeployment.id}`)
 }

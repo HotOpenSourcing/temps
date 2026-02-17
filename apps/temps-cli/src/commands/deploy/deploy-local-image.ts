@@ -1,5 +1,6 @@
 import { requireAuth, config, credentials } from '../../config/store.js'
-import { setupClient, client } from '../../lib/api-client.js'
+import { setupClient, client, normalizeApiUrl } from '../../lib/api-client.js'
+import { resolveProjectSlug } from '../../config/resolve-project.js'
 import { watchDeployment } from '../../lib/deployment-watcher.jsx'
 import { getProjectBySlug, getProject, getEnvironments, generatePresetDockerfile } from '../../api/sdk.gen.js'
 import type { EnvironmentResponse } from '../../api/types.gen.js'
@@ -48,14 +49,19 @@ export async function deployLocalImage(options: DeployLocalImageOptions): Promis
   newline()
 
   // ─── Step 1: Resolve project and environment ─────────────────────────────
-  const projectName = options.project ?? config.get('defaultProject')
+  const resolved = await resolveProjectSlug(options.project)
 
-  if (!projectName) {
+  if (!resolved) {
     warning('No project specified')
-    info(
-      'Use: temps deploy:local-image --project <project> or set a default with temps configure'
-    )
+    info('Use: bunx @temps-sdk/cli deploy:local-image --project <slug>')
+    info('Or link this directory: bunx @temps-sdk/cli link <slug>')
     return
+  }
+
+  const projectName = resolved.slug
+
+  if (resolved.source !== 'flag') {
+    info(`Using project ${colors.bold(projectName)} (from ${resolved.source})`)
   }
 
   startSpinner('Fetching project details...')
@@ -317,7 +323,7 @@ export async function deployLocalImage(options: DeployLocalImageOptions): Promis
 
   startSpinner('Uploading image to server...')
 
-  const apiUrl = config.get('apiUrl')
+  const apiUrl = normalizeApiUrl(config.get('apiUrl'))
   const apiKey = await credentials.getApiKey()
 
   try {
@@ -606,7 +612,11 @@ interface GeneratedDockerfile {
 async function tryGenerateDockerfile(
   projectSlug?: string
 ): Promise<GeneratedDockerfile | null> {
-  const slug = projectSlug ?? config.get('defaultProject')
+  let slug = projectSlug
+  if (!slug) {
+    const resolved = await resolveProjectSlug()
+    slug = resolved?.slug
+  }
   if (!slug) return null
 
   // Fetch the project to get its preset

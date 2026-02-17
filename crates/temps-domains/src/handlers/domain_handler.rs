@@ -529,13 +529,89 @@ async fn provision_domain(
             .build());
     }
 
+    // Look up the domain to check the stored verification method
+    let domain_model = app_state
+        .domain_service
+        .get_domain(&domain)
+        .await
+        .map_err(|e| {
+            error!("Failed to get domain {}: {}", domain, e);
+            e
+        })?
+        .ok_or_else(|| {
+            ErrorBuilder::new(StatusCode::NOT_FOUND)
+                .title("Domain not found")
+                .detail(format!("Domain {} not found", domain))
+                .build()
+        })?;
+
+    // For DNS-01 domains, use request_challenge + complete_challenge flow
+    if domain_model.verification_method == "dns-01" {
+        info!(
+            "Starting DNS-01 challenge provisioning for domain: {} for user: {}",
+            domain,
+            auth.user_id()
+        );
+
+        // Try to complete the DNS-01 challenge (assumes TXT records are already set)
+        let result = app_state
+            .domain_service
+            .complete_challenge(&domain, user_email)
+            .await;
+
+        let result = match result {
+            Ok(certificate) => {
+                info!(
+                    "Certificate successfully provisioned via DNS-01 for {}",
+                    domain
+                );
+                Ok((
+                    StatusCode::OK,
+                    Json(ProvisionResponse::Complete(DomainResponse::from(
+                        certificate,
+                    ))),
+                ))
+            }
+            Err(e) => {
+                error!(
+                    "Failed to provision certificate via DNS-01 for {}: {}",
+                    domain, e
+                );
+                Ok((
+                    StatusCode::OK,
+                    Json(ProvisionResponse::Error(DomainError {
+                        message: e.to_string(),
+                        code: "PROVISION_FAILED".to_string(),
+                        details: Some("DNS-01 challenge provisioning failed. Ensure TXT records are set correctly.".to_string()),
+                    })),
+                ))
+            }
+        };
+
+        // Audit log
+        let audit = DomainAudit {
+            context: AuditContext {
+                user_id: auth.user_id(),
+                ip_address: Some(metadata.ip_address.clone()),
+                user_agent: metadata.user_agent.clone(),
+            },
+            domain: domain.clone(),
+            action: "DOMAIN_PROVISIONED".to_string(),
+        };
+        if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+            error!("Failed to create audit log: {}", e);
+        }
+
+        return result;
+    }
+
+    // HTTP-01 flow (default)
     info!(
-        "Starting HTTP challenge provisioning for domain: {} for user: {}",
+        "Starting HTTP-01 challenge provisioning for domain: {} for user: {}",
         domain,
         auth.user_id()
     );
 
-    // Try to provision the certificate using HTTP-01 challenge
     let result = match app_state
         .tls_service
         .provision_certificate(&domain, user_email)
@@ -556,7 +632,6 @@ async fn provision_domain(
                 domain, msg
             );
 
-            // Return a challenge response that includes HTTP challenge details
             let challenge_response = DomainChallengeResponse {
                 domain: domain.clone(),
                 txt_records: vec![TxtRecord {

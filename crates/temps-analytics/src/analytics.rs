@@ -315,7 +315,10 @@ impl Analytics for AnalyticsService {
                 ig.country_code,
                 ig.timezone,
                 ig.is_eu,
-                last_event.page_path as current_page
+                last_event.page_path as current_page,
+                v.first_referrer,
+                v.first_referrer_hostname,
+                v.first_channel
             FROM visitor v
             LEFT JOIN ip_geolocations ig ON v.ip_address_id = ig.id
             LEFT JOIN LATERAL (
@@ -361,6 +364,9 @@ impl Analytics for AnalyticsService {
             timezone: Option<String>,
             is_eu: Option<bool>,
             current_page: Option<String>,
+            first_referrer: Option<String>,
+            first_referrer_hostname: Option<String>,
+            first_channel: Option<String>,
         }
 
         let results = VisitorResult::find_by_statement(Statement::from_sql_and_values(
@@ -395,6 +401,9 @@ impl Analytics for AnalyticsService {
                 timezone: r.timezone,
                 is_eu: r.is_eu,
                 current_page: r.current_page,
+                first_referrer: r.first_referrer,
+                first_referrer_hostname: r.first_referrer_hostname,
+                first_channel: r.first_channel,
             })
             .collect();
 
@@ -651,7 +660,10 @@ impl Analytics for AnalyticsService {
                 ig.country,
                 ig.country_code,
                 ig.timezone,
-                ig.is_eu
+                ig.is_eu,
+                v.first_referrer,
+                v.first_referrer_hostname,
+                v.first_channel
             FROM visitor v
             LEFT JOIN ip_geolocations ig ON v.ip_address_id = ig.id
             WHERE v.id = $1
@@ -679,6 +691,9 @@ impl Analytics for AnalyticsService {
             country_code: Option<String>,
             timezone: Option<String>,
             is_eu: Option<bool>,
+            first_referrer: Option<String>,
+            first_referrer_hostname: Option<String>,
+            first_channel: Option<String>,
         }
 
         let result = DetailResult::find_by_statement(Statement::from_sql_and_values(
@@ -710,6 +725,9 @@ impl Analytics for AnalyticsService {
             country_code: r.country_code,
             timezone: r.timezone,
             is_eu: r.is_eu,
+            first_referrer: r.first_referrer,
+            first_referrer_hostname: r.first_referrer_hostname,
+            first_channel: r.first_channel,
         }))
     }
 
@@ -2235,6 +2253,9 @@ WHERE project_id = $1
                     country_code: geo_opt.as_ref().and_then(|g| g.country_code.clone()),
                     timezone: geo_opt.as_ref().and_then(|g| g.timezone.clone()),
                     is_eu: geo_opt.as_ref().map(|g| g.is_eu),
+                    first_referrer: visitor_model.first_referrer,
+                    first_referrer_hostname: visitor_model.first_referrer_hostname,
+                    first_channel: visitor_model.first_channel,
                 };
                 Ok(Some(response))
             }
@@ -2292,6 +2313,9 @@ WHERE project_id = $1
                     country_code: geo_opt.as_ref().and_then(|g| g.country_code.clone()),
                     timezone: geo_opt.as_ref().and_then(|g| g.timezone.clone()),
                     is_eu: geo_opt.as_ref().map(|g| g.is_eu),
+                    first_referrer: visitor_model.first_referrer,
+                    first_referrer_hostname: visitor_model.first_referrer_hostname,
+                    first_channel: visitor_model.first_channel,
                 };
                 Ok(Some(response))
             }
@@ -2327,7 +2351,10 @@ WHERE project_id = $1
                 ig.country_code,
                 ig.timezone,
                 ig.is_eu,
-                last_event.page_path as current_page
+                last_event.page_path as current_page,
+                v.first_referrer,
+                v.first_referrer_hostname,
+                v.first_channel
             FROM visitor v
             LEFT JOIN ip_geolocations ig ON v.ip_address_id = ig.id
             LEFT JOIN LATERAL (
@@ -2366,6 +2393,9 @@ WHERE project_id = $1
             timezone: Option<String>,
             is_eu: Option<bool>,
             current_page: Option<String>,
+            first_referrer: Option<String>,
+            first_referrer_hostname: Option<String>,
+            first_channel: Option<String>,
         }
 
         let rows = LiveVisitorRow::find_by_statement(Statement::from_sql_and_values(
@@ -2404,6 +2434,9 @@ WHERE project_id = $1
                 timezone: row.timezone,
                 is_eu: row.is_eu,
                 current_page: row.current_page,
+                first_referrer: row.first_referrer,
+                first_referrer_hostname: row.first_referrer_hostname,
+                first_channel: row.first_channel,
             })
             .collect();
 
@@ -3579,6 +3612,507 @@ WHERE project_id = $1
             transitions,
             total_pages,
             total_sessions,
+        })
+    }
+
+    /// Get detailed analytics for a specific event name
+    async fn get_event_detail(
+        &self,
+        project_id: i32,
+        event_name: &str,
+        start_date: UtcDateTime,
+        end_date: UtcDateTime,
+        environment_id: Option<i32>,
+        bucket_interval: Option<&str>,
+    ) -> Result<crate::types::responses::EventDetailResponse, AnalyticsError> {
+        // Determine bucket interval based on date range
+        let duration = end_date - start_date;
+        let interval = bucket_interval.unwrap_or_else(|| {
+            if duration.num_days() <= 1 {
+                "hour"
+            } else if duration.num_days() <= 31 {
+                "day"
+            } else if duration.num_days() <= 180 {
+                "week"
+            } else {
+                "month"
+            }
+        });
+
+        let (pg_interval, date_trunc_unit) = match interval {
+            "hour" => ("1 hour", "hour"),
+            "day" => ("1 day", "day"),
+            "week" => ("1 week", "week"),
+            "month" => ("1 month", "month"),
+            _ => ("1 day", "day"),
+        };
+
+        let env_filter = environment_id
+            .map(|id| format!("AND e.environment_id = {}", id))
+            .unwrap_or_default();
+
+        // 1. Get summary stats
+        let stats_sql = format!(
+            r#"
+            SELECT
+                COUNT(*) as total_count,
+                COUNT(DISTINCT e.visitor_id) as unique_visitors,
+                COUNT(DISTINCT e.session_id) as unique_sessions
+            FROM events e
+            WHERE e.project_id = $1
+              AND COALESCE(e.event_name, e.event_type) = $2
+              AND e.timestamp >= $3
+              AND e.timestamp < $4
+              {}
+            "#,
+            env_filter
+        );
+
+        #[derive(FromQueryResult)]
+        struct EventStats {
+            total_count: i64,
+            unique_visitors: i64,
+            unique_sessions: i64,
+        }
+
+        let stats = EventStats::find_by_statement(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            &stats_sql,
+            vec![
+                project_id.into(),
+                event_name.into(),
+                start_date.into(),
+                end_date.into(),
+            ],
+        ))
+        .one(self.db.as_ref())
+        .await?
+        .unwrap_or(EventStats {
+            total_count: 0,
+            unique_visitors: 0,
+            unique_sessions: 0,
+        });
+
+        // 2. Get time series data
+        let activity_sql = format!(
+            r#"
+            WITH time_buckets AS (
+                SELECT generate_series(
+                    date_trunc('{date_trunc}', $3::timestamptz),
+                    date_trunc('{date_trunc}', $4::timestamptz),
+                    '{pg_interval}'::interval
+                ) AS bucket
+            ),
+            event_activity AS (
+                SELECT
+                    date_trunc('{date_trunc}', e.timestamp) as bucket,
+                    COUNT(*) as count,
+                    COUNT(DISTINCT e.visitor_id) as unique_visitors
+                FROM events e
+                WHERE e.project_id = $1
+                  AND COALESCE(e.event_name, e.event_type) = $2
+                  AND e.timestamp >= $3
+                  AND e.timestamp < $4
+                  {env_filter}
+                GROUP BY date_trunc('{date_trunc}', e.timestamp)
+            )
+            SELECT
+                tb.bucket::timestamptz as timestamp,
+                COALESCE(ea.count, 0) as count,
+                COALESCE(ea.unique_visitors, 0) as unique_visitors
+            FROM time_buckets tb
+            LEFT JOIN event_activity ea ON tb.bucket = ea.bucket
+            ORDER BY tb.bucket
+            "#,
+            date_trunc = date_trunc_unit,
+            pg_interval = pg_interval,
+            env_filter = env_filter,
+        );
+
+        #[derive(FromQueryResult)]
+        struct ActivityBucket {
+            timestamp: UtcDateTime,
+            count: i64,
+            unique_visitors: i64,
+        }
+
+        let activity_results = ActivityBucket::find_by_statement(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            &activity_sql,
+            vec![
+                project_id.into(),
+                event_name.into(),
+                start_date.into(),
+                end_date.into(),
+            ],
+        ))
+        .all(self.db.as_ref())
+        .await?;
+
+        let activity_over_time: Vec<crate::types::responses::EventActivityBucket> =
+            activity_results
+                .into_iter()
+                .map(|b| crate::types::responses::EventActivityBucket {
+                    timestamp: b.timestamp,
+                    count: b.count,
+                    unique_visitors: b.unique_visitors,
+                })
+                .collect();
+
+        // 3. Get top referrers
+        let referrers_sql = format!(
+            r#"
+            WITH referrer_stats AS (
+                SELECT
+                    COALESCE(NULLIF(e.referrer_hostname, ''), 'Direct') as referrer,
+                    COUNT(*) as count
+                FROM events e
+                WHERE e.project_id = $1
+                  AND COALESCE(e.event_name, e.event_type) = $2
+                  AND e.timestamp >= $3
+                  AND e.timestamp < $4
+                  {}
+                GROUP BY COALESCE(NULLIF(e.referrer_hostname, ''), 'Direct')
+            ),
+            total AS (
+                SELECT SUM(count) as total_count FROM referrer_stats
+            )
+            SELECT
+                rs.referrer,
+                rs.count,
+                CASE WHEN t.total_count > 0
+                     THEN rs.count::float / t.total_count::float * 100
+                     ELSE 0 END as percentage
+            FROM referrer_stats rs
+            CROSS JOIN total t
+            ORDER BY rs.count DESC
+            LIMIT 20
+            "#,
+            env_filter
+        );
+
+        #[derive(FromQueryResult)]
+        struct ReferrerResult {
+            referrer: String,
+            count: i64,
+            percentage: f64,
+        }
+
+        let referrer_results = ReferrerResult::find_by_statement(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            &referrers_sql,
+            vec![
+                project_id.into(),
+                event_name.into(),
+                start_date.into(),
+                end_date.into(),
+            ],
+        ))
+        .all(self.db.as_ref())
+        .await?;
+
+        let referrers: Vec<crate::types::responses::EventReferrerStats> = referrer_results
+            .into_iter()
+            .map(|r| crate::types::responses::EventReferrerStats {
+                referrer: r.referrer,
+                count: r.count,
+                percentage: r.percentage,
+            })
+            .collect();
+
+        // 4. Get top countries
+        let countries_sql = format!(
+            r#"
+            WITH country_stats AS (
+                SELECT
+                    COALESCE(ig.country, 'Unknown') as country,
+                    ig.country_code,
+                    COUNT(*) as count
+                FROM events e
+                LEFT JOIN ip_geolocations ig ON e.ip_geolocation_id = ig.id
+                WHERE e.project_id = $1
+                  AND COALESCE(e.event_name, e.event_type) = $2
+                  AND e.timestamp >= $3
+                  AND e.timestamp < $4
+                  {}
+                GROUP BY COALESCE(ig.country, 'Unknown'), ig.country_code
+            ),
+            total AS (
+                SELECT SUM(count) as total_count FROM country_stats
+            )
+            SELECT
+                cs.country,
+                cs.country_code,
+                cs.count,
+                CASE WHEN t.total_count > 0
+                     THEN cs.count::float / t.total_count::float * 100
+                     ELSE 0 END as percentage
+            FROM country_stats cs
+            CROSS JOIN total t
+            ORDER BY cs.count DESC
+            LIMIT 30
+            "#,
+            env_filter
+        );
+
+        #[derive(FromQueryResult)]
+        struct CountryResult {
+            country: String,
+            country_code: Option<String>,
+            count: i64,
+            percentage: f64,
+        }
+
+        let country_results = CountryResult::find_by_statement(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            &countries_sql,
+            vec![
+                project_id.into(),
+                event_name.into(),
+                start_date.into(),
+                end_date.into(),
+            ],
+        ))
+        .all(self.db.as_ref())
+        .await?;
+
+        let countries: Vec<crate::types::responses::EventCountryStats> = country_results
+            .into_iter()
+            .map(|c| crate::types::responses::EventCountryStats {
+                country: c.country,
+                country_code: c.country_code,
+                count: c.count,
+                percentage: c.percentage,
+            })
+            .collect();
+
+        // 5. Get top browsers
+        let browsers_sql = format!(
+            r#"
+            WITH browser_stats AS (
+                SELECT
+                    COALESCE(e.browser, 'Unknown') as browser,
+                    COUNT(*) as count
+                FROM events e
+                WHERE e.project_id = $1
+                  AND COALESCE(e.event_name, e.event_type) = $2
+                  AND e.timestamp >= $3
+                  AND e.timestamp < $4
+                  {}
+                GROUP BY COALESCE(e.browser, 'Unknown')
+            ),
+            total AS (
+                SELECT SUM(count) as total_count FROM browser_stats
+            )
+            SELECT
+                bs.browser,
+                bs.count,
+                CASE WHEN t.total_count > 0
+                     THEN bs.count::float / t.total_count::float * 100
+                     ELSE 0 END as percentage
+            FROM browser_stats bs
+            CROSS JOIN total t
+            ORDER BY bs.count DESC
+            LIMIT 20
+            "#,
+            env_filter
+        );
+
+        #[derive(FromQueryResult)]
+        struct BrowserResult {
+            browser: String,
+            count: i64,
+            percentage: f64,
+        }
+
+        let browser_results = BrowserResult::find_by_statement(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            &browsers_sql,
+            vec![
+                project_id.into(),
+                event_name.into(),
+                start_date.into(),
+                end_date.into(),
+            ],
+        ))
+        .all(self.db.as_ref())
+        .await?;
+
+        let browsers: Vec<crate::types::responses::EventBrowserStats> = browser_results
+            .into_iter()
+            .map(|b| crate::types::responses::EventBrowserStats {
+                browser: b.browser,
+                count: b.count,
+                percentage: b.percentage,
+            })
+            .collect();
+
+        Ok(crate::types::responses::EventDetailResponse {
+            event_name: event_name.to_string(),
+            total_count: stats.total_count,
+            unique_visitors: stats.unique_visitors,
+            unique_sessions: stats.unique_sessions,
+            activity_over_time,
+            referrers,
+            countries,
+            browsers,
+            bucket_interval: interval.to_string(),
+        })
+    }
+
+    /// Get paginated list of visitors who triggered a specific event
+    async fn get_event_visitors(
+        &self,
+        project_id: i32,
+        event_name: &str,
+        start_date: UtcDateTime,
+        end_date: UtcDateTime,
+        environment_id: Option<i32>,
+        page: u64,
+        per_page: u64,
+    ) -> Result<crate::types::responses::EventVisitorsResponse, AnalyticsError> {
+        let per_page = per_page.min(100);
+        let offset = (page.saturating_sub(1)) * per_page;
+
+        let env_filter = environment_id
+            .map(|id| format!("AND e.environment_id = {}", id))
+            .unwrap_or_default();
+
+        // Get total count of unique visitors
+        let count_sql = format!(
+            r#"
+            SELECT COUNT(DISTINCT e.visitor_id) as total_count
+            FROM events e
+            WHERE e.project_id = $1
+              AND COALESCE(e.event_name, e.event_type) = $2
+              AND e.timestamp >= $3
+              AND e.timestamp < $4
+              AND e.visitor_id IS NOT NULL
+              {}
+            "#,
+            env_filter
+        );
+
+        #[derive(FromQueryResult)]
+        struct CountResult {
+            total_count: i64,
+        }
+
+        let total_count = CountResult::find_by_statement(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            &count_sql,
+            vec![
+                project_id.into(),
+                event_name.into(),
+                start_date.into(),
+                end_date.into(),
+            ],
+        ))
+        .one(self.db.as_ref())
+        .await?
+        .map(|c| c.total_count)
+        .unwrap_or(0);
+
+        // Get paginated visitors with aggregated stats
+        let visitors_sql = format!(
+            r#"
+            WITH visitor_events AS (
+                SELECT
+                    e.visitor_id,
+                    COUNT(*) as event_count,
+                    MIN(e.timestamp) as first_triggered,
+                    MAX(e.timestamp) as last_triggered,
+                    -- Pick the most recent non-null values for each field
+                    (array_agg(ig.country ORDER BY e.timestamp DESC) FILTER (WHERE ig.country IS NOT NULL))[1] as country,
+                    (array_agg(ig.country_code ORDER BY e.timestamp DESC) FILTER (WHERE ig.country_code IS NOT NULL))[1] as country_code,
+                    (array_agg(ig.city ORDER BY e.timestamp DESC) FILTER (WHERE ig.city IS NOT NULL))[1] as city,
+                    (array_agg(e.browser ORDER BY e.timestamp DESC) FILTER (WHERE e.browser IS NOT NULL))[1] as browser,
+                    (array_agg(e.device_type ORDER BY e.timestamp DESC) FILTER (WHERE e.device_type IS NOT NULL))[1] as device_type,
+                    (array_agg(e.referrer_hostname ORDER BY e.timestamp DESC) FILTER (WHERE e.referrer_hostname IS NOT NULL AND e.referrer_hostname != ''))[1] as referrer_hostname
+                FROM events e
+                LEFT JOIN ip_geolocations ig ON e.ip_geolocation_id = ig.id
+                WHERE e.project_id = $1
+                  AND COALESCE(e.event_name, e.event_type) = $2
+                  AND e.timestamp >= $3
+                  AND e.timestamp < $4
+                  AND e.visitor_id IS NOT NULL
+                  {env_filter}
+                GROUP BY e.visitor_id
+                ORDER BY event_count DESC, last_triggered DESC
+                LIMIT $5 OFFSET $6
+            )
+            SELECT
+                ve.visitor_id,
+                COALESCE(v.visitor_id, '') as visitor_uuid,
+                ve.event_count,
+                ve.first_triggered,
+                ve.last_triggered,
+                ve.country,
+                ve.country_code,
+                ve.city,
+                ve.browser,
+                ve.device_type,
+                ve.referrer_hostname
+            FROM visitor_events ve
+            LEFT JOIN visitor v ON v.id = ve.visitor_id
+            ORDER BY ve.event_count DESC, ve.last_triggered DESC
+            "#,
+            env_filter = env_filter
+        );
+
+        #[derive(FromQueryResult)]
+        struct VisitorResult {
+            visitor_id: i32,
+            visitor_uuid: String,
+            event_count: i64,
+            first_triggered: UtcDateTime,
+            last_triggered: UtcDateTime,
+            country: Option<String>,
+            country_code: Option<String>,
+            city: Option<String>,
+            browser: Option<String>,
+            device_type: Option<String>,
+            referrer_hostname: Option<String>,
+        }
+
+        let visitor_results = VisitorResult::find_by_statement(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            &visitors_sql,
+            vec![
+                project_id.into(),
+                event_name.into(),
+                start_date.into(),
+                end_date.into(),
+                (per_page as i64).into(),
+                (offset as i64).into(),
+            ],
+        ))
+        .all(self.db.as_ref())
+        .await?;
+
+        let visitors: Vec<crate::types::responses::EventVisitorInfo> = visitor_results
+            .into_iter()
+            .map(|v| crate::types::responses::EventVisitorInfo {
+                visitor_id: v.visitor_id,
+                visitor_uuid: v.visitor_uuid,
+                event_count: v.event_count,
+                first_triggered: v.first_triggered,
+                last_triggered: v.last_triggered,
+                country: v.country,
+                country_code: v.country_code,
+                city: v.city,
+                browser: v.browser,
+                device_type: v.device_type,
+                referrer_hostname: v.referrer_hostname,
+            })
+            .collect();
+
+        Ok(crate::types::responses::EventVisitorsResponse {
+            event_name: event_name.to_string(),
+            total_count,
+            page,
+            per_page,
+            visitors,
         })
     }
 }

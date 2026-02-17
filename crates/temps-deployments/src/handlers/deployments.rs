@@ -710,7 +710,8 @@ pub async fn list_containers(
         ("start_date" = Option<i64>, Query, description = "Start date for logs"),
         ("end_date" = Option<i64>, Query, description = "End date for logs"),
         ("tail" = Option<String>, Query, description = "Number of lines to tail (or 'all')"),
-        ("timestamps" = Option<bool>, Query, description = "Include timestamps in log output (default: false)")
+        ("timestamps" = Option<bool>, Query, description = "Include timestamps in log output (default: false)"),
+        ("follow" = Option<bool>, Query, description = "Follow log output in real-time (default: true)")
     ),
     responses(
         (status = 101, description = "WebSocket connection established for streaming container logs"),
@@ -747,6 +748,7 @@ pub async fn get_container_logs_by_id(
                 end_date: query.end_date,
                 tail: query.tail,
                 timestamps: query.timestamps,
+                follow: query.follow,
             },
         )
     }))
@@ -761,6 +763,7 @@ struct ContainerLogParams {
     end_date: Option<i64>,
     tail: Option<String>,
     timestamps: bool,
+    follow: bool,
 }
 
 async fn handle_container_logs_socket(
@@ -785,6 +788,7 @@ async fn handle_container_logs_socket(
                 end_date: params.end_date,
                 tail: params.tail,
                 timestamps: params.timestamps,
+                follow: params.follow,
             },
         )
         .await
@@ -851,7 +855,8 @@ async fn handle_container_logs_socket(
         ("end_date" = Option<i64>, Query, description = "End date for logs"),
         ("tail" = Option<String>, Query, description = "Number of lines to tail (or 'all')"),
         ("container_name" = Option<String>, Query, description = "Optional container name (defaults to first/primary container)"),
-        ("timestamps" = Option<bool>, Query, description = "Include timestamps in log output (default: false)")
+        ("timestamps" = Option<bool>, Query, description = "Include timestamps in log output (default: false)"),
+        ("follow" = Option<bool>, Query, description = "Follow log output in real-time (default: true)")
     ),
     responses(
         (status = 101, description = "WebSocket connection established for streaming container logs"),
@@ -888,6 +893,7 @@ pub async fn get_container_logs(
                 tail: query.tail,
                 container_name: query.container_name,
                 timestamps: query.timestamps,
+                follow: query.follow,
             },
         )
     }))
@@ -902,6 +908,7 @@ struct FilteredContainerLogParams {
     tail: Option<String>,
     container_name: Option<String>,
     timestamps: bool,
+    follow: bool,
 }
 
 async fn handle_filtered_container_logs_socket(
@@ -926,6 +933,7 @@ async fn handle_filtered_container_logs_socket(
                 end_date: params.end_date,
                 tail: params.tail,
                 timestamps: params.timestamps,
+                follow: params.follow,
             },
         )
         .await
