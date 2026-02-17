@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/AnomalyCo/temps/main/temps-demo.gif" alt="Temps Platform" width="700" />
+  <img src="https://raw.githubusercontent.com/gotempsh/temps/refs/heads/main/web/public/logo/temps-logo-light.png" alt="Temps Platform" width="700" />
 </p>
 
 <h1 align="center">@temps-sdk/node-sdk</h1>

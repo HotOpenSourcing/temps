@@ -278,6 +278,7 @@ export type ApiKeyResponse = {
  */
 export type AppSettings = {
     allow_readonly_external_access?: boolean;
+    container_logs?: ContainerLogSettings;
     demo_mode?: DemoModeSettings;
     disk_space_alert?: DiskSpaceAlertSettings;
     dns_provider?: DnsProviderSettings;
@@ -294,6 +295,7 @@ export type AppSettings = {
  * Safe response for application settings that masks sensitive fields
  */
 export type AppSettingsResponse = {
+    container_logs: ContainerLogSettings;
     disk_space_alert: DiskSpaceAlertSettings;
     dns_provider: DnsProviderSettingsMasked;
     docker_registry: DockerRegistrySettingsMasked;
@@ -417,7 +419,7 @@ export type AvailableContainerInfo = {
      */
     exposed_ports?: Array<number>;
     /**
-     * Docker image name (e.g., "postgres:17-alpine")
+     * Docker image name (e.g., "postgres:18-alpine")
      */
     image: string;
     /**
@@ -656,6 +658,33 @@ export type CommitExistsResponse = {
     exists: boolean;
 };
 
+export type CommitInfo = {
+    /**
+     * Author name
+     */
+    author: string;
+    /**
+     * Author email
+     */
+    author_email: string;
+    /**
+     * Commit date in ISO 8601 format
+     */
+    date: string;
+    /**
+     * Commit message
+     */
+    message: string;
+    /**
+     * Commit SHA hash
+     */
+    sha: string;
+};
+
+export type CommitListResponse = {
+    commits: Array<CommitInfo>;
+};
+
 export type ConnectionListQuery = {
     direction?: string | null;
     page?: number | null;
@@ -745,12 +774,41 @@ export type ContainerListResponse = {
     total: number;
 };
 
+/**
+ * Docker container log rotation settings
+ * Controls the `--log-opt max-size` and `--log-opt max-file` for containers
+ */
+export type ContainerLogSettings = {
+    /**
+     * Maximum number of rotated log files to keep (e.g., 3 means up to 3 x max_size total)
+     */
+    max_file?: number;
+    /**
+     * Maximum size of each log file (e.g., "50m", "100m", "1g")
+     * Docker default is unlimited; we default to "50m" to prevent disk exhaustion
+     */
+    max_size?: string;
+    /**
+     * Maximum rotated log files for external service containers
+     */
+    service_max_file?: number;
+    /**
+     * Maximum size for external service container logs (postgres, redis, etc.)
+     * Defaults to "20m" since services are typically less verbose than app containers
+     */
+    service_max_size?: string;
+};
+
 export type ContainerLogsQuery = {
     /**
      * Optional container name to get logs from (if deployment has multiple containers)
      */
     container_name?: string | null;
     end_date?: number | null;
+    /**
+     * Follow log output in real-time (default: true for backward compatibility)
+     */
+    follow?: boolean;
     start_date?: number | null;
     tail?: string | null;
     /**
@@ -2840,12 +2898,130 @@ export type ErrorTimeSeriesQuery = {
     start_time: string;
 };
 
+/**
+ * Time bucket data point for event activity graph
+ */
+export type EventActivityBucket = {
+    /**
+     * Number of event occurrences in this bucket
+     */
+    count: number;
+    /**
+     * Timestamp for this bucket (ISO 8601)
+     */
+    timestamp: string;
+    /**
+     * Number of unique visitors in this bucket
+     */
+    unique_visitors: number;
+};
+
 export type EventBreakdown = 'country' | 'region' | 'city';
+
+/**
+ * Browser stats for an event
+ */
+export type EventBrowserStats = {
+    /**
+     * Browser name
+     */
+    browser: string;
+    /**
+     * Number of event occurrences from this browser
+     */
+    count: number;
+    /**
+     * Percentage of total events
+     */
+    percentage: number;
+};
 
 export type EventCount = {
     count: number;
     event_name: string;
     percentage: number;
+};
+
+/**
+ * Country stats for an event
+ */
+export type EventCountryStats = {
+    /**
+     * Number of event occurrences from this country
+     */
+    count: number;
+    /**
+     * Country name
+     */
+    country: string;
+    /**
+     * ISO country code (2-letter)
+     */
+    country_code?: string | null;
+    /**
+     * Percentage of total events
+     */
+    percentage: number;
+};
+
+/**
+ * Query parameters for event detail analytics
+ */
+export type EventDetailQuery = {
+    /**
+     * Bucket interval for time series: 'hour', 'day', 'week', 'month' (default: auto)
+     */
+    bucket_interval?: string | null;
+    end_date: string;
+    environment_id?: number | null;
+    /**
+     * The specific event name to get details for
+     */
+    event_name: string;
+    project_id: number;
+    start_date: string;
+};
+
+/**
+ * Summary response for a specific event's analytics
+ */
+export type EventDetailResponse = {
+    /**
+     * Time series data for event activity graph
+     */
+    activity_over_time: Array<EventActivityBucket>;
+    /**
+     * Browser distribution of visitors who triggered this event
+     */
+    browsers: Array<EventBrowserStats>;
+    /**
+     * Bucket interval used for time series ('hour', 'day', etc.)
+     */
+    bucket_interval: string;
+    /**
+     * Geographic distribution of visitors who triggered this event
+     */
+    countries: Array<EventCountryStats>;
+    /**
+     * The event name being analyzed
+     */
+    event_name: string;
+    /**
+     * Top referrer hostnames for visitors who triggered this event
+     */
+    referrers: Array<EventReferrerStats>;
+    /**
+     * Total number of times this event was triggered in the date range
+     */
+    total_count: number;
+    /**
+     * Number of unique sessions where this event occurred
+     */
+    unique_sessions: number;
+    /**
+     * Number of unique visitors who triggered this event
+     */
+    unique_visitors: number;
 };
 
 export type EventMetricsPayload = {
@@ -2887,6 +3063,24 @@ export type EventMetricsPayload = {
     ttfb?: number | null;
     viewport_height?: number | null;
     viewport_width?: number | null;
+};
+
+/**
+ * Referrer stats for an event
+ */
+export type EventReferrerStats = {
+    /**
+     * Number of event occurrences from this referrer
+     */
+    count: number;
+    /**
+     * Percentage of total events
+     */
+    percentage: number;
+    /**
+     * Referrer hostname or "Direct"
+     */
+    referrer: string;
 };
 
 export type EventTimeline = {
@@ -2941,6 +3135,104 @@ export type EventTypesResponse = {
     page: number;
     page_size: number;
     total: number;
+};
+
+/**
+ * A visitor who triggered a specific event
+ */
+export type EventVisitorInfo = {
+    /**
+     * Browser name
+     */
+    browser?: string | null;
+    /**
+     * Visitor's city
+     */
+    city?: string | null;
+    /**
+     * Visitor's country
+     */
+    country?: string | null;
+    /**
+     * Visitor's country code
+     */
+    country_code?: string | null;
+    /**
+     * Device type (Desktop, Mobile, Tablet)
+     */
+    device_type?: string | null;
+    /**
+     * Number of times this visitor triggered the event
+     */
+    event_count: number;
+    /**
+     * When the visitor first triggered the event in the date range
+     */
+    first_triggered: string;
+    /**
+     * When the visitor last triggered the event in the date range
+     */
+    last_triggered: string;
+    /**
+     * Referrer hostname for the event
+     */
+    referrer_hostname?: string | null;
+    /**
+     * Visitor numeric ID
+     */
+    visitor_id: number;
+    /**
+     * Visitor UUID
+     */
+    visitor_uuid: string;
+};
+
+/**
+ * Query parameters for event visitors list
+ */
+export type EventVisitorsQuery = {
+    end_date: string;
+    environment_id?: number | null;
+    /**
+     * The specific event name to list visitors for
+     */
+    event_name: string;
+    /**
+     * Page number (1-based, default: 1)
+     */
+    page?: number | null;
+    /**
+     * Items per page (default: 20, max: 100)
+     */
+    per_page?: number | null;
+    project_id: number;
+    start_date: string;
+};
+
+/**
+ * Paginated response for event visitors
+ */
+export type EventVisitorsResponse = {
+    /**
+     * The event name
+     */
+    event_name: string;
+    /**
+     * Current page number
+     */
+    page: number;
+    /**
+     * Items per page
+     */
+    per_page: number;
+    /**
+     * Total number of unique visitors who triggered this event
+     */
+    total_count: number;
+    /**
+     * Individual visitors who triggered this event
+     */
+    visitors: Array<EventVisitorInfo>;
 };
 
 export type EventsCountQuery = {
@@ -3192,6 +3484,57 @@ export type GeneralStatsResponse = {
      * Percentage change in unique visitors vs previous period
      */
     visitors_trend_percentage?: number | null;
+};
+
+/**
+ * Request body for generating a Dockerfile from a preset
+ */
+export type GenerateDockerfileRequest = {
+    /**
+     * Custom build command (overrides preset default)
+     */
+    build_command?: string | null;
+    /**
+     * Custom install command (overrides preset default)
+     */
+    install_command?: string | null;
+    /**
+     * Output directory for static builds
+     */
+    output_dir?: string | null;
+    /**
+     * Package manager used by the project (npm, yarn, pnpm, bun)
+     * If not provided, defaults to npm
+     */
+    package_manager?: string | null;
+    /**
+     * Project name/slug used for container naming
+     */
+    project_name?: string | null;
+    /**
+     * Whether to use BuildKit cache mounts for faster builds
+     */
+    use_buildkit?: boolean;
+};
+
+/**
+ * Response containing a generated Dockerfile and build arguments
+ */
+export type GenerateDockerfileResponse = {
+    /**
+     * Build arguments to pass to `docker build --build-arg KEY=VALUE`
+     */
+    build_args: {
+        [key: string]: string;
+    };
+    /**
+     * The generated Dockerfile content
+     */
+    dockerfile: string;
+    /**
+     * The preset slug used for generation
+     */
+    preset: string;
 };
 
 /**
@@ -4249,6 +4592,18 @@ export type LiveVisitorInfo = {
     current_page?: string | null;
     custom_data?: unknown;
     environment_id: number;
+    /**
+     * Marketing channel from the first visit (e.g. "Organic Search", "Direct")
+     */
+    first_channel?: string | null;
+    /**
+     * Full referrer URL from the visitor's first session
+     */
+    first_referrer?: string | null;
+    /**
+     * Hostname extracted from first_referrer
+     */
+    first_referrer_hostname?: string | null;
     first_seen: string;
     id: number;
     ip_address?: string | null;
@@ -7662,7 +8017,7 @@ export type UpdateErrorGroupRequest = {
 
 export type UpdateExternalServiceRequest = {
     /**
-     * Docker image to use for the service (e.g., "postgres:17-alpine", "timescale/timescaledb-ha:pg17")
+     * Docker image to use for the service (e.g., "postgres:18-alpine", "timescale/timescaledb-ha:pg18")
      * When provided, the service will be recreated with the new image while preserving data
      */
     docker_image?: string | null;
@@ -7881,7 +8236,7 @@ export type UpdateWebhookRequestBody = {
 
 export type UpgradeExternalServiceRequest = {
     /**
-     * Docker image to upgrade to (e.g., "postgres:17-alpine")
+     * Docker image to upgrade to (e.g., "postgres:18-alpine")
      * This will trigger pg_upgrade for PostgreSQL or equivalent upgrade procedures for other services
      */
     docker_image: string;
@@ -8088,6 +8443,18 @@ export type VisitorDetails = {
     crawler_name?: string | null;
     custom_data?: unknown;
     environment_id: number;
+    /**
+     * Marketing channel from the first visit (e.g. "Organic Search", "Direct")
+     */
+    first_channel?: string | null;
+    /**
+     * Full referrer URL from the visitor's first session
+     */
+    first_referrer?: string | null;
+    /**
+     * Hostname extracted from first_referrer
+     */
+    first_referrer_hostname?: string | null;
     first_seen: string;
     id: number;
     ip_address?: string | null;
@@ -8115,6 +8482,18 @@ export type VisitorInfo = {
     current_page?: string | null;
     custom_data?: unknown;
     environment_id: number;
+    /**
+     * Marketing channel from the first visit (e.g. "Organic Search", "Direct")
+     */
+    first_channel?: string | null;
+    /**
+     * Full referrer URL from the visitor's first session
+     */
+    first_referrer?: string | null;
+    /**
+     * Hostname extracted from first_referrer
+     */
+    first_referrer_hostname?: string | null;
     first_seen: string;
     id: number;
     ip_address?: string | null;
@@ -8210,6 +8589,18 @@ export type VisitorWithGeolocation = {
     crawler_name?: string | null;
     custom_data?: unknown;
     environment_id: number;
+    /**
+     * Marketing channel from the first visit (e.g. "Organic Search", "Direct")
+     */
+    first_channel?: string | null;
+    /**
+     * Full referrer URL from the visitor's first session
+     */
+    first_referrer?: string | null;
+    /**
+     * Hostname extracted from first_referrer
+     */
+    first_referrer_hostname?: string | null;
     first_seen: string;
     id: number;
     ip_address?: string | null;
@@ -8640,6 +9031,114 @@ export type GetActiveVisitorsResponses = {
 };
 
 export type GetActiveVisitorsResponse = GetActiveVisitorsResponses[keyof GetActiveVisitorsResponses];
+
+export type GetEventDetailData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Event name to get details for
+         */
+        event_name: string;
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * Environment ID (optional)
+         */
+        environment_id?: number;
+        /**
+         * Start date (ISO 8601)
+         */
+        start_date: string;
+        /**
+         * End date (ISO 8601)
+         */
+        end_date: string;
+        /**
+         * Bucket interval: hour, day, week, month (default: auto)
+         */
+        bucket_interval?: string;
+    };
+    url: '/analytics/event-detail';
+};
+
+export type GetEventDetailErrors = {
+    /**
+     * Invalid parameters
+     */
+    400: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GetEventDetailResponses = {
+    /**
+     * Successfully retrieved event details
+     */
+    200: EventDetailResponse;
+};
+
+export type GetEventDetailResponse = GetEventDetailResponses[keyof GetEventDetailResponses];
+
+export type GetEventVisitorsData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Event name to list visitors for
+         */
+        event_name: string;
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * Environment ID (optional)
+         */
+        environment_id?: number;
+        /**
+         * Start date (ISO 8601)
+         */
+        start_date: string;
+        /**
+         * End date (ISO 8601)
+         */
+        end_date: string;
+        /**
+         * Page number (1-based, default: 1)
+         */
+        page?: number;
+        /**
+         * Items per page (default: 20, max: 100)
+         */
+        per_page?: number;
+    };
+    url: '/analytics/event-visitors';
+};
+
+export type GetEventVisitorsErrors = {
+    /**
+     * Invalid parameters
+     */
+    400: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GetEventVisitorsResponses = {
+    /**
+     * Successfully retrieved event visitors
+     */
+    200: EventVisitorsResponse;
+};
+
+export type GetEventVisitorsResponse = GetEventVisitorsResponses[keyof GetEventVisitorsResponses];
 
 export type GetEventsCountData = {
     body?: never;
@@ -11850,7 +12349,18 @@ export type LookupDnsARecordsResponse = LookupDnsARecordsResponses[keyof LookupD
 export type ListDomainsData = {
     body?: never;
     path?: never;
-    query?: never;
+    query?: {
+        /**
+         * Page number (1-indexed)
+         */
+        page?: number | null;
+        /**
+         * Number of items per page (max 100)
+         */
+        page_size?: number | null;
+        sort_by?: string | null;
+        sort_order?: string | null;
+    };
     url: '/domains';
 };
 
@@ -13068,7 +13578,18 @@ export type GetEmailResponse = GetEmailResponses[keyof GetEmailResponses];
 export type ListServicesData = {
     body?: never;
     path?: never;
-    query?: never;
+    query?: {
+        /**
+         * Page number (1-indexed)
+         */
+        page?: number | null;
+        /**
+         * Number of items per page (max 100)
+         */
+        page_size?: number | null;
+        sort_by?: string | null;
+        sort_order?: string | null;
+    };
     url: '/external-services';
 };
 
@@ -13217,7 +13738,18 @@ export type ListProjectServicesData = {
          */
         project_id: number;
     };
-    query?: never;
+    query?: {
+        /**
+         * Page number (1-indexed)
+         */
+        page?: number | null;
+        /**
+         * Number of items per page (max 100)
+         */
+        page_size?: number | null;
+        sort_by?: string | null;
+        sort_order?: string | null;
+    };
     url: '/external-services/projects/{project_id}';
 };
 
@@ -13563,7 +14095,18 @@ export type ListServiceProjectsData = {
          */
         id: number;
     };
-    query?: never;
+    query?: {
+        /**
+         * Page number (1-indexed)
+         */
+        page?: number | null;
+        /**
+         * Number of items per page (max 100)
+         */
+        page_size?: number | null;
+        sort_by?: string | null;
+        sort_order?: string | null;
+    };
     url: '/external-services/{id}/projects';
 };
 
@@ -16431,7 +16974,18 @@ export type UpdatePreferencesResponse = UpdatePreferencesResponses[keyof UpdateP
 export type ListNotificationProvidersData = {
     body?: never;
     path?: never;
-    query?: never;
+    query?: {
+        /**
+         * Page number (1-indexed)
+         */
+        page?: number | null;
+        /**
+         * Number of items per page (max 100)
+         */
+        page_size?: number | null;
+        sort_by?: string | null;
+        sort_order?: string | null;
+    };
     url: '/notification-providers';
 };
 
@@ -16786,7 +17340,18 @@ export type TestProvider2Response = TestProvider2Responses[keyof TestProvider2Re
 export type ListOrdersData = {
     body?: never;
     path?: never;
-    query?: never;
+    query?: {
+        /**
+         * Page number (1-indexed)
+         */
+        page?: number | null;
+        /**
+         * Number of items per page (max 100)
+         */
+        page_size?: number | null;
+        sort_by?: string | null;
+        sort_order?: string | null;
+    };
     url: '/orders';
 };
 
@@ -17109,6 +17674,42 @@ export type ListPresetsResponses = {
 };
 
 export type ListPresetsResponse2 = ListPresetsResponses[keyof ListPresetsResponses];
+
+export type GeneratePresetDockerfileData = {
+    body: GenerateDockerfileRequest;
+    path: {
+        /**
+         * Preset slug (e.g., nextjs, vite, python)
+         */
+        slug: string;
+    };
+    query?: never;
+    url: '/presets/{slug}/dockerfile';
+};
+
+export type GeneratePresetDockerfileErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Preset not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GeneratePresetDockerfileResponses = {
+    /**
+     * Generated Dockerfile
+     */
+    200: GenerateDockerfileResponse;
+};
+
+export type GeneratePresetDockerfileResponse = GeneratePresetDockerfileResponses[keyof GeneratePresetDockerfileResponses];
 
 export type GetProjectsData = {
     body?: never;
@@ -19145,6 +19746,10 @@ export type GetContainerLogsData = {
          * Include timestamps in log output (default: false)
          */
         timestamps?: boolean;
+        /**
+         * Follow log output in real-time (default: true)
+         */
+        follow?: boolean;
     };
     url: '/projects/{project_id}/environments/{environment_id}/container-logs';
 };
@@ -19277,6 +19882,10 @@ export type GetContainerLogsByIdData = {
          * Include timestamps in log output (default: false)
          */
         timestamps?: boolean;
+        /**
+         * Follow log output in real-time (default: true)
+         */
+        follow?: boolean;
     };
     url: '/projects/{project_id}/environments/{environment_id}/containers/{container_id}/logs';
 };
@@ -21846,7 +22455,18 @@ export type ListWebhooksData = {
          */
         project_id: number;
     };
-    query?: never;
+    query?: {
+        /**
+         * Page number (1-indexed)
+         */
+        page?: number | null;
+        /**
+         * Number of items per page (max 100)
+         */
+        page_size?: number | null;
+        sort_by?: string | null;
+        sort_order?: string | null;
+    };
     url: '/projects/{project_id}/webhooks';
 };
 
@@ -22932,6 +23552,51 @@ export type GetBranchesByRepositoryIdResponses = {
 };
 
 export type GetBranchesByRepositoryIdResponse = GetBranchesByRepositoryIdResponses[keyof GetBranchesByRepositoryIdResponses];
+
+export type ListCommitsByRepositoryIdData = {
+    body?: never;
+    path: {
+        /**
+         * Repository ID
+         */
+        repository_id: number;
+    };
+    query: {
+        /**
+         * Branch name to list commits for
+         */
+        branch: string;
+        /**
+         * Number of commits to return (default: 20, max: 100)
+         */
+        per_page?: number | null;
+    };
+    url: '/repository/{repository_id}/commits';
+};
+
+export type ListCommitsByRepositoryIdErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Repository not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type ListCommitsByRepositoryIdResponses = {
+    /**
+     * List of commits
+     */
+    200: CommitListResponse;
+};
+
+export type ListCommitsByRepositoryIdResponse = ListCommitsByRepositoryIdResponses[keyof ListCommitsByRepositoryIdResponses];
 
 export type CheckCommitExistsData = {
     body?: never;

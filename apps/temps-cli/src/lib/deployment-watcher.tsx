@@ -1,7 +1,8 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { render, Box, Text, Newline } from 'ink'
 import Spinner from 'ink-spinner'
 import { config, credentials } from '../config/store.js'
+import { normalizeApiUrl, getWebUrl } from './api-client.js'
 
 interface DeploymentEnvironment {
   id: number
@@ -62,6 +63,10 @@ interface JobState {
   lastLogLine: number
 }
 
+const TERMINAL_STATUSES = ['success', 'completed', 'deployed', 'failed', 'error', 'cancelled']
+const SUCCESS_STATUSES = ['success', 'completed', 'deployed']
+const FAILURE_STATUSES = ['failed', 'error', 'cancelled']
+
 // Convert API timestamp to milliseconds
 function toMs(timestamp: number): number {
   if (timestamp < 946684800000) {
@@ -94,7 +99,7 @@ function StatusIcon({ status }: { status: string }) {
     case 'success':
     case 'completed':
     case 'deployed':
-      return <Text color="green">●</Text>
+      return <Text color="green">✓</Text>
     case 'failed':
     case 'error':
       return <Text color="red">✗</Text>
@@ -142,8 +147,8 @@ function LogEntryRow({ entry }: { entry: LogEntry }) {
       break
   }
 
-  // Clean up the message
-  const message = entry.message.replace(/^[✅❌⏳📦📋📂🚀📍🔄⬇️🐳🏷️]\s*/, '')
+  // Clean up the message — strip leading emoji
+  const message = entry.message.replace(/^[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]\s*/u, '')
 
   return (
     <Box marginLeft={4}>
@@ -153,15 +158,15 @@ function LogEntryRow({ entry }: { entry: LogEntry }) {
 }
 
 // Job row component
-function JobRow({ jobState, showAllLogs }: { jobState: JobState; showAllLogs?: boolean }) {
+function JobRow({ jobState, isFinished }: { jobState: JobState; isFinished?: boolean }) {
   const { job, logs } = jobState
   const duration = job.started_at
     ? formatDuration(job.started_at, job.finished_at ?? undefined)
     : ''
 
   const statusColor = getStatusColor(job.status)
-  // Show more logs for running jobs, fewer for completed
-  const maxLogs = showAllLogs ? 20 : (job.status === 'running' ? 10 : 5)
+  // Show fewer logs when finished to keep output compact
+  const maxLogs = isFinished ? 3 : (job.status === 'running' ? 10 : 5)
   const recentLogs = logs.slice(-maxLogs)
 
   return (
@@ -170,19 +175,18 @@ function JobRow({ jobState, showAllLogs }: { jobState: JobState; showAllLogs?: b
         <StatusIcon status={job.status} />
         <Text color={statusColor}> {job.name}</Text>
         {duration && <Text color="gray"> ({duration})</Text>}
-        {logs.length > 0 && <Text color="gray"> [{logs.length} logs]</Text>}
       </Box>
 
       {/* Error message */}
-      {(job.status === 'failed' || job.status === 'error') && job.error_message && (
+      {FAILURE_STATUSES.includes(job.status) && job.error_message && (
         <Box marginLeft={2}>
           <Text color="red">Error: {job.error_message}</Text>
         </Box>
       )}
 
-      {/* Logs - always show if there are any */}
-      {recentLogs.length > 0 && (
-        <Box flexDirection="column" marginLeft={2} marginTop={0}>
+      {/* Logs — show during progress, compact on finish */}
+      {recentLogs.length > 0 && !isFinished && (
+        <Box flexDirection="column" marginLeft={2}>
           {recentLogs.map((log, i) => (
             <LogEntryRow key={`${job.job_id}-log-${i}`} entry={log} />
           ))}
@@ -197,7 +201,7 @@ function DeploymentWatcher({
   projectId,
   deploymentId,
   timeoutSecs,
-  projectName: _projectName,
+  projectName,
   apiUrl,
   apiKey,
   onComplete,
@@ -207,9 +211,11 @@ function DeploymentWatcher({
   const [startTime] = useState(Date.now())
   const [elapsed, setElapsed] = useState('0s')
   const [error, setError] = useState<string | null>(null)
+  const [result, setResult] = useState<WatchDeploymentResult | null>(null)
 
   // Update elapsed time
   useEffect(() => {
+    if (result) return // Stop updating once finished
     const timer = setInterval(() => {
       const seconds = Math.floor((Date.now() - startTime) / 1000)
       if (seconds < 60) {
@@ -222,147 +228,148 @@ function DeploymentWatcher({
     }, 1000)
 
     return () => clearInterval(timer)
-  }, [startTime])
+  }, [startTime, result])
+
+  // Signal completion after result is rendered
+  useEffect(() => {
+    if (!result) return
+    const timer = setTimeout(() => onComplete(result), 200)
+    return () => clearTimeout(timer)
+  }, [result, onComplete])
+
+  // Fetch jobs helper
+  const fetchJobs = useCallback(async (currentJobStates: Map<string, JobState>): Promise<Map<string, JobState>> => {
+    const jobsRes = await fetch(
+      `${apiUrl}/projects/${projectId}/deployments/${deploymentId}/jobs`,
+      { headers: { Authorization: `Bearer ${apiKey}` } }
+    )
+
+    if (!jobsRes.ok) return currentJobStates
+
+    const jobsData = (await jobsRes.json()) as { jobs: DeploymentJobResponse[] }
+    const jobs = jobsData.jobs || []
+    jobs.sort((a, b) => a.id - b.id)
+
+    const newJobStates = new Map(currentJobStates)
+
+    for (const job of jobs) {
+      let state = newJobStates.get(job.job_id)
+      if (!state) {
+        state = { job, logs: [], lastLogLine: 0 }
+      } else {
+        state = { ...state, job }
+      }
+
+      // Fetch logs for jobs that have started
+      if (job.status !== 'pending' && job.status !== 'queued') {
+        try {
+          const logsRes = await fetch(
+            `${apiUrl}/projects/${projectId}/deployments/${deploymentId}/jobs/${job.id}/logs`,
+            { headers: { Authorization: `Bearer ${apiKey}` } }
+          )
+
+          if (logsRes.ok) {
+            const logsText = await logsRes.text()
+            if (logsText.trim()) {
+              const newLogs: LogEntry[] = []
+              for (const line of logsText.trim().split('\n')) {
+                if (!line.trim()) continue
+                try {
+                  const entry = JSON.parse(line) as LogEntry
+                  if (entry.line > state.lastLogLine) {
+                    newLogs.push(entry)
+                    state.lastLogLine = entry.line
+                  }
+                } catch { /* skip malformed log lines */ }
+              }
+              if (newLogs.length > 0) {
+                state = { ...state, logs: [...state.logs, ...newLogs] }
+              }
+            }
+          }
+        } catch { /* skip log fetch errors */ }
+      }
+
+      newJobStates.set(job.job_id, state)
+    }
+
+    return newJobStates
+  }, [apiUrl, apiKey, projectId, deploymentId])
 
   // Main polling effect
   useEffect(() => {
     let cancelled = false
     const timeoutMs = timeoutSecs * 1000
+    let latestJobStates = jobStates
 
     async function poll() {
-
       while (!cancelled && Date.now() - startTime < timeoutMs) {
         try {
-          // Fetch deployment
+          // 1. Fetch deployment status
           const deploymentRes = await fetch(
             `${apiUrl}/projects/${projectId}/deployments/${deploymentId}`,
             { headers: { Authorization: `Bearer ${apiKey}` } }
           )
 
+          let dep: DeploymentResponse | null = null
+
           if (deploymentRes.ok) {
-            const dep = (await deploymentRes.json()) as DeploymentResponse
+            dep = (await deploymentRes.json()) as DeploymentResponse
             setDeployment(dep)
-
-            // Check terminal states
-            const isDeploymentTerminal = ['success', 'completed', 'deployed', 'failed', 'error', 'cancelled'].includes(dep.status)
-
-            if (isDeploymentTerminal) {
-              // For failed deployments, exit immediately
-              if (['failed', 'error', 'cancelled'].includes(dep.status)) {
-                onComplete({
-                  success: false,
-                  deployment: dep,
-                  error: dep.cancelled_reason || 'Deployment failed',
-                })
-                return
-              }
-
-              // For successful deployments:
-              // - If URL is available, deployment is live
-              // - Otherwise check if "Mark Deployment Complete" job is done
-              const markCompleteJob = Array.from(jobStates.values()).find(
-                js => js.job.name.toLowerCase().includes('mark deployment complete')
-              )
-              const isMarkCompleteDone = markCompleteJob &&
-                ['success', 'completed'].includes(markCompleteJob.job.status)
-
-              if (dep.url || isMarkCompleteDone) {
-                onComplete({ success: true, deployment: dep })
-                return
-              }
-            }
           } else {
-            // Show error in UI
             const errorText = await deploymentRes.text()
             setError(`API Error ${deploymentRes.status}: ${errorText.substring(0, 200)}`)
           }
 
-          // Fetch jobs
-          const jobsRes = await fetch(
-            `${apiUrl}/projects/${projectId}/deployments/${deploymentId}/jobs`,
-            { headers: { Authorization: `Bearer ${apiKey}` } }
-          )
-
-          if (jobsRes.ok) {
-            const jobsData = (await jobsRes.json()) as { jobs: DeploymentJobResponse[] }
-            const jobs = jobsData.jobs || []
-            jobs.sort((a, b) => a.id - b.id)
-
-            // Update job states and fetch logs
-            const newJobStates = new Map(jobStates)
-
-            for (const job of jobs) {
-              let state = newJobStates.get(job.job_id)
-              if (!state) {
-                state = { job, logs: [], lastLogLine: 0 }
-              } else {
-                state = { ...state, job }
-              }
-
-              // Fetch logs for jobs that have started
-              if (job.status !== 'pending' && job.status !== 'queued') {
-                try {
-                  const logsRes = await fetch(
-                    `${apiUrl}/projects/${projectId}/deployments/${deploymentId}/jobs/${job.id}/logs`,
-                    { headers: { Authorization: `Bearer ${apiKey}` } }
-                  )
-
-                  if (logsRes.ok) {
-                    const logsText = await logsRes.text()
-                    if (logsText.trim()) {
-                      const newLogs: LogEntry[] = []
-                      for (const line of logsText.trim().split('\n')) {
-                        if (!line.trim()) continue
-                        try {
-                          const entry = JSON.parse(line) as LogEntry
-                          if (entry.line > state.lastLogLine) {
-                            newLogs.push(entry)
-                            state.lastLogLine = entry.line
-                          }
-                        } catch {}
-                      }
-                      if (newLogs.length > 0) {
-                        state = { ...state, logs: [...state.logs, ...newLogs] }
-                      }
-                    }
-                  }
-                } catch {}
-              }
-
-              newJobStates.set(job.job_id, state)
-            }
-
-            setJobStates(newJobStates)
+          // 2. Always fetch jobs (so final states are captured)
+          latestJobStates = await fetchJobs(latestJobStates)
+          if (!cancelled) {
+            setJobStates(latestJobStates)
           }
 
-          await new Promise((r) => setTimeout(r, 1000))
+          // 3. Check terminal state AFTER jobs are updated
+          if (dep && TERMINAL_STATUSES.includes(dep.status)) {
+            if (FAILURE_STATUSES.includes(dep.status)) {
+              setResult({
+                success: false,
+                deployment: dep,
+                error: dep.cancelled_reason || 'Deployment failed',
+              })
+              return
+            }
+
+            // Success — deployment is in a terminal success state
+            setResult({ success: true, deployment: dep })
+            return
+          }
+
+          await new Promise((r) => setTimeout(r, 1500))
         } catch (err) {
           setError(`Exception: ${err instanceof Error ? err.message : String(err)}`)
-          await new Promise((r) => setTimeout(r, 1000))
+          await new Promise((r) => setTimeout(r, 2000))
         }
       }
 
       // Timeout
       if (!cancelled) {
-        onComplete({ success: false, error: 'Timeout' })
+        setResult({ success: false, error: 'Timeout waiting for deployment to complete' })
       }
     }
 
     poll()
-
-    return () => {
-      cancelled = true
-    }
-  }, [projectId, deploymentId, timeoutSecs, startTime, onComplete])
+    return () => { cancelled = true }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const sortedJobs = Array.from(jobStates.values()).sort((a, b) => a.job.id - b.job.id)
   const statusColor = deployment ? getStatusColor(deployment.status) : 'gray'
+  const isFinished = !!result
+  const webUrl = getWebUrl()
 
   return (
     <Box flexDirection="column" paddingTop={1}>
       {/* Header */}
       <Box>
-        <Text bold>{'  '}🚀 Deployment Progress</Text>
+        <Text bold>{'  '}🚀 Deployment #{deploymentId}</Text>
       </Box>
 
       <Newline />
@@ -385,7 +392,7 @@ function DeploymentWatcher({
       </Box>
 
       {/* Error display */}
-      {error && (
+      {error && !result && (
         <Box marginLeft={1} marginTop={1}>
           <Text color="red">Error: {error}</Text>
         </Box>
@@ -395,80 +402,61 @@ function DeploymentWatcher({
 
       {/* Jobs */}
       {sortedJobs.map((jobState) => (
-        <JobRow key={jobState.job.job_id} jobState={jobState} />
+        <JobRow key={jobState.job.job_id} jobState={jobState} isFinished={isFinished} />
       ))}
 
-      {sortedJobs.length === 0 && deployment && (
+      {sortedJobs.length === 0 && deployment && !result && (
         <Box marginLeft={2}>
           <Text color="gray">Waiting for jobs...</Text>
         </Box>
       )}
 
-      <Newline />
-    </Box>
-  )
-}
-
-// Result display component
-function DeploymentResult({
-  result,
-  projectName,
-}: {
-  result: WatchDeploymentResult
-  projectName?: string
-}) {
-  if (result.success) {
-    const deployment = result.deployment
-    const envDomains = deployment?.environment?.domains || []
-    // Domain might already include protocol, check before adding https://
-    const firstDomain = envDomains[0]
-    const envUrl = firstDomain
-      ? (firstDomain.startsWith('http') ? firstDomain : `https://${firstDomain}`)
-      : null
-
-    return (
-      <Box flexDirection="column" paddingTop={1}>
-        <Box>
-          <Text color="green">{'  '}✓ Deployment completed successfully!</Text>
-        </Box>
-        <Newline />
-        <Box marginLeft={2}>
-          <Text>Deployment ID: </Text>
-          <Text bold>{deployment?.id}</Text>
-        </Box>
-        {deployment?.url && (
-          <Box marginLeft={2}>
-            <Text>Deployment URL: </Text>
-            <Text color="cyan" bold>{deployment.url}</Text>
-          </Box>
-        )}
-        {envUrl && (
-          <Box marginLeft={2}>
-            <Text>Environment URL: </Text>
-            <Text color="cyan" bold>{envUrl}</Text>
-          </Box>
-        )}
-        <Newline />
-      </Box>
-    )
-  }
-
-  return (
-    <Box flexDirection="column" paddingTop={1}>
-      <Box>
-        <Text color="red">{'  '}✗ Deployment failed</Text>
-      </Box>
-      {result.error && (
-        <Box marginLeft={2}>
-          <Text color="red">Reason: {result.error}</Text>
-        </Box>
+      {/* Result summary */}
+      {result && (
+        <>
+          <Newline />
+          {result.success ? (
+            <Box flexDirection="column">
+              <Box marginLeft={1}>
+                <Text color="green" bold>✓ Deployment completed successfully!</Text>
+              </Box>
+              {deployment?.url && (
+                <Box marginLeft={3}>
+                  <Text>URL: </Text>
+                  <Text color="cyan" bold>{deployment.url}</Text>
+                </Box>
+              )}
+              {deployment?.environment?.domains?.[0] && (
+                <Box marginLeft={3}>
+                  <Text>Domain: </Text>
+                  <Text color="cyan" bold>
+                    {deployment.environment.domains[0].startsWith('http')
+                      ? deployment.environment.domains[0]
+                      : `https://${deployment.environment.domains[0]}`}
+                  </Text>
+                </Box>
+              )}
+            </Box>
+          ) : (
+            <Box flexDirection="column">
+              <Box marginLeft={1}>
+                <Text color="red" bold>✗ Deployment failed</Text>
+              </Box>
+              {result.error && (
+                <Box marginLeft={3}>
+                  <Text color="red">{result.error}</Text>
+                </Box>
+              )}
+            </Box>
+          )}
+          {projectName && (
+            <Box marginLeft={3}>
+              <Text color="gray">Dashboard: {webUrl}/projects/{projectName}/deployments</Text>
+            </Box>
+          )}
+          <Newline />
+        </>
       )}
-      {projectName && (
-        <Box marginLeft={2}>
-          <Text color="gray">View full logs: temps logs {projectName}</Text>
-        </Box>
-      )}
-      <Newline />
     </Box>
   )
 }
@@ -480,7 +468,7 @@ export async function watchDeployment(
   options: WatchDeploymentOptions
 ): Promise<WatchDeploymentResult> {
   // Fetch credentials before rendering to avoid async issues in React
-  const apiUrl = config.get('apiUrl')
+  const apiUrl = normalizeApiUrl(config.get('apiUrl'))
   const apiKey = await credentials.getApiKey() || ''
 
   if (!apiKey) {
@@ -488,32 +476,18 @@ export async function watchDeployment(
   }
 
   return new Promise((resolve) => {
-    let instance: ReturnType<typeof render> | null = null
-
-    const handleComplete = (res: WatchDeploymentResult) => {
-      // Unmount the watcher and show the result
-      if (instance) {
-        instance.unmount()
-      }
-
-      // Render the result
-      const resultInstance = render(
-        <DeploymentResult result={res} projectName={options.projectName} />
-      )
-
-      // Wait a bit then unmount and resolve
-      setTimeout(() => {
-        resultInstance.unmount()
-        resolve(res)
-      }, 100)
-    }
-
-    instance = render(
+    const instance = render(
       <DeploymentWatcher
         {...options}
         apiUrl={apiUrl}
         apiKey={apiKey}
-        onComplete={handleComplete}
+        onComplete={(res) => {
+          // Give Ink time to render the final state, then unmount
+          setTimeout(() => {
+            instance.unmount()
+            resolve(res)
+          }, 300)
+        }}
       />
     )
   })

@@ -12,18 +12,20 @@ interface RuntimeLogsOptions {
   container?: string
   tail: string
   timestamps?: boolean
+  follow?: boolean
 }
 
 export function registerRuntimeLogsCommand(program: Command): void {
   program
     .command('runtime-logs')
     .alias('rlogs')
-    .description('Stream runtime container logs (not build logs)')
+    .description('View runtime container logs (use -f to follow in real-time)')
     .option('-p, --project <project>', 'Project slug or ID')
     .option('-e, --environment <env>', 'Environment name', 'production')
     .option('-c, --container <id>', 'Container ID (partial match supported)')
     .option('-n, --tail <lines>', 'Number of lines to tail', '1000')
     .option('-t, --timestamps', 'Show timestamps')
+    .option('-f, --follow', 'Follow log output (stream in real-time)')
     .action(runtimeLogs)
 }
 
@@ -131,60 +133,71 @@ async function runtimeLogs(options: RuntimeLogsOptions): Promise<void> {
   // Remove protocol and any trailing slash, keep the path (e.g., /api)
   const urlWithoutProtocol = apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
 
+  const follow = options.follow ?? false
   const params = new URLSearchParams()
   params.append('tail', options.tail)
   params.append('timestamps', String(options.timestamps ?? false))
+  params.append('follow', String(follow))
 
   const wsUrl = `${wsProtocol}://${urlWithoutProtocol}/projects/${projectData.id}/environments/${environment.id}/containers/${selectedContainer.container_id}/logs?${params.toString()}`
 
-  info(`Connecting to WebSocket...`)
-  info(`URL: ${colors.muted(wsUrl)}`)
+  if (follow) {
+    info(`Streaming logs (follow mode)...`)
+  } else {
+    info(`Fetching logs...`)
+  }
   newline()
 
   // Connect via WebSocket
-  await connectWebSocket(wsUrl, apiKey)
+  await connectWebSocket(wsUrl, apiKey, follow)
 }
 
-async function connectWebSocket(url: string, apiKey: string): Promise<void> {
-  return new Promise((resolve, reject) => {
+function formatLogMessage(raw: string): void {
+  // Docker log lines include trailing newlines; strip them so
+  // console.log doesn't produce double-spaced output.
+  const data = raw.replace(/\r?\n$/, '')
+
+  // Try to parse as JSON for structured logs
+  try {
+    const parsed = JSON.parse(data)
+    if (parsed.error) {
+      console.log(colors.error(`ERROR: ${parsed.error}`))
+      if (parsed.detail) {
+        console.log(colors.muted(`  ${parsed.detail}`))
+      }
+    } else if (parsed.message) {
+      console.log(parsed.message.replace(/\r?\n$/, ''))
+    } else {
+      console.log(data)
+    }
+  } catch {
+    // Plain text log line
+    console.log(data)
+  }
+}
+
+async function connectWebSocket(url: string, apiKey: string, follow: boolean): Promise<void> {
+  return new Promise((resolve) => {
     const ws = new WebSocket(url, {
       headers: {
         'Authorization': `Bearer ${apiKey}`,
       },
     } as any)
 
+    let sigintHandler: (() => void) | null = null
+
     ws.onopen = () => {
-      console.log(colors.success('✓ Connected to log stream'))
-      console.log(colors.muted('─'.repeat(60)))
-      console.log(colors.muted('Press Ctrl+C to stop'))
-      console.log(colors.muted('─'.repeat(60)))
-      console.log()
+      if (follow) {
+        console.log(colors.success('✓ Connected to log stream'))
+        console.log(colors.muted('─'.repeat(60)))
+        console.log(colors.muted('Press Ctrl+C to stop'))
+        console.log(colors.muted('─'.repeat(60)))
+        console.log()
+      }
     }
 
     ws.onmessage = (event) => {
-      const raw = event.data.toString()
-
-      // Docker log lines include trailing newlines; strip them so
-      // console.log doesn't produce double-spaced output.
-      const data = raw.replace(/\r?\n$/, '')
-
-      // Try to parse as JSON for structured logs
-      try {
-        const parsed = JSON.parse(data)
-        if (parsed.error) {
-          console.log(colors.error(`ERROR: ${parsed.error}`))
-          if (parsed.detail) {
-            console.log(colors.muted(`  ${parsed.detail}`))
-          }
-        } else if (parsed.message) {
-          console.log(parsed.message.replace(/\r?\n$/, ''))
-        } else {
-          console.log(data)
-        }
-      } catch {
-        // Plain text log line
-        console.log(data)
-      }
+      formatLogMessage(event.data.toString())
     }
 
     ws.onerror = (error) => {
@@ -192,24 +205,40 @@ async function connectWebSocket(url: string, apiKey: string): Promise<void> {
     }
 
     ws.onclose = (event) => {
-      console.log()
-      console.log(colors.muted('─'.repeat(60)))
-      if (event.code === 1000) {
-        console.log(colors.info('Connection closed normally'))
-      } else {
-        console.log(colors.warning(`Connection closed (code: ${event.code})`))
-        if (event.reason) {
-          console.log(colors.muted(`Reason: ${event.reason}`))
+      // Clean up the SIGINT handler
+      if (sigintHandler) {
+        process.removeListener('SIGINT', sigintHandler)
+      }
+
+      if (follow) {
+        console.log()
+        console.log(colors.muted('─'.repeat(60)))
+        if (event.code === 1000) {
+          console.log(colors.info('Connection closed normally'))
+        } else {
+          console.log(colors.warning(`Connection closed (code: ${event.code})`))
+          if (event.reason) {
+            console.log(colors.muted(`Reason: ${event.reason}`))
+          }
         }
       }
       resolve()
     }
 
-    // Handle Ctrl+C gracefully
-    process.on('SIGINT', () => {
+    // Handle Ctrl+C gracefully (only relevant for follow mode, but register always)
+    sigintHandler = () => {
       console.log()
       console.log(colors.muted('Closing connection...'))
-      ws.close(1000, 'User requested close')
-    })
+      try {
+        ws.close(1000, 'User requested close')
+      } catch {
+        // WebSocket may already be closed
+      }
+      // Force exit after a short delay in case ws.close doesn't trigger onclose
+      setTimeout(() => {
+        process.exit(0)
+      }, 500)
+    }
+    process.on('SIGINT', sigintHandler)
   })
 }

@@ -33,6 +33,7 @@ pub struct ContainerLogOptions {
     pub end_date: Option<UtcDateTime>,
     pub tail: Option<String>, // "all" or number of lines
     pub timestamps: bool,     // Include timestamps in log output
+    pub follow: bool,         // Follow log output (like `docker logs -f`)
 }
 impl DockerLogService {
     pub fn new(docker: Arc<Docker>) -> Self {
@@ -54,7 +55,7 @@ impl DockerLogService {
 
         let tail = options.tail.unwrap_or_else(|| "all".to_string());
         let log_options = Some(LogsOptions {
-            follow: true,
+            follow: options.follow,
             stdout: true,
             stderr: true,
             timestamps: options.timestamps,
@@ -140,6 +141,7 @@ impl DockerLogService {
             end_date: None,
             tail: lines.map(|l| l.to_string()),
             timestamps: true,
+            follow: false,
         };
         let logs = self.get_logs_with_timestamps(container_id, lines).await?;
         tokio::fs::write(file_path, logs).await?;
@@ -256,6 +258,7 @@ mod tests {
                 end_date: None,
                 tail: Some("10".to_string()),
                 timestamps: true,
+                follow: false,
             };
             let result = docker_service
                 .get_container_logs("non-existent-container-12345", options)

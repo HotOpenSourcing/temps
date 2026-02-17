@@ -440,6 +440,7 @@ impl VisitorManager for VisitorManagerImpl {
         context: Option<&ProjectContext>,
         user_agent: &str,
         ip_address: Option<&str>,
+        attribution: &FirstVisitAttribution,
     ) -> Result<Visitor, Box<dyn std::error::Error + Send + Sync>> {
         let project_id = context.as_ref().map(|c| c.project.id).unwrap_or(1);
         let environment_id = context.as_ref().map(|c| c.environment.id).unwrap_or(1);
@@ -502,6 +503,13 @@ impl VisitorManager for VisitorManagerImpl {
             ip_address_id: Set(ip_address_id),
             is_crawler: Set(is_crawler),
             crawler_name: Set(crawler_name),
+            // First-visit attribution (set once, never overwritten)
+            first_referrer: Set(attribution.referrer.clone()),
+            first_referrer_hostname: Set(attribution.referrer_hostname.clone()),
+            first_channel: Set(attribution.channel.clone()),
+            first_utm_source: Set(attribution.utm_source.clone()),
+            first_utm_medium: Set(attribution.utm_medium.clone()),
+            first_utm_campaign: Set(attribution.utm_campaign.clone()),
             ..Default::default()
         };
 
@@ -1565,5 +1573,268 @@ mod tests {
             second_access > first_access,
             "last_accessed_at should be updated on reuse"
         );
+    }
+
+    #[tokio::test]
+    async fn test_new_visitor_stores_first_referrer_attribution() {
+        let test_db = TestDatabase::with_migrations().await.unwrap();
+        let crypto = Arc::new(
+            temps_core::CookieCrypto::new(
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            )
+            .unwrap(),
+        );
+        let ip_service = create_mock_ip_service(test_db.connection_arc().clone());
+        let visitor_manager =
+            VisitorManagerImpl::new(test_db.connection_arc().clone(), crypto.clone(), ip_service);
+
+        let context = create_test_project_context(&test_db.connection_arc()).await;
+
+        // Create visitor with referrer attribution from Google organic search
+        let attribution = FirstVisitAttribution {
+            referrer: Some("https://www.google.com/search?q=temps+deploy".to_string()),
+            referrer_hostname: Some("www.google.com".to_string()),
+            channel: Some("Organic Search".to_string()),
+            utm_source: None,
+            utm_medium: None,
+            utm_campaign: None,
+        };
+
+        let new_visitor = visitor_manager
+            .get_or_create_visitor(
+                None,
+                Some(&context),
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+                Some("8.8.8.8"),
+                &attribution,
+            )
+            .await
+            .unwrap();
+
+        // Verify attribution was stored on the visitor record
+        let db_visitor = visitor::Entity::find_by_id(new_visitor.visitor_id_i32)
+            .one(test_db.connection_arc().as_ref())
+            .await
+            .unwrap()
+            .expect("Visitor should exist in database");
+
+        assert_eq!(
+            db_visitor.first_referrer,
+            Some("https://www.google.com/search?q=temps+deploy".to_string())
+        );
+        assert_eq!(
+            db_visitor.first_referrer_hostname,
+            Some("www.google.com".to_string())
+        );
+        assert_eq!(db_visitor.first_channel, Some("Organic Search".to_string()));
+        assert_eq!(db_visitor.first_utm_source, None);
+        assert_eq!(db_visitor.first_utm_medium, None);
+        assert_eq!(db_visitor.first_utm_campaign, None);
+    }
+
+    #[tokio::test]
+    async fn test_new_visitor_stores_utm_attribution() {
+        let test_db = TestDatabase::with_migrations().await.unwrap();
+        let crypto = Arc::new(
+            temps_core::CookieCrypto::new(
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            )
+            .unwrap(),
+        );
+        let ip_service = create_mock_ip_service(test_db.connection_arc().clone());
+        let visitor_manager =
+            VisitorManagerImpl::new(test_db.connection_arc().clone(), crypto.clone(), ip_service);
+
+        let context = create_test_project_context(&test_db.connection_arc()).await;
+
+        // Create visitor with UTM campaign attribution
+        let attribution = FirstVisitAttribution {
+            referrer: Some("https://twitter.com/post/123".to_string()),
+            referrer_hostname: Some("twitter.com".to_string()),
+            channel: Some("Paid Social".to_string()),
+            utm_source: Some("twitter".to_string()),
+            utm_medium: Some("paid_social".to_string()),
+            utm_campaign: Some("launch_2026".to_string()),
+        };
+
+        let new_visitor = visitor_manager
+            .get_or_create_visitor(
+                None,
+                Some(&context),
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                Some("1.2.3.4"),
+                &attribution,
+            )
+            .await
+            .unwrap();
+
+        // Verify all UTM fields were stored
+        let db_visitor = visitor::Entity::find_by_id(new_visitor.visitor_id_i32)
+            .one(test_db.connection_arc().as_ref())
+            .await
+            .unwrap()
+            .expect("Visitor should exist");
+
+        assert_eq!(
+            db_visitor.first_referrer,
+            Some("https://twitter.com/post/123".to_string())
+        );
+        assert_eq!(
+            db_visitor.first_referrer_hostname,
+            Some("twitter.com".to_string())
+        );
+        assert_eq!(db_visitor.first_channel, Some("Paid Social".to_string()));
+        assert_eq!(db_visitor.first_utm_source, Some("twitter".to_string()));
+        assert_eq!(db_visitor.first_utm_medium, Some("paid_social".to_string()));
+        assert_eq!(
+            db_visitor.first_utm_campaign,
+            Some("launch_2026".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_returning_visitor_does_not_overwrite_first_referrer() {
+        let test_db = TestDatabase::with_migrations().await.unwrap();
+        let crypto = Arc::new(
+            temps_core::CookieCrypto::new(
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            )
+            .unwrap(),
+        );
+        let ip_service = create_mock_ip_service(test_db.connection_arc().clone());
+        let visitor_manager =
+            VisitorManagerImpl::new(test_db.connection_arc().clone(), crypto.clone(), ip_service);
+
+        let context = create_test_project_context(&test_db.connection_arc()).await;
+
+        // First visit: from Google organic search
+        let first_attribution = FirstVisitAttribution {
+            referrer: Some("https://www.google.com/search?q=temps".to_string()),
+            referrer_hostname: Some("www.google.com".to_string()),
+            channel: Some("Organic Search".to_string()),
+            utm_source: None,
+            utm_medium: None,
+            utm_campaign: None,
+        };
+
+        let new_visitor = visitor_manager
+            .get_or_create_visitor(
+                None,
+                Some(&context),
+                "Mozilla/5.0",
+                Some("8.8.8.8"),
+                &first_attribution,
+            )
+            .await
+            .unwrap();
+
+        // Generate encrypted cookie for the visitor
+        let cookie = visitor_manager
+            .generate_visitor_cookie(&new_visitor, false, Some(&context))
+            .await
+            .unwrap();
+        let encrypted_visitor_id = cookie
+            .split(';')
+            .next()
+            .unwrap()
+            .trim()
+            .split('=')
+            .nth(1)
+            .unwrap()
+            .to_string();
+
+        // Second visit: from Twitter (different referrer)
+        let second_attribution = FirstVisitAttribution {
+            referrer: Some("https://twitter.com/someone/status/123".to_string()),
+            referrer_hostname: Some("twitter.com".to_string()),
+            channel: Some("Organic Social".to_string()),
+            utm_source: Some("twitter".to_string()),
+            utm_medium: None,
+            utm_campaign: None,
+        };
+
+        let returning_visitor = visitor_manager
+            .get_or_create_visitor(
+                Some(&encrypted_visitor_id),
+                Some(&context),
+                "Mozilla/5.0",
+                Some("8.8.8.8"),
+                &second_attribution,
+            )
+            .await
+            .unwrap();
+
+        // Should be the same visitor
+        assert_eq!(new_visitor.visitor_id_i32, returning_visitor.visitor_id_i32);
+
+        // Verify the FIRST referrer is still preserved (not overwritten)
+        let db_visitor = visitor::Entity::find_by_id(returning_visitor.visitor_id_i32)
+            .one(test_db.connection_arc().as_ref())
+            .await
+            .unwrap()
+            .expect("Visitor should exist");
+
+        assert_eq!(
+            db_visitor.first_referrer,
+            Some("https://www.google.com/search?q=temps".to_string()),
+            "First referrer should NOT be overwritten on return visit"
+        );
+        assert_eq!(
+            db_visitor.first_referrer_hostname,
+            Some("www.google.com".to_string()),
+            "First referrer hostname should NOT be overwritten"
+        );
+        assert_eq!(
+            db_visitor.first_channel,
+            Some("Organic Search".to_string()),
+            "First channel should NOT be overwritten"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_direct_visitor_has_direct_channel() {
+        let test_db = TestDatabase::with_migrations().await.unwrap();
+        let crypto = Arc::new(
+            temps_core::CookieCrypto::new(
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            )
+            .unwrap(),
+        );
+        let ip_service = create_mock_ip_service(test_db.connection_arc().clone());
+        let visitor_manager =
+            VisitorManagerImpl::new(test_db.connection_arc().clone(), crypto.clone(), ip_service);
+
+        let context = create_test_project_context(&test_db.connection_arc()).await;
+
+        // Direct visit: no referrer, no UTM
+        let attribution = FirstVisitAttribution {
+            referrer: None,
+            referrer_hostname: None,
+            channel: Some("Direct".to_string()),
+            utm_source: None,
+            utm_medium: None,
+            utm_campaign: None,
+        };
+
+        let new_visitor = visitor_manager
+            .get_or_create_visitor(
+                None,
+                Some(&context),
+                "Mozilla/5.0",
+                Some("1.2.3.4"),
+                &attribution,
+            )
+            .await
+            .unwrap();
+
+        let db_visitor = visitor::Entity::find_by_id(new_visitor.visitor_id_i32)
+            .one(test_db.connection_arc().as_ref())
+            .await
+            .unwrap()
+            .expect("Visitor should exist");
+
+        assert_eq!(db_visitor.first_referrer, None);
+        assert_eq!(db_visitor.first_referrer_hostname, None);
+        assert_eq!(db_visitor.first_channel, Some("Direct".to_string()));
     }
 }

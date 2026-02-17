@@ -139,16 +139,38 @@ pub trait ProjectContextResolver: Send + Sync {
     async fn get_static_path(&self, host: &str) -> Option<String>;
 }
 
+/// First-visit attribution data for a new visitor
+#[derive(Debug, Clone, Default)]
+pub struct FirstVisitAttribution {
+    /// Full referrer URL
+    pub referrer: Option<String>,
+    /// Hostname extracted from referrer
+    pub referrer_hostname: Option<String>,
+    /// Marketing channel (e.g. "Organic Search", "Direct")
+    pub channel: Option<String>,
+    /// UTM source parameter
+    pub utm_source: Option<String>,
+    /// UTM medium parameter
+    pub utm_medium: Option<String>,
+    /// UTM campaign parameter
+    pub utm_campaign: Option<String>,
+}
+
 /// Trait for managing visitors
 #[async_trait]
 pub trait VisitorManager: Send + Sync {
     /// Get or create a visitor from encrypted cookie
+    ///
+    /// The `attribution` parameter provides first-visit referrer/UTM/channel data.
+    /// These fields are only set when creating a NEW visitor and are never overwritten
+    /// for returning visitors.
     async fn get_or_create_visitor(
         &self,
         visitor_cookie: Option<&str>,
         context: Option<&ProjectContext>,
         user_agent: &str,
         ip_address: Option<&str>,
+        attribution: &FirstVisitAttribution,
     ) -> Result<Visitor, Box<dyn std::error::Error + Send + Sync>>;
 
     /// Generate encrypted visitor cookie

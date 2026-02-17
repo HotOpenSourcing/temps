@@ -2,7 +2,9 @@ import type { Command } from 'commander'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { requireAuth } from '../../config/store.js'
+import { requireProjectSlug } from '../../config/resolve-project.js'
 import { setupClient, client, getErrorMessage } from '../../lib/api-client.js'
+import { parseEnvFile } from '../../lib/env-file.js'
 import {
   getEnvironments,
   getEnvironment,
@@ -32,31 +34,35 @@ export function registerEnvironmentsCommands(program: Command): void {
     .description('Manage environments and environment variables')
 
   environments
-    .command('list <project>')
+    .command('list')
     .alias('ls')
     .description('List environments for a project')
+    .option('-p, --project <project>', 'Project slug or ID')
     .option('--json', 'Output in JSON format')
     .action(listEnvironments)
 
   environments
-    .command('create <project>')
+    .command('create')
     .description('Create a new environment')
+    .option('-p, --project <project>', 'Project slug or ID')
     .option('-n, --name <name>', 'Environment name')
     .option('-b, --branch <branch>', 'Git branch')
     .option('--preview', 'Set as preview environment')
     .action(createEnvironmentCmd)
 
   environments
-    .command('delete <project> <environment>')
+    .command('delete <environment>')
     .alias('rm')
     .description('Delete an environment')
+    .option('-p, --project <project>', 'Project slug or ID')
     .option('-f, --force', 'Skip confirmation')
     .action(deleteEnvironmentCmd)
 
   // Environment variables subcommand
   const vars = environments
-    .command('vars <project>')
+    .command('vars')
     .description('Manage environment variables')
+    .option('-p, --project <project>', 'Project slug or ID')
 
   vars
     .command('list')
@@ -65,18 +71,18 @@ export function registerEnvironmentsCommands(program: Command): void {
     .option('-e, --environment <name>', 'Filter by environment name')
     .option('--show-values', 'Show actual values (hidden by default)')
     .option('--json', 'Output in JSON format')
-    .action((options, cmd) => {
-      const project = cmd.parent!.args[0]
-      return listEnvVars(project, options)
+    .action(async (options, cmd) => {
+      const projectSlug = cmd.parent!.opts().project
+      return listEnvVars(projectSlug, options)
     })
 
   vars
     .command('get <key>')
     .description('Get a specific environment variable')
     .option('-e, --environment <name>', 'Specify environment (if variable exists in multiple)')
-    .action((key, options, cmd) => {
-      const project = cmd.parent!.parent!.args[0]
-      return getEnvVar(project, key, options)
+    .action(async (key, options, cmd) => {
+      const projectSlug = cmd.parent!.parent!.opts().project
+      return getEnvVar(projectSlug, key, options)
     })
 
   vars
@@ -85,9 +91,9 @@ export function registerEnvironmentsCommands(program: Command): void {
     .option('-e, --environments <names>', 'Comma-separated environment names (interactive if not provided)')
     .option('--no-preview', 'Exclude from preview environments')
     .option('--update', 'Update existing variable instead of creating new')
-    .action((key, value, options, cmd) => {
-      const project = cmd.parent!.parent!.args[0]
-      return setEnvVar(project, key, value, options)
+    .action(async (key, value, options, cmd) => {
+      const projectSlug = cmd.parent!.parent!.opts().project
+      return setEnvVar(projectSlug, key, value, options)
     })
 
   vars
@@ -97,9 +103,9 @@ export function registerEnvironmentsCommands(program: Command): void {
     .description('Delete an environment variable')
     .option('-e, --environment <name>', 'Delete only from specific environment')
     .option('-f, --force', 'Skip confirmation')
-    .action((key, options, cmd) => {
-      const project = cmd.parent!.parent!.args[0]
-      return deleteEnvVar(project, key, options)
+    .action(async (key, options, cmd) => {
+      const projectSlug = cmd.parent!.parent!.opts().project
+      return deleteEnvVar(projectSlug, key, options)
     })
 
   vars
@@ -107,9 +113,9 @@ export function registerEnvironmentsCommands(program: Command): void {
     .description('Import environment variables from a .env file')
     .option('-e, --environments <names>', 'Comma-separated environment names')
     .option('--overwrite', 'Overwrite existing variables')
-    .action((file, options, cmd) => {
-      const project = cmd.parent!.parent!.args[0]
-      return importEnvVars(project, file, options)
+    .action(async (file, options, cmd) => {
+      const projectSlug = cmd.parent!.parent!.opts().project
+      return importEnvVars(projectSlug, file, options)
     })
 
   vars
@@ -117,15 +123,16 @@ export function registerEnvironmentsCommands(program: Command): void {
     .description('Export environment variables to .env format')
     .option('-e, --environment <name>', 'Export from specific environment')
     .option('-o, --output <file>', 'Write to file instead of stdout')
-    .action((options, cmd) => {
-      const project = cmd.parent!.parent!.args[0]
-      return exportEnvVars(project, options)
+    .action(async (options, cmd) => {
+      const projectSlug = cmd.parent!.parent!.opts().project
+      return exportEnvVars(projectSlug, options)
     })
 
   // Resources subcommand
   environments
-    .command('resources <project> <environment>')
+    .command('resources <environment>')
     .description('View or set CPU/memory resources for an environment')
+    .option('-p, --project <project>', 'Project slug or ID')
     .option('--cpu <millicores>', 'CPU limit in millicores (e.g., 500 = 0.5 CPU)')
     .option('--memory <mb>', 'Memory limit in MB (e.g., 512)')
     .option('--cpu-request <millicores>', 'CPU request in millicores (guaranteed minimum)')
@@ -135,24 +142,29 @@ export function registerEnvironmentsCommands(program: Command): void {
 
   // Scale subcommand
   environments
-    .command('scale <project> <environment> [replicas]')
+    .command('scale')
     .description('View or set the number of replicas for an environment')
+    .option('-p, --project <project>', 'Project slug or ID')
+    .option('-e, --environment <env>', 'Environment name or slug', 'production')
+    .option('-r, --replicas <count>', 'Number of replicas to set')
     .option('--json', 'Output in JSON format')
     .action(scaleCmd)
 
   // Cron jobs subcommand
   const crons = environments
-    .command('crons <project> <environment>')
+    .command('crons')
     .description('Manage cron jobs')
+    .option('-p, --project <project>', 'Project slug or ID')
+    .requiredOption('-e, --environment <env>', 'Environment name or slug')
 
   crons
     .command('list')
     .alias('ls')
     .description('List cron jobs for an environment')
     .option('--json', 'Output in JSON format')
-    .action((options, cmd) => {
-      const [project, environment] = cmd.parent!.args
-      return listCrons(project, environment, options)
+    .action(async (options, cmd) => {
+      const parentOpts = cmd.parent!.opts()
+      return listCrons(parentOpts.project, parentOpts.environment, options)
     })
 
   crons
@@ -160,9 +172,9 @@ export function registerEnvironmentsCommands(program: Command): void {
     .description('Show cron job details')
     .requiredOption('--id <id>', 'Cron job ID')
     .option('--json', 'Output in JSON format')
-    .action((options, cmd) => {
-      const [project, environment] = cmd.parent!.args
-      return showCron(project, environment, options)
+    .action(async (options, cmd) => {
+      const parentOpts = cmd.parent!.opts()
+      return showCron(parentOpts.project, parentOpts.environment, options)
     })
 
   crons
@@ -173,9 +185,9 @@ export function registerEnvironmentsCommands(program: Command): void {
     .option('--page <page>', 'Page number', '1')
     .option('--per-page <count>', 'Items per page', '20')
     .option('--json', 'Output in JSON format')
-    .action((options, cmd) => {
-      const [project, environment] = cmd.parent!.args
-      return listCronExecutions(project, environment, options)
+    .action(async (options, cmd) => {
+      const parentOpts = cmd.parent!.opts()
+      return listCronExecutions(parentOpts.project, parentOpts.environment, options)
     })
 }
 
@@ -190,9 +202,16 @@ async function getProjectId(projectSlug: string): Promise<number> {
   return data.id
 }
 
-async function listEnvironments(project: string, options: { json?: boolean }): Promise<void> {
+async function listEnvironments(options: { project?: string; json?: boolean }): Promise<void> {
   await requireAuth()
   await setupClient()
+
+  const resolved = await requireProjectSlug(options.project)
+  const project = resolved.slug
+
+  if (resolved.source !== 'flag') {
+    info(`Using project ${colors.bold(project)} (from ${resolved.source})`)
+  }
 
   const environments = await withSpinner('Fetching environments...', async () => {
     const projectId = await getProjectId(project)
@@ -225,10 +244,15 @@ async function listEnvironments(project: string, options: { json?: boolean }): P
 }
 
 async function createEnvironmentCmd(
-  project: string,
-  options: { name?: string; branch?: string; preview?: boolean }
+  options: { project?: string; name?: string; branch?: string; preview?: boolean }
 ): Promise<void> {
   await requireAuth()
+  await setupClient()
+
+  const resolved = await requireProjectSlug(options.project)
+  if (resolved.source !== 'flag') {
+    info(`Using project ${colors.bold(resolved.slug)} (from ${resolved.source})`)
+  }
 
   const name = options.name ?? await promptText({
     message: 'Environment name',
@@ -241,10 +265,8 @@ async function createEnvironmentCmd(
     default: name === 'production' ? 'main' : name,
   })
 
-  await setupClient()
-
   const environment = await withSpinner('Creating environment...', async () => {
-    const projectId = await getProjectId(project)
+    const projectId = await getProjectId(resolved.slug)
     const { data, error } = await createEnvironment({
       client,
       path: { project_id: projectId },
@@ -266,11 +288,16 @@ async function createEnvironmentCmd(
 }
 
 async function deleteEnvironmentCmd(
-  project: string,
   environment: string,
-  options: { force?: boolean }
+  options: { project?: string; force?: boolean }
 ): Promise<void> {
   await requireAuth()
+  await setupClient()
+
+  const resolved = await requireProjectSlug(options.project)
+  if (resolved.source !== 'flag') {
+    info(`Using project ${colors.bold(resolved.slug)} (from ${resolved.source})`)
+  }
 
   if (environment === 'production') {
     warning('Cannot delete production environment')
@@ -279,7 +306,7 @@ async function deleteEnvironmentCmd(
 
   if (!options.force) {
     const confirmed = await promptConfirm({
-      message: `Delete environment "${environment}" from ${project}?`,
+      message: `Delete environment "${environment}" from ${resolved.slug}?`,
       default: false,
     })
     if (!confirmed) {
@@ -288,10 +315,8 @@ async function deleteEnvironmentCmd(
     }
   }
 
-  await setupClient()
-
   await withSpinner('Deleting environment...', async () => {
-    const projectId = await getProjectId(project)
+    const projectId = await getProjectId(resolved.slug)
     const { error } = await deleteEnvironment({
       client,
       path: { project_id: projectId, env_id: environment as unknown as number },
@@ -305,11 +330,17 @@ async function deleteEnvironmentCmd(
 // ============ Environment Variables Commands ============
 
 async function listEnvVars(
-  project: string,
+  projectFlag: string | undefined,
   options: { environment?: string; showValues?: boolean; json?: boolean }
 ): Promise<void> {
   await requireAuth()
   await setupClient()
+
+  const resolved = await requireProjectSlug(projectFlag)
+  const project = resolved.slug
+  if (resolved.source !== 'flag') {
+    info(`Using project ${colors.bold(project)} (from ${resolved.source})`)
+  }
 
   const [vars, environments] = await withSpinner('Fetching environment variables...', async () => {
     const projectId = await getProjectId(project)
@@ -396,12 +427,18 @@ async function listEnvVars(
 }
 
 async function getEnvVar(
-  project: string,
+  projectFlag: string | undefined,
   key: string,
   options: { environment?: string }
 ): Promise<void> {
   await requireAuth()
   await setupClient()
+
+  const resolved = await requireProjectSlug(projectFlag)
+  const project = resolved.slug
+  if (resolved.source !== 'flag') {
+    info(`Using project ${colors.bold(project)} (from ${resolved.source})`)
+  }
 
   const [vars, environments] = await withSpinner(`Fetching ${key}...`, async () => {
     const projectId = await getProjectId(project)
@@ -473,13 +510,19 @@ async function getEnvVar(
 }
 
 async function setEnvVar(
-  project: string,
+  projectFlag: string | undefined,
   key: string,
   value: string | undefined,
   options: { environments?: string; preview?: boolean; update?: boolean }
 ): Promise<void> {
   await requireAuth()
   await setupClient()
+
+  const resolved = await requireProjectSlug(projectFlag)
+  const project = resolved.slug
+  if (resolved.source !== 'flag') {
+    info(`Using project ${colors.bold(project)} (from ${resolved.source})`)
+  }
 
   // Get environments first
   const [existingVars, envs] = await withSpinner('Fetching environments...', async () => {
@@ -1087,15 +1130,19 @@ function displayResources(env: EnvironmentResponse | null | undefined): void {
 // ============ Scale Command ============
 
 async function scaleCmd(
-  project: string,
-  environment: string,
-  replicas: string | undefined,
-  options: { json?: boolean }
+  options: { project?: string; environment: string; replicas?: string; json?: boolean }
 ): Promise<void> {
   await requireAuth()
   await setupClient()
 
-  const projectId = await getProjectId(project)
+  const resolved = await requireProjectSlug(options.project)
+
+  if (resolved.source !== 'flag') {
+    info(`Using project ${colors.bold(resolved.slug)} (from ${resolved.source})`)
+  }
+
+  const environment = options.environment
+  const projectId = await getProjectId(resolved.slug)
 
   // Find environment by slug
   const envs = await withSpinner('Fetching environments...', async () => {
@@ -1117,9 +1164,9 @@ async function scaleCmd(
     return
   }
 
-  if (replicas !== undefined) {
+  if (options.replicas !== undefined) {
     // Set replicas
-    const replicaCount = parseInt(replicas, 10)
+    const replicaCount = parseInt(options.replicas, 10)
     if (isNaN(replicaCount) || replicaCount < 0) {
       errorOutput('Replicas must be a non-negative number')
       return
@@ -1148,7 +1195,7 @@ async function scaleCmd(
     }
 
     newline()
-    success(`Scaled ${project}/${environment} to ${replicaCount} replica${replicaCount !== 1 ? 's' : ''}`)
+    success(`Scaled ${resolved.slug}/${environment} to ${replicaCount} replica${replicaCount !== 1 ? 's' : ''}`)
     newline()
     info(`Note: Scaling takes effect on the next deployment or restart`)
   } else {
@@ -1164,12 +1211,12 @@ async function scaleCmd(
     }
 
     newline()
-    header(`${icons.folder} Scale for ${project}/${environment}`)
+    header(`${icons.folder} Scale for ${resolved.slug}/${environment}`)
     newline()
     keyValue('Current Replicas', String(currentReplicas))
     newline()
-    info(`To scale: ${colors.muted(`temps env scale ${project} ${environment} <replicas>`)}`)
-    info(`Example: ${colors.muted(`temps env scale ${project} ${environment} 3`)}`)
+    info(`To scale: ${colors.muted(`bunx @temps-sdk/cli env scale -p ${resolved.slug} -e ${environment} --replicas <count>`)}`)
+    info(`Example: ${colors.muted(`bunx @temps-sdk/cli env scale -p ${resolved.slug} -e ${environment} --replicas 3`)}`)
   }
 }
 
@@ -1366,35 +1413,4 @@ async function listCronExecutions(
 }
 
 // Helper function to parse .env file content
-function parseEnvFile(content: string): Record<string, string> {
-  const variables: Record<string, string> = {}
-
-  for (const line of content.split('\n')) {
-    const trimmed = line.trim()
-
-    // Skip empty lines and comments
-    if (!trimmed || trimmed.startsWith('#')) continue
-
-    // Parse KEY=VALUE
-    const match = trimmed.match(/^([^=]+)=(.*)$/)
-    if (!match) continue
-
-    const [, key, rawValue] = match
-    if (!key || rawValue === undefined) continue
-
-    let value = rawValue.trim()
-
-    // Handle quoted values
-    if ((value.startsWith('"') && value.endsWith('"')) ||
-        (value.startsWith("'") && value.endsWith("'"))) {
-      value = value.slice(1, -1)
-        .replace(/\\n/g, '\n')
-        .replace(/\\"/g, '"')
-        .replace(/\\'/g, "'")
-    }
-
-    variables[key.trim()] = value
-  }
-
-  return variables
-}
+// parseEnvFile is now imported from '../../lib/env-file.js'

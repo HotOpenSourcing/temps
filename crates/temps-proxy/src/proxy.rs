@@ -356,6 +356,28 @@ impl LoadBalancer {
             return Ok(());
         }
 
+        // Compute first-visit attribution from referrer and query string
+        // These fields are only stored when creating a NEW visitor
+        let utm = ctx
+            .query_string
+            .as_deref()
+            .map(temps_analytics::parse_utm_params)
+            .unwrap_or_default();
+        let referrer_hostname = ctx
+            .referrer
+            .as_deref()
+            .and_then(temps_analytics::extract_referrer_hostname);
+        let channel =
+            temps_analytics::get_channel(&utm, referrer_hostname.as_deref(), Some(&ctx.host));
+        let attribution = crate::traits::FirstVisitAttribution {
+            referrer: ctx.referrer.clone(),
+            referrer_hostname: referrer_hostname.clone(),
+            channel: Some(channel.to_string()),
+            utm_source: utm.utm_source.clone(),
+            utm_medium: utm.utm_medium.clone(),
+            utm_campaign: utm.utm_campaign.clone(),
+        };
+
         // Create visitor using the trait (only for non-crawlers)
         let visitor = match self
             .visitor_manager
@@ -364,6 +386,7 @@ impl LoadBalancer {
                 project_context.as_ref(),
                 &ctx.user_agent,
                 ctx.ip_address.as_deref(),
+                &attribution,
             )
             .await
         {

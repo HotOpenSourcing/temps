@@ -2,7 +2,7 @@ import { credentials, config } from '../../config/store.js'
 import { promptPassword, promptText, promptSelect, promptEmail } from '../../ui/prompts.js'
 import { withSpinner } from '../../ui/spinner.js'
 import { info, icons, colors, newline, box, warning } from '../../ui/output.js'
-import { setupClient, client } from '../../lib/api-client.js'
+import { setupClient, client, normalizeApiUrl } from '../../lib/api-client.js'
 import { getCurrentUser } from '../../api/sdk.gen.js'
 import { AuthenticationError } from '../../utils/errors.js'
 
@@ -119,7 +119,7 @@ export async function loginWithEmail(emailArg?: string): Promise<void> {
   })
 
   // Use raw fetch to capture the session cookie
-  const apiUrl = config.get('apiUrl')
+  const apiUrl = normalizeApiUrl(config.get('apiUrl'))
 
   const authResponse = await withSpinner('Logging in...', async () => {
     const response = await fetch(`${apiUrl}/auth/login`, {
@@ -238,7 +238,7 @@ export async function loginWithEmail(emailArg?: string): Promise<void> {
 
 export async function loginWithMagicLink(emailArg?: string): Promise<void> {
   const email = emailArg ?? await promptEmail('Email')
-  const apiUrl = config.get('apiUrl')
+  const apiUrl = normalizeApiUrl(config.get('apiUrl'))
 
   await withSpinner('Sending magic link...', async () => {
     const response = await fetch(`${apiUrl}/auth/magic-link/request`, {

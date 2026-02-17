@@ -79,7 +79,7 @@ export function createProgram(): Command {
   program
     .name('temps')
     .description('CLI for Temps deployment platform')
-    .version(VERSION, '-v, --version', 'Display version number')
+    .version(VERSION, '-V, --version', 'Display version number')
     .option('--no-color', 'Disable colored output')
     .option('--debug', 'Enable debug output')
     .hook('preAction', (thisCommand) => {

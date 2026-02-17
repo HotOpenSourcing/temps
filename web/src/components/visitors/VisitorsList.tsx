@@ -40,6 +40,7 @@ import {
   User,
   ChevronLeft,
   ChevronRight,
+  ExternalLink,
 } from 'lucide-react'
 import * as React from 'react'
 import { useNavigate } from 'react-router-dom'
@@ -228,6 +229,7 @@ export function VisitorsList({ project }: VisitorsListProps) {
                     <TableRow>
                       <TableHead className="w-[280px]">Visitor</TableHead>
                       <TableHead>Location</TableHead>
+                      <TableHead>Source</TableHead>
                       <TableHead>Browser / OS</TableHead>
                       <TableHead>First Seen</TableHead>
                       <TableHead>Last Seen</TableHead>
@@ -377,6 +379,11 @@ function VisitorRow({ visitor, onClick }: VisitorRowProps) {
         </div>
       </TableCell>
 
+      {/* Source / Referrer */}
+      <TableCell>
+        <VisitorSource visitor={visitor} />
+      </TableCell>
+
       {/* Browser / OS */}
       <TableCell>
         <div className="flex items-center gap-1.5">
@@ -417,5 +424,32 @@ function VisitorRow({ visitor, onClick }: VisitorRowProps) {
         </Tooltip>
       </TableCell>
     </TableRow>
+  )
+}
+
+function VisitorSource({ visitor }: { visitor: VisitorInfo }) {
+  const channel = visitor.first_channel
+  const hostname = visitor.first_referrer_hostname
+
+  if (!channel && !hostname) {
+    return <span className="text-sm text-muted-foreground">Direct</span>
+  }
+
+  return (
+    <div className="flex flex-col gap-0.5">
+      {channel && (
+        <Badge variant="outline" className="text-[10px] px-1.5 py-0 w-fit">
+          {channel}
+        </Badge>
+      )}
+      {hostname && (
+        <div className="flex items-center gap-1">
+          <ExternalLink className="h-3 w-3 text-muted-foreground flex-shrink-0" />
+          <span className="text-xs text-muted-foreground truncate max-w-[150px]">
+            {hostname}
+          </span>
+        </div>
+      )}
+    </div>
   )
 }

@@ -26,6 +26,7 @@ mod m20260122_000001_increase_checksum_length;
 mod m20260213_000001_create_source_maps;
 mod m20260214_000001_create_events_hourly_aggregate;
 mod m20260214_000002_add_analytics_performance_indexes;
+mod m20260217_000001_add_first_referrer_to_visitor;
 
 pub struct Migrator;
 
@@ -59,6 +60,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260213_000001_create_source_maps::Migration),
             Box::new(m20260214_000001_create_events_hourly_aggregate::Migration),
             Box::new(m20260214_000002_add_analytics_performance_indexes::Migration),
+            Box::new(m20260217_000001_add_first_referrer_to_visitor::Migration),
         ]
     }
 }

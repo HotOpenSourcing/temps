@@ -1,12 +1,13 @@
 import { requireAuth } from '../../config/store.js'
+import { requireProjectSlug } from '../../config/resolve-project.js'
 import { withSpinner } from '../../ui/spinner.js'
-import { newline, header, icons, json, keyValue, formatDate } from '../../ui/output.js'
+import { newline, header, icons, json, keyValue, info, colors, formatDate } from '../../ui/output.js'
 import { detailsTable, statusBadge } from '../../ui/table.js'
 import { setupClient, client, getErrorMessage } from '../../lib/api-client.js'
 import { getProject, getProjectBySlug } from '../../api/sdk.gen.js'
 
 interface ShowOptions {
-  project: string
+  project?: string
   json?: boolean
 }
 
@@ -14,7 +15,13 @@ export async function show(options: ShowOptions): Promise<void> {
   await requireAuth()
   await setupClient()
 
-  const projectIdOrName = options.project
+  const resolved = await requireProjectSlug(options.project)
+
+  if (resolved.source !== 'flag') {
+    info(`Using project ${colors.bold(resolved.slug)} (from ${resolved.source})`)
+  }
+
+  const projectIdOrName = resolved.slug
 
   const project = await withSpinner('Fetching project...', async () => {
     // Try to parse as ID first

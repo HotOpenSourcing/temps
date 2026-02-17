@@ -19,6 +19,19 @@ pub struct Model {
     pub custom_data: Option<serde_json::Value>,
     /// Flag indicating visitor has recorded events/sessions (not a "ghost" visitor)
     pub has_activity: bool,
+    // First-visit attribution fields (set once on visitor creation, never overwritten)
+    /// Full referrer URL from the visitor's first session
+    pub first_referrer: Option<String>,
+    /// Hostname extracted from first_referrer
+    pub first_referrer_hostname: Option<String>,
+    /// Marketing channel computed from the first visit (e.g. "Organic Search", "Direct")
+    pub first_channel: Option<String>,
+    /// UTM source parameter from the first visit
+    pub first_utm_source: Option<String>,
+    /// UTM medium parameter from the first visit
+    pub first_utm_medium: Option<String>,
+    /// UTM campaign parameter from the first visit
+    pub first_utm_campaign: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

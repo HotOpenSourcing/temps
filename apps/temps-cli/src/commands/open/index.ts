@@ -1,9 +1,8 @@
 import type { Command } from 'commander'
 import { execSync } from 'node:child_process'
 import { requireAuth } from '../../config/store.js'
-import { setupClient, client, getErrorMessage } from '../../lib/api-client.js'
+import { setupClient, client, getWebUrl, getErrorMessage } from '../../lib/api-client.js'
 import { requireProjectSlug } from '../../config/resolve-project.js'
-import { config } from '../../config/store.js'
 import { getProjectBySlug, getEnvironments } from '../../api/sdk.gen.js'
 import { withSpinner } from '../../ui/spinner.js'
 import { promptSelect } from '../../ui/prompts.js'
@@ -50,8 +49,8 @@ async function open(projectArg: string | undefined, options: OpenOptions): Promi
 
   // If --dashboard, open the web dashboard
   if (options.dashboard) {
-    const apiUrl = config.get('apiUrl')
-    const dashboardUrl = `${apiUrl}/dashboard/projects/${resolved.slug}`
+    const webUrl = getWebUrl()
+    const dashboardUrl = `${webUrl}/projects/${resolved.slug}`
     success(`Opening dashboard for ${resolved.slug}`)
     openUrl(dashboardUrl)
     return

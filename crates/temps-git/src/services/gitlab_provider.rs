@@ -1069,6 +1069,60 @@ impl GitProviderService for GitLabProvider {
         }
     }
 
+    async fn list_commits(
+        &self,
+        access_token: &str,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+        per_page: u32,
+    ) -> Result<Vec<Commit>, GitProviderError> {
+        let client = self.get_client();
+        let headers = self.get_headers(access_token);
+
+        let project_path = format!("{}/{}", owner, repo);
+        let encoded_path = urlencoding::encode(&project_path);
+        let url = format!(
+            "{}/api/v4/projects/{}/repository/commits?ref_name={}&per_page={}",
+            self.base_url, encoded_path, branch, per_page
+        );
+
+        let response = self
+            .send_with_retry(|| client.get(&url).headers(headers.clone()))
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(GitProviderError::ApiError(format!(
+                "Failed to list commits: {}",
+                response.status()
+            )));
+        }
+
+        let items: Vec<GitLabCommitResponse> = response
+            .json()
+            .await
+            .map_err(|e| GitProviderError::ApiError(e.to_string()))?;
+
+        let commits = items
+            .into_iter()
+            .map(|item| {
+                let date = chrono::DateTime::parse_from_rfc3339(&item.committed_date)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now());
+
+                Commit {
+                    sha: item.id,
+                    message: item.message,
+                    author: item.author_name,
+                    author_email: item.author_email,
+                    date,
+                }
+            })
+            .collect();
+
+        Ok(commits)
+    }
+
     async fn download_archive(
         &self,
         access_token: &str,

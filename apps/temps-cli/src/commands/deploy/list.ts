@@ -1,5 +1,6 @@
-import { requireAuth, config } from '../../config/store.js'
+import { requireAuth } from '../../config/store.js'
 import { setupClient, client, getErrorMessage } from '../../lib/api-client.js'
+import { resolveProjectSlug } from '../../config/resolve-project.js'
 import { getProjectDeployments, getProjectBySlug } from '../../api/sdk.gen.js'
 import type { DeploymentResponse } from '../../api/types.gen.js'
 import { withSpinner } from '../../ui/spinner.js'
@@ -20,11 +21,16 @@ export async function list(options: ListOptions): Promise<void> {
   await requireAuth()
   await setupClient()
 
-  const projectName = options.project ?? config.get('defaultProject')
+  const resolved = await resolveProjectSlug(options.project)
 
-  if (!projectName) {
-    throw new Error('No project specified. Use: temps deployments list --project <project>')
+  if (!resolved) {
+    throw new Error(
+      'No project specified. Use: bunx @temps-sdk/cli deployments list --project <slug>\n' +
+      'Or link this directory: bunx @temps-sdk/cli link <slug>'
+    )
   }
+
+  const projectName = resolved.slug
 
   const deployments = await withSpinner('Fetching deployments...', async () => {
     // Get project ID from slug

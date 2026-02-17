@@ -25,6 +25,8 @@ pub struct AppState {
 #[openapi(
     paths(
         get_events_count,
+        get_event_detail,
+        get_event_visitors,
         get_visitors,
         get_visitor_details,
         get_visitor_info,
@@ -142,6 +144,16 @@ pub struct AppState {
         RecentActivityQuery,
         RecentActivityResponse,
         ActivityEvent,
+        // Event detail types
+        EventDetailQuery,
+        EventDetailResponse,
+        EventActivityBucket,
+        EventReferrerStats,
+        EventCountryStats,
+        EventBrowserStats,
+        EventVisitorsQuery,
+        EventVisitorsResponse,
+        EventVisitorInfo,
     )),
     info(
         title = "Analytics API",
@@ -156,6 +168,8 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/analytics/general-stats", get(get_general_stats))
         .route("/analytics/events", get(get_events_count))
+        .route("/analytics/event-detail", get(get_event_detail))
+        .route("/analytics/event-visitors", get(get_event_visitors))
         .route("/analytics/visitors", get(get_visitors))
         .route("/analytics/visitors/{visitor_id}", get(get_visitor_details))
         .route(
@@ -1419,6 +1433,114 @@ pub async fn get_recent_activity(
             query.environment_id,
             query.since_id,
             query.limit,
+        )
+        .await
+    {
+        Ok(result) => Ok(Json(result)),
+        Err(e) => {
+            error!("Analytics error: {:?}", e);
+            Err(handle_analytics_error(e))
+        }
+    }
+}
+
+/// Get detailed analytics for a specific event
+#[utoipa::path(
+    tag = "Analytics",
+    get,
+    path = "/analytics/event-detail",
+    params(
+        ("event_name" = String, Query, description = "Event name to get details for"),
+        ("project_id" = i32, Query, description = "Project ID"),
+        ("environment_id" = Option<i32>, Query, description = "Environment ID (optional)"),
+        ("start_date" = String, Query, description = "Start date (ISO 8601)"),
+        ("end_date" = String, Query, description = "End date (ISO 8601)"),
+        ("bucket_interval" = Option<String>, Query, description = "Bucket interval: hour, day, week, month (default: auto)")
+    ),
+    responses(
+        (status = 200, description = "Successfully retrieved event details", body = EventDetailResponse),
+        (status = 400, description = "Invalid parameters"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(
+        ("bearer_auth" = [])
+    )
+)]
+pub async fn get_event_detail(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    Query(query): Query<requests::EventDetailQuery>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, AnalyticsRead);
+
+    let start_date: UtcDateTime = query.start_date.into();
+    let end_date: UtcDateTime = query.end_date.into();
+
+    match app_state
+        .analytics_service
+        .get_event_detail(
+            query.project_id,
+            &query.event_name,
+            start_date,
+            end_date,
+            query.environment_id,
+            query.bucket_interval.as_deref(),
+        )
+        .await
+    {
+        Ok(detail) => Ok(Json(detail)),
+        Err(e) => {
+            error!("Analytics error: {:?}", e);
+            Err(handle_analytics_error(e))
+        }
+    }
+}
+
+/// Get paginated list of visitors who triggered a specific event
+#[utoipa::path(
+    tag = "Analytics",
+    get,
+    path = "/analytics/event-visitors",
+    params(
+        ("event_name" = String, Query, description = "Event name to list visitors for"),
+        ("project_id" = i32, Query, description = "Project ID"),
+        ("environment_id" = Option<i32>, Query, description = "Environment ID (optional)"),
+        ("start_date" = String, Query, description = "Start date (ISO 8601)"),
+        ("end_date" = String, Query, description = "End date (ISO 8601)"),
+        ("page" = Option<u64>, Query, description = "Page number (1-based, default: 1)"),
+        ("per_page" = Option<u64>, Query, description = "Items per page (default: 20, max: 100)")
+    ),
+    responses(
+        (status = 200, description = "Successfully retrieved event visitors", body = EventVisitorsResponse),
+        (status = 400, description = "Invalid parameters"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(
+        ("bearer_auth" = [])
+    )
+)]
+pub async fn get_event_visitors(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    Query(query): Query<requests::EventVisitorsQuery>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, AnalyticsRead);
+
+    let start_date: UtcDateTime = query.start_date.into();
+    let end_date: UtcDateTime = query.end_date.into();
+    let page = query.page.unwrap_or(1);
+    let per_page = query.per_page.unwrap_or(20).min(100);
+
+    match app_state
+        .analytics_service
+        .get_event_visitors(
+            query.project_id,
+            &query.event_name,
+            start_date,
+            end_date,
+            query.environment_id,
+            page,
+            per_page,
         )
         .await
     {

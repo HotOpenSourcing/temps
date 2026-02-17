@@ -254,4 +254,28 @@ pub trait Analytics: Send + Sync {
         environment_id: Option<i32>,
         bucket_interval: Option<&str>,
     ) -> Result<crate::types::responses::PagePathDetailResponse, AnalyticsError>;
+
+    /// Get detailed analytics for a specific event name
+    /// Returns total count, unique visitors, timeline, referrers, countries, browsers
+    async fn get_event_detail(
+        &self,
+        project_id: i32,
+        event_name: &str,
+        start_date: UtcDateTime,
+        end_date: UtcDateTime,
+        environment_id: Option<i32>,
+        bucket_interval: Option<&str>,
+    ) -> Result<crate::types::responses::EventDetailResponse, AnalyticsError>;
+
+    /// Get paginated list of visitors who triggered a specific event
+    async fn get_event_visitors(
+        &self,
+        project_id: i32,
+        event_name: &str,
+        start_date: UtcDateTime,
+        end_date: UtcDateTime,
+        environment_id: Option<i32>,
+        page: u64,
+        per_page: u64,
+    ) -> Result<crate::types::responses::EventVisitorsResponse, AnalyticsError>;
 }

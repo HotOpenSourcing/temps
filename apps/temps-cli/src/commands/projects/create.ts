@@ -1,5 +1,5 @@
 import { requireAuth, config } from '../../config/store.js'
-import { promptText, promptConfirm, type SelectOption } from '../../ui/prompts.js'
+import { promptText, promptConfirm, promptSelect, type SelectOption } from '../../ui/prompts.js'
 import { withSpinner } from '../../ui/spinner.js'
 import {
   success,
@@ -10,10 +10,12 @@ import {
   keyValue,
   header,
   info,
+  warning,
 } from '../../ui/output.js'
 import { setupClient, client, getErrorMessage } from '../../lib/api-client.js'
 import { createProject } from '../../api/sdk.gen.js'
 import type { RepositoryResponse } from '../../api/types.gen.js'
+import { readEnvFile, findEnvFiles } from '../../lib/env-file.js'
 
 // Shared utilities (extracted to avoid duplication with setup wizard)
 import {
@@ -183,32 +185,123 @@ async function configureEnvironmentVariables(): Promise<[string, string][]> {
 
   const envVars: [string, string][] = []
 
-  let addMore = true
-  while (addMore) {
-    newline()
-    const key = await promptText({
-      message: 'Variable name (e.g., DATABASE_URL)',
-      required: true,
-      validate: (v) => {
-        if (!v) return 'Variable name is required'
-        if (!/^[A-Z_][A-Z0-9_]*$/i.test(v)) {
-          return 'Variable name must start with a letter or underscore and contain only letters, numbers, and underscores'
+  // Check for .env files in the current directory
+  const envFiles = findEnvFiles()
+
+  // Build method choices
+  const methodChoices: SelectOption<string>[] = []
+
+  if (envFiles.length > 0) {
+    methodChoices.push({
+      name: `Import from file (${envFiles.join(', ')} found)`,
+      value: 'file',
+      description: 'Load variables from a .env file',
+    })
+  }
+
+  methodChoices.push(
+    {
+      name: 'Enter manually',
+      value: 'manual',
+      description: 'Type key-value pairs one by one',
+    },
+    {
+      name: 'Specify file path',
+      value: 'path',
+      description: 'Provide a custom path to a .env file',
+    },
+  )
+
+  const method = methodChoices.length === 1
+    ? 'manual'
+    : await promptSelect({ message: 'How to add variables?', choices: methodChoices })
+
+  if (method === 'file' || method === 'path') {
+    let filePath: string
+
+    if (method === 'file') {
+      if (envFiles.length === 1) {
+        filePath = envFiles[0]!
+      } else {
+        filePath = await promptSelect({
+          message: 'Select .env file',
+          choices: envFiles.map((f) => ({ name: f, value: f })),
+        })
+      }
+    } else {
+      filePath = await promptText({
+        message: 'Path to .env file',
+        default: '.env',
+        required: true,
+      })
+    }
+
+    const parsed = readEnvFile(filePath)
+
+    if (!parsed || Object.keys(parsed).length === 0) {
+      warning(`No variables found in ${filePath}`)
+    } else {
+      const entries = Object.entries(parsed)
+      newline()
+      info(`Found ${entries.length} variable(s) in ${colors.bold(filePath)}:`)
+      newline()
+
+      for (const [key, value] of entries) {
+        const masked = value.length > 30 ? `${value.substring(0, 30)}...` : value
+        keyValue(`  ${key}`, colors.muted(masked))
+      }
+
+      newline()
+      const confirm = await promptConfirm({
+        message: `Import ${entries.length} variable(s)?`,
+        default: true,
+      })
+
+      if (confirm) {
+        for (const [key, value] of entries) {
+          envVars.push([key, value])
         }
-        return true
-      },
-    })
+        success(`Imported ${entries.length} variable(s) from ${filePath}`)
+      }
+    }
+  }
 
-    const value = await promptText({
-      message: `Value for ${key}`,
-      required: true,
-    })
-
-    envVars.push([key, value])
-
-    addMore = await promptConfirm({
-      message: 'Add another environment variable?',
+  // Manual entry (either as primary method or to add more after file import)
+  if (method === 'manual' || envVars.length > 0) {
+    const shouldAddManual = method === 'manual' || await promptConfirm({
+      message: 'Add more variables manually?',
       default: false,
     })
+
+    if (shouldAddManual) {
+      let addMore = true
+      while (addMore) {
+        newline()
+        const key = await promptText({
+          message: 'Variable name (e.g., DATABASE_URL)',
+          required: true,
+          validate: (v) => {
+            if (!v) return 'Variable name is required'
+            if (!/^[A-Z_][A-Z0-9_]*$/i.test(v)) {
+              return 'Variable name must start with a letter or underscore and contain only letters, numbers, and underscores'
+            }
+            return true
+          },
+        })
+
+        const value = await promptText({
+          message: `Value for ${key}`,
+          required: true,
+        })
+
+        envVars.push([key, value])
+
+        addMore = await promptConfirm({
+          message: 'Add another variable?',
+          default: false,
+        })
+      }
+    }
   }
 
   return envVars

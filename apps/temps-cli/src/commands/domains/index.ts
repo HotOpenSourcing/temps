@@ -37,6 +37,7 @@ async function findDomainIdByName(domainName: string): Promise<number | null> {
 interface AddOptions {
   domain: string
   challenge?: string
+  yes?: boolean
 }
 
 interface VerifyOptions {
@@ -105,6 +106,7 @@ export function registerDomainsCommands(program: Command): void {
     .description('Add a custom domain')
     .requiredOption('-d, --domain <domain>', 'Domain name')
     .option('-c, --challenge <type>', 'Challenge type (http-01 or dns-01)', 'http-01')
+    .option('-y, --yes', 'Skip confirmation prompts')
     .action(addDomain)
 
   domains
@@ -250,10 +252,11 @@ async function addDomain(options: AddOptions): Promise<void> {
   success(`Domain ${domain} added`)
 
   if (result?.dns_challenge_token && result?.dns_challenge_value) {
+    const baseDomain = domain.startsWith('*.') ? domain.slice(2) : domain
     newline()
     box(
       `Type: TXT\n` +
-      `Name: ${result.dns_challenge_token}\n` +
+      `Name: _acme-challenge.${baseDomain}\n` +
       `Value: ${result.dns_challenge_value}`,
       'Add this DNS record to verify ownership'
     )

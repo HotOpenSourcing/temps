@@ -20,7 +20,6 @@ import { Pages } from '@/components/analytics/Pages'
 import { SessionReplays } from '@/components/analytics/SessionReplays'
 import { FunnelDetail } from '@/components/funnel/FunnelDetail'
 import { FunnelManagement } from '@/components/funnel/FunnelManagement'
-import { LiveVisitorsList } from '@/components/visitors/LiveVisitorsList'
 import { LiveVisitors } from '@/pages/LiveVisitors'
 import { Button } from '@/components/ui/button'
 import { Calendar } from '@/components/ui/calendar'
@@ -61,6 +60,8 @@ import {
 } from '@/components/ui/table'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import VisitorAnalytics from '@/components/visitors/VisitorAnalytics'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { cn } from '@/lib/utils'
 import { CreateFunnel } from '@/pages/CreateFunnel'
 import { EditFunnel } from '@/pages/EditFunnel'
@@ -74,6 +75,7 @@ import {
   Globe,
   Info,
   RefreshCw,
+  RotateCcw,
   Terminal,
 } from 'lucide-react'
 import * as React from 'react'
@@ -83,8 +85,10 @@ import {
   Routes,
   useLocation,
   useNavigate,
+  useParams,
   useSearchParams,
 } from 'react-router-dom'
+import { EventDetail } from '@/components/analytics/EventDetail'
 
 import { Badge } from '@/components/ui/badge'
 import { useAuth } from '@/contexts/AuthContext'
@@ -102,6 +106,7 @@ interface VisitorChartProps {
   startDate: Date | undefined
   endDate: Date | undefined
   environment: number | undefined
+  onZoom?: (from: Date, to: Date) => void
 }
 
 export function VisitorChart({
@@ -109,10 +114,19 @@ export function VisitorChart({
   startDate,
   endDate,
   environment,
+  onZoom,
 }: VisitorChartProps) {
   const [aggregationLevel, setAggregationLevel] = React.useState<
     'events' | 'sessions' | 'visitors'
   >('visitors')
+
+  // Brush zoom state — track timestamps for zoom + pixel X for overlay
+  const [refAreaLeft, setRefAreaLeft] = React.useState<number | null>(null)
+  const [refAreaRight, setRefAreaRight] = React.useState<number | null>(null)
+  const [dragPixelLeft, setDragPixelLeft] = React.useState<number | null>(null)
+  const [dragPixelRight, setDragPixelRight] = React.useState<number | null>(null)
+  const isDragging = React.useRef(false)
+  const chartContainerRef = React.useRef<HTMLDivElement>(null)
 
   const { data, isLoading, error } = useQuery({
     ...getHourlyVisitsOptions({
@@ -183,6 +197,79 @@ export function VisitorChart({
     })
   }, [data, startDate, endDate])
 
+  // Helper: get pixel X relative to chart container from a recharts event
+  const getPixelX = React.useCallback((e: any): number | null => {
+    if (!e?.chartX) return null
+    return e.chartX
+  }, [])
+
+  const handleMouseDown = React.useCallback(
+    (e: any) => {
+      if (!e || !onZoom) return
+      const timestamp = e.activePayload?.[0]?.payload?.timestamp
+      const px = getPixelX(e)
+      if (timestamp && px != null) {
+        isDragging.current = true
+        setRefAreaLeft(timestamp)
+        setRefAreaRight(null)
+        setDragPixelLeft(px)
+        setDragPixelRight(null)
+      }
+    },
+    [onZoom, getPixelX]
+  )
+
+  const handleMouseMove = React.useCallback(
+    (e: any) => {
+      if (!isDragging.current || !e) return
+      const timestamp = e.activePayload?.[0]?.payload?.timestamp
+      const px = getPixelX(e)
+      if (timestamp) {
+        setRefAreaRight(timestamp)
+      }
+      if (px != null) {
+        setDragPixelRight(px)
+      }
+    },
+    [getPixelX]
+  )
+
+  const handleMouseUp = React.useCallback(() => {
+    if (!isDragging.current || refAreaLeft == null || refAreaRight == null) {
+      isDragging.current = false
+      setRefAreaLeft(null)
+      setRefAreaRight(null)
+      setDragPixelLeft(null)
+      setDragPixelRight(null)
+      return
+    }
+    isDragging.current = false
+
+    const left = Math.min(refAreaLeft, refAreaRight)
+    const right = Math.max(refAreaLeft, refAreaRight)
+
+    setRefAreaLeft(null)
+    setRefAreaRight(null)
+    setDragPixelLeft(null)
+    setDragPixelRight(null)
+
+    // Require a minimum drag distance (at least 2 data points apart)
+    if (right - left < 1000 * 60 * 30) {
+      return
+    }
+
+    onZoom?.(new Date(left), new Date(right))
+  }, [refAreaLeft, refAreaRight, onZoom])
+
+  // Compute the overlay position from pixel coordinates
+  const selectionOverlay = React.useMemo(() => {
+    if (dragPixelLeft == null || dragPixelRight == null) return null
+    const left = Math.min(dragPixelLeft, dragPixelRight)
+    const width = Math.abs(dragPixelRight - dragPixelLeft)
+    if (width < 4) return null
+    return { left, width }
+  }, [dragPixelLeft, dragPixelRight])
+
   const getAggregationLabel = () => {
     switch (aggregationLevel) {
       case 'events':
@@ -213,28 +300,35 @@ export function VisitorChart({
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <CardTitle>{getChartTitle()}</CardTitle>
-        <div className="flex gap-2">
-          <Badge
-            variant={aggregationLevel === 'events' ? 'default' : 'outline'}
-            className="cursor-pointer"
-            onClick={() => setAggregationLevel('events')}
-          >
-            Events
-          </Badge>
-          <Badge
-            variant={aggregationLevel === 'sessions' ? 'default' : 'outline'}
-            className="cursor-pointer"
-            onClick={() => setAggregationLevel('sessions')}
-          >
-            Sessions
-          </Badge>
-          <Badge
-            variant={aggregationLevel === 'visitors' ? 'default' : 'outline'}
-            className="cursor-pointer"
-            onClick={() => setAggregationLevel('visitors')}
-          >
-            Visitors
-          </Badge>
+        <div className="flex items-center gap-2">
+          {onZoom && (
+            <span className="text-xs text-muted-foreground hidden sm:inline">
+              Drag on chart to zoom
+            </span>
+          )}
+          <div className="flex gap-2">
+            <Badge
+              variant={aggregationLevel === 'events' ? 'default' : 'outline'}
+              className="cursor-pointer"
+              onClick={() => setAggregationLevel('events')}
+            >
+              Events
+            </Badge>
+            <Badge
+              variant={aggregationLevel === 'sessions' ? 'default' : 'outline'}
+              className="cursor-pointer"
+              onClick={() => setAggregationLevel('sessions')}
+            >
+              Sessions
+            </Badge>
+            <Badge
+              variant={aggregationLevel === 'visitors' ? 'default' : 'outline'}
+              className="cursor-pointer"
+              onClick={() => setAggregationLevel('visitors')}
+            >
+              Visitors
+            </Badge>
+          </div>
         </div>
       </div>
       {isLoading ? (
@@ -254,40 +348,57 @@ export function VisitorChart({
           </div>
         </div>
       ) : (
-        <ChartContainer config={chartConfig2} className="h-[250px] w-full">
-          <LineChart
-            accessibilityLayer
-            data={chartData}
-            margin={{
-              left: 12,
-              right: 12,
-              top: 12,
-              bottom: 12,
-            }}
+        <div ref={chartContainerRef} className="relative">
+          {selectionOverlay && (
+            <div
+              className="absolute top-0 bottom-0 bg-primary/10 dark:bg-primary/20 border-x border-primary/30 dark:border-primary/40 pointer-events-none z-10 transition-none"
+              style={{
+                left: selectionOverlay.left,
+                width: selectionOverlay.width,
+              }}
+            />
+          )}
+          <ChartContainer
+            config={chartConfig2}
+            className={cn('h-[250px] w-full', onZoom && 'cursor-crosshair')}
           >
-            <XAxis
-              dataKey="date"
-              tickLine={false}
-              axisLine={false}
-              tickMargin={8}
-              minTickGap={32}
-            />
-            <YAxis
-              tickLine={false}
-              axisLine={false}
-              tickMargin={8}
-              tickFormatter={(value) => value.toLocaleString()}
-            />
-            <ChartTooltip cursor={false} content={<ChartTooltipContent />} />
-            <Line
-              dataKey="count"
-              type="monotone"
-              stroke="var(--color-count)"
-              strokeWidth={2}
-              dot={false}
-            />
-          </LineChart>
-        </ChartContainer>
+            <LineChart
+              accessibilityLayer
+              data={chartData}
+              margin={{
+                left: 12,
+                right: 12,
+                top: 12,
+                bottom: 12,
+              }}
+              onMouseDown={onZoom ? handleMouseDown : undefined}
+              onMouseMove={onZoom ? handleMouseMove : undefined}
+              onMouseUp={onZoom ? handleMouseUp : undefined}
+            >
+              <XAxis
+                dataKey="date"
+                tickLine={false}
+                axisLine={false}
+                tickMargin={8}
+                minTickGap={32}
+              />
+              <YAxis
+                tickLine={false}
+                axisLine={false}
+                tickMargin={8}
+                tickFormatter={(value) => value.toLocaleString()}
+              />
+              <ChartTooltip cursor={false} content={<ChartTooltipContent />} />
+              <Line
+                dataKey="count"
+                type="monotone"
+                stroke="var(--color-count)"
+                strokeWidth={2}
+                dot={false}
+              />
+            </LineChart>
+          </ChartContainer>
+        </div>
       )}
     </div>
   )
@@ -417,11 +528,11 @@ function AnalyticsFilters({
                 {dateRange?.from ? (
                   dateRange.to ? (
                     <>
-                      {format(dateRange.from, 'LLL dd, y')} -{' '}
-                      {format(dateRange.to, 'LLL dd, y')}
+                      {format(dateRange.from, 'LLL dd, y HH:mm')} -{' '}
+                      {format(dateRange.to, 'LLL dd, y HH:mm')}
                     </>
                   ) : (
-                    format(dateRange.from, 'LLL dd, y')
+                    format(dateRange.from, 'LLL dd, y HH:mm')
                   )
                 ) : (
                   <span>Custom range</span>
@@ -444,6 +555,62 @@ function AnalyticsFilters({
                   new Date(new Date().setMonth(new Date().getMonth() - 1))
                 }
               />
+              <div className="border-t p-3 flex items-end gap-4">
+                <div className="flex-1 space-y-1">
+                  <Label className="text-xs text-muted-foreground">
+                    Start time
+                  </Label>
+                  <Input
+                    type="time"
+                    className="h-8 text-xs"
+                    value={
+                      dateRange?.from
+                        ? format(dateRange.from, 'HH:mm')
+                        : '00:00'
+                    }
+                    onChange={(e) => {
+                      if (!dateRange?.from) return
+                      const [hours, minutes] = e.target.value
+                        .split(':')
+                        .map(Number)
+                      const updated = new Date(dateRange.from)
+                      updated.setHours(hours, minutes, 0, 0)
+                      onDateRangeChange({
+                        from: updated,
+                        to: dateRange.to,
+                      })
+                    }}
+                    disabled={!dateRange?.from}
+                  />
+                </div>
+                <div className="flex-1 space-y-1">
+                  <Label className="text-xs text-muted-foreground">
+                    End time
+                  </Label>
+                  <Input
+                    type="time"
+                    className="h-8 text-xs"
+                    value={
+                      dateRange?.to
+                        ? format(dateRange.to, 'HH:mm')
+                        : '23:59'
+                    }
+                    onChange={(e) => {
+                      if (!dateRange?.to) return
+                      const [hours, minutes] = e.target.value
+                        .split(':')
+                        .map(Number)
+                      const updated = new Date(dateRange.to)
+                      updated.setHours(hours, minutes, 59, 999)
+                      onDateRangeChange({
+                        from: dateRange.from,
+                        to: updated,
+                      })
+                    }}
+                    disabled={!dateRange?.to}
+                  />
+                </div>
+              </div>
             </PopoverContent>
           </Popover>
         </div>
@@ -581,6 +748,133 @@ function PagesTab({ project }: PagesTabProps) {
           environment={selectedEnvironment}
         />
       )}
+    </div>
+  )
+}
+
+// Event Detail Tab Component
+interface EventDetailTabProps {
+  project: ProjectResponse
+}
+
+function EventDetailTab({ project }: EventDetailTabProps) {
+  const { eventName: rawEventName } = useParams<{ eventName: string }>()
+  const navigate = useNavigate()
+  const eventName = rawEventName ? decodeURIComponent(rawEventName) : ''
+
+  const [dateFilter, setDateFilter] = React.useState<AnalyticsDateFilter>({
+    quickFilter: '24hours',
+    dateRange: undefined,
+  })
+  const [selectedEnvironment, setSelectedEnvironment] = React.useState<
+    number | undefined
+  >(undefined)
+  const [isRefreshing, setIsRefreshing] = React.useState(false)
+  const queryClient = useQueryClient()
+
+  const getDateRange = React.useCallback(() => {
+    const now = new Date()
+    if (dateFilter.quickFilter === 'custom' && dateFilter.dateRange) {
+      return {
+        startDate: dateFilter.dateRange.from,
+        endDate: dateFilter.dateRange.to,
+      }
+    }
+
+    switch (dateFilter.quickFilter) {
+      case 'today':
+        return {
+          startDate: new Date(now.setHours(0, 0, 0, 0)),
+          endDate: new Date(now.setHours(23, 59, 59, 999)),
+        }
+      case 'yesterday': {
+        const yesterday = new Date(now)
+        yesterday.setDate(yesterday.getDate() - 1)
+        return {
+          startDate: new Date(yesterday.setHours(0, 0, 0, 0)),
+          endDate: new Date(yesterday.setHours(23, 59, 59, 999)),
+        }
+      }
+      case '24hours': {
+        const twentyFourHoursAgo = new Date(now)
+        twentyFourHoursAgo.setHours(twentyFourHoursAgo.getHours() - 24)
+        return {
+          startDate: twentyFourHoursAgo,
+          endDate: now,
+        }
+      }
+      case '7days':
+        return {
+          startDate: subDays(now, 7),
+          endDate: now,
+        }
+      case '30days':
+        return {
+          startDate: subDays(now, 30),
+          endDate: now,
+        }
+      default:
+        return {
+          startDate: subDays(now, 7),
+          endDate: now,
+        }
+    }
+  }, [dateFilter])
+
+  const { startDate, endDate } = getDateRange()
+
+  const handleRefresh = React.useCallback(() => {
+    setIsRefreshing(true)
+    queryClient.invalidateQueries({
+      predicate: (query) => {
+        const key = query.queryKey[0] as string
+        return !!(
+          key &&
+          typeof key === 'string' &&
+          (key.includes('getEventDetail') || key.includes('getEventVisitors'))
+        )
+      },
+    })
+    setTimeout(() => setIsRefreshing(false), 1000)
+  }, [queryClient])
+
+  if (!eventName) {
+    return (
+      <div className="p-8 text-center">
+        <p className="text-sm text-muted-foreground">No event specified</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-6">
+      <AnalyticsFilters
+        project={project}
+        activeFilter={dateFilter.quickFilter}
+        dateRange={dateFilter.dateRange}
+        selectedEnvironment={selectedEnvironment}
+        onFilterChange={(filter) =>
+          setDateFilter((prev) => ({ ...prev, quickFilter: filter }))
+        }
+        onDateRangeChange={(range) =>
+          setDateFilter((prev) => ({
+            quickFilter: range ? 'custom' : prev.quickFilter,
+            dateRange: range,
+          }))
+        }
+        onEnvironmentChange={setSelectedEnvironment}
+        onRefresh={handleRefresh}
+        isRefreshing={isRefreshing}
+      />
+
+      <EventDetail
+        project={project}
+        eventName={eventName}
+        startDate={startDate}
+        endDate={endDate}
+        environment={selectedEnvironment}
+        onBack={() => navigate(`/projects/${project.slug}/analytics`)}
+      />
     </div>
   )
 }
@@ -835,6 +1129,7 @@ export function ProjectAnalytics({ project }: ProjectAnalyticsProps) {
         element={<VisitorAnalytics project={project} />}
       />
       <Route path="pages" element={<PagesTab project={project} />} />
+      <Route path="events/:eventName" element={<EventDetailTab project={project} />} />
       <Route path="replays" element={<SessionReplaysTab project={project} />} />
       <Route path="setup" element={<AnalyticsSetup project={project} />} />
       <Route
@@ -854,11 +1149,64 @@ interface ProjectAnalyticsOverviewProps {
 }
 function ProjectAnalyticsOverview({ project }: ProjectAnalyticsOverviewProps) {
   const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
   const { isDemoMode } = useAuth()
-  const [dateFilter, setDateFilter] = React.useState<AnalyticsDateFilter>({
-    quickFilter: '24hours',
-    dateRange: undefined,
-  })
+
+  // Restore date filter from URL search params (enables browser back/forward)
+  const [dateFilter, setDateFilter] = React.useState<AnalyticsDateFilter>(
+    () => {
+      const filter = searchParams.get('filter') as QuickFilter | null
+      const from = searchParams.get('from')
+      const to = searchParams.get('to')
+
+      if (filter === 'custom' && from && to) {
+        return {
+          quickFilter: 'custom',
+          dateRange: { from: new Date(from), to: new Date(to) },
+        }
+      }
+      if (filter && QUICK_FILTERS.some((f) => f.value === filter)) {
+        return { quickFilter: filter, dateRange: undefined }
+      }
+      return { quickFilter: '24hours', dateRange: undefined }
+    }
+  )
+
+  // Sync date filter to URL search params
+  const updateDateFilter = React.useCallback(
+    (next: AnalyticsDateFilter) => {
+      setDateFilter(next)
+      const params = new URLSearchParams()
+      params.set('filter', next.quickFilter)
+      if (
+        next.quickFilter === 'custom' &&
+        next.dateRange?.from &&
+        next.dateRange?.to
+      ) {
+        params.set('from', next.dateRange.from.toISOString())
+        params.set('to', next.dateRange.to.toISOString())
+      }
+      setSearchParams(params, { replace: false })
+    },
+    [setSearchParams]
+  )
+
+  // Listen for popstate (browser back/forward) and restore date filter
+  React.useEffect(() => {
+    const filter = searchParams.get('filter') as QuickFilter | null
+    const from = searchParams.get('from')
+    const to = searchParams.get('to')
+
+    if (filter === 'custom' && from && to) {
+      setDateFilter({
+        quickFilter: 'custom',
+        dateRange: { from: new Date(from), to: new Date(to) },
+      })
+    } else if (filter && QUICK_FILTERS.some((f) => f.value === filter)) {
+      setDateFilter({ quickFilter: filter, dateRange: undefined })
+    }
+  }, [searchParams])
+
   const [selectedEnvironment, setSelectedEnvironment] = React.useState<
     number | undefined
   >(undefined)
@@ -917,6 +1265,17 @@ function ProjectAnalyticsOverview({ project }: ProjectAnalyticsOverviewProps) {
     }
   }, [dateFilter])
   const { startDate, endDate } = getDateRange()
+
+  // Chart zoom handler — sets a custom date range from drag selection
+  const handleChartZoom = React.useCallback(
+    (from: Date, to: Date) => {
+      updateDateFilter({
+        quickFilter: 'custom',
+        dateRange: { from, to },
+      })
+    },
+    [updateDateFilter]
+  )
 
   // Check if we have any analytics data using the new endpoint
   const hasAnalyticsEventsQuery = useQuery({
@@ -1006,13 +1365,13 @@ function ProjectAnalyticsOverview({ project }: ProjectAnalyticsOverviewProps) {
             dateRange={dateFilter.dateRange}
             selectedEnvironment={selectedEnvironment}
             onFilterChange={(filter) =>
-              setDateFilter((prev) => ({ ...prev, quickFilter: filter }))
+              updateDateFilter({ ...dateFilter, quickFilter: filter, dateRange: undefined })
             }
             onDateRangeChange={(range) =>
-              setDateFilter((prev) => ({
-                quickFilter: range ? 'custom' : prev.quickFilter,
+              updateDateFilter({
+                quickFilter: range ? 'custom' : dateFilter.quickFilter,
                 dateRange: range,
-              }))
+              })
             }
             onEnvironmentChange={setSelectedEnvironment}
             onRefresh={handleRefresh}
@@ -1027,12 +1386,30 @@ function ProjectAnalyticsOverview({ project }: ProjectAnalyticsOverviewProps) {
             endDate={endDate}
             environment={selectedEnvironment}
           />
-          <VisitorChart
-            project={project}
-            startDate={startDate}
-            endDate={endDate}
-            environment={selectedEnvironment}
-          />
+          <div className="relative">
+            {dateFilter.quickFilter === 'custom' && dateFilter.dateRange && (
+              <div className="flex justify-end mb-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-xs gap-1.5"
+                  onClick={() =>
+                    updateDateFilter({ quickFilter: '30days', dateRange: undefined })
+                  }
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  Reset zoom
+                </Button>
+              </div>
+            )}
+            <VisitorChart
+              project={project}
+              startDate={startDate}
+              endDate={endDate}
+              environment={selectedEnvironment}
+              onZoom={handleChartZoom}
+            />
+          </div>
           {/* Globe link */}
           <Card
             className="cursor-pointer hover:bg-accent/50 transition-colors"
@@ -1103,6 +1480,7 @@ interface ChartProps {
 }
 
 function EventsChart({ project, startDate, endDate, environment }: ChartProps) {
+  const navigate = useNavigate()
   const { data, isLoading, error } = useQuery({
     ...getEventsCountOptions({
       query: {
@@ -1142,8 +1520,8 @@ function EventsChart({ project, startDate, endDate, environment }: ChartProps) {
         {isLoading ? (
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              {[...Array(5)].map((_, i) => (
-                <div key={i} className="flex items-center justify-between">
+              {['e1', 'e2', 'e3', 'e4', 'e5'].map((key) => (
+                <div key={key} className="flex items-center justify-between">
                   <div className="h-4 w-[150px] bg-muted animate-pulse rounded" />
                   <div className="h-4 w-[100px] bg-muted animate-pulse rounded" />
                 </div>
@@ -1180,7 +1558,18 @@ function EventsChart({ project, startDate, endDate, environment }: ChartProps) {
             </TableHeader>
             <TableBody>
               {chartData.map((item) => (
-                <TableRow key={item.event}>
+                <TableRow
+                  key={item.event}
+                  className="cursor-pointer hover:bg-muted/50"
+                  onClick={(e) => {
+                    const url = `/projects/${project.slug}/analytics/events/${encodeURIComponent(item.event)}`
+                    if (e.metaKey || e.ctrlKey) {
+                      window.open(url, '_blank')
+                    } else {
+                      navigate(url)
+                    }
+                  }}
+                >
                   <TableCell className="font-medium">{item.event}</TableCell>
                   <TableCell className="text-right">
                     {item.count.toLocaleString()}

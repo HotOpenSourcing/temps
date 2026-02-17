@@ -4,7 +4,7 @@ import { config, credentials } from '../config/store.js'
 /**
  * Setup the API client with the correct base URL and auth headers
  */
-function normalizeApiUrl(url: string): string {
+export function normalizeApiUrl(url: string): string {
   // Remove trailing slash
   let normalized = url.replace(/\/+$/, '')
   // Ensure /api suffix if not already present
@@ -29,6 +29,13 @@ export async function setupClient(): Promise<void> {
     }
     return request
   })
+}
+
+/**
+ * Get the web dashboard base URL (API URL without /api suffix)
+ */
+export function getWebUrl(): string {
+  return config.get('apiUrl').replace(/\/+$/, '').replace(/\/api$/, '')
 }
 
 /**

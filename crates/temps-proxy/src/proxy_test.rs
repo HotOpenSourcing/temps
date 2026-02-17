@@ -398,12 +398,14 @@ pub mod proxy_tests {
             VisitorManagerImpl::new(test_db.db.clone(), crypto.clone(), ip_service);
 
         // Test visitor creation
+        let attribution = crate::traits::FirstVisitAttribution::default();
         let visitor = visitor_manager
             .get_or_create_visitor(
                 None, // No existing cookie
                 None, // No project context
                 "Mozilla/5.0 (test)",
                 Some("127.0.0.1"),
+                &attribution,
             )
             .await
             .map_err(|_| anyhow::anyhow!("Failed to get or create visitor"))?;
@@ -425,7 +427,7 @@ pub mod proxy_tests {
         // Test bot detection
         let bot_visitor = convert_send_sync_error(
             visitor_manager
-                .get_or_create_visitor(None, None, "Googlebot/2.1", Some("127.0.0.1"))
+                .get_or_create_visitor(None, None, "Googlebot/2.1", Some("127.0.0.1"), &attribution)
                 .await,
         )?;
 

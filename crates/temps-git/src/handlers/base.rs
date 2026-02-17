@@ -1,6 +1,6 @@
 use super::repositories::{
     check_commit_exists, get_branches_by_repository_id, get_repository_branches,
-    get_repository_tags, get_tags_by_repository_id,
+    get_repository_tags, get_tags_by_repository_id, list_commits_by_repository_id,
 };
 use super::types::GitAppState as AppState;
 use super::types::GitAppState;
@@ -1303,6 +1303,10 @@ pub fn configure_routes() -> axum::Router<Arc<AppState>> {
         .route(
             "/repository/{repository_id}/commits/{commit_sha}",
             get(check_commit_exists),
+        )
+        .route(
+            "/repository/{repository_id}/commits",
+            get(list_commits_by_repository_id),
         )
 }
 

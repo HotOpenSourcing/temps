@@ -18,6 +18,7 @@ export function registerDeployCommands(program: Command): void {
     .option('-e, --environment <env>', 'Target environment name')
     .option('--environment-id <id>', 'Target environment ID')
     .option('-b, --branch <branch>', 'Git branch to deploy')
+    .option('-c, --commit <sha>', 'Specific commit SHA to deploy')
     .option('--no-wait', 'Do not wait for deployment to complete')
     .option('-y, --yes', 'Skip confirmation prompts (for automation)')
     .action((projectArg, options) => {

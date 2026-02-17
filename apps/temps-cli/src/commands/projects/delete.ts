@@ -1,12 +1,13 @@
 import { requireAuth, config } from '../../config/store.js'
+import { requireProjectSlug } from '../../config/resolve-project.js'
 import { promptConfirm } from '../../ui/prompts.js'
 import { withSpinner } from '../../ui/spinner.js'
-import { success, warning, newline, colors } from '../../ui/output.js'
+import { success, warning, newline, colors, info } from '../../ui/output.js'
 import { setupClient, client, getErrorMessage } from '../../lib/api-client.js'
 import { deleteProject, getProjectBySlug } from '../../api/sdk.gen.js'
 
 interface DeleteOptions {
-  project: string
+  project?: string
   force?: boolean
   yes?: boolean
 }
@@ -15,7 +16,13 @@ export async function remove(options: DeleteOptions): Promise<void> {
   await requireAuth()
   await setupClient()
 
-  const projectIdOrName = options.project
+  const resolved = await requireProjectSlug(options.project)
+
+  if (resolved.source !== 'flag') {
+    info(`Using project ${colors.bold(resolved.slug)} (from ${resolved.source})`)
+  }
+
+  const projectIdOrName = resolved.slug
 
   newline()
 

@@ -379,10 +379,17 @@ pub struct ContainerLogsQuery {
     /// Include timestamps in log output (default: false)
     #[serde(default = "default_timestamps")]
     pub timestamps: bool,
+    /// Follow log output in real-time (default: true for backward compatibility)
+    #[serde(default = "default_follow")]
+    pub follow: bool,
 }
 
 fn default_timestamps() -> bool {
     false
+}
+
+fn default_follow() -> bool {
+    true
 }
 
 #[derive(Deserialize, ToSchema)]

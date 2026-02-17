@@ -300,6 +300,34 @@ pub struct PagePathDetailQuery {
     pub bucket_interval: Option<String>,
 }
 
+/// Query parameters for event detail analytics
+#[derive(Deserialize, Clone, ToSchema)]
+pub struct EventDetailQuery {
+    /// The specific event name to get details for
+    pub event_name: String,
+    pub project_id: i32,
+    pub environment_id: Option<i32>,
+    pub start_date: DateTime,
+    pub end_date: DateTime,
+    /// Bucket interval for time series: 'hour', 'day', 'week', 'month' (default: auto)
+    pub bucket_interval: Option<String>,
+}
+
+/// Query parameters for event visitors list
+#[derive(Deserialize, Clone, ToSchema)]
+pub struct EventVisitorsQuery {
+    /// The specific event name to list visitors for
+    pub event_name: String,
+    pub project_id: i32,
+    pub environment_id: Option<i32>,
+    pub start_date: DateTime,
+    pub end_date: DateTime,
+    /// Page number (1-based, default: 1)
+    pub page: Option<u64>,
+    /// Items per page (default: 20, max: 100)
+    pub per_page: Option<u64>,
+}
+
 /// Query parameters for page flow analytics
 #[derive(Deserialize, Clone, ToSchema)]
 pub struct PageFlowQuery {
