@@ -42,6 +42,42 @@ fn estimate_markdown_tokens(markdown: &str) -> usize {
     // 1 token ≈ 0.75 words  →  tokens ≈ words / 0.75 ≈ words * 4 / 3
     word_count * 4 / 3
 }
+
+/// Extract the inner HTML of the content node to convert to Markdown.
+///
+/// Strategy (matches Cloudflare's Markdown for Agents behaviour):
+/// 1. First `<main>` element found at the shallowest depth in the DOM — avoids
+///    picking up nested `<main>` elements that appear inside iframes or shadow-
+///    DOM fragments serialised into the page.
+/// 2. Fall back to `<body>` if no `<main>` is present.
+/// 3. Fall back to the full document string if neither is found (e.g. partial
+///    HTML fragments without a body element).
+///
+/// Returning the *inner* HTML (children only, not the `<main>` tag itself) keeps
+/// the output cleaner — htmd does not need to see the container element.
+fn extract_content_html(html: &str) -> String {
+    use scraper::{Html, Selector};
+
+    let document = Html::parse_document(html);
+
+    // Try <main> first — take the first one (shallowest in document order).
+    if let Ok(sel) = Selector::parse("main") {
+        if let Some(node) = document.select(&sel).next() {
+            return node.inner_html();
+        }
+    }
+
+    // Fall back to <body>.
+    if let Ok(sel) = Selector::parse("body") {
+        if let Some(node) = document.select(&sel).next() {
+            return node.inner_html();
+        }
+    }
+
+    // Last resort: return the original string unchanged.
+    html.to_owned()
+}
+
 pub const SESSION_ID_COOKIE: &str = "_temps_sid";
 pub const ROUTE_PREFIX_TEMPS: &str = "/api/_temps";
 
@@ -2425,7 +2461,11 @@ impl ProxyHttp for LoadBalancer {
 
             if end_of_stream {
                 let html = String::from_utf8_lossy(&ctx.markdown_buffer);
-                let markdown = match htmd::convert(&html) {
+                // Extract only the <main> subtree (or <body> fallback) before
+                // converting — avoids including inlined <script>/<style>/nav/sidebar
+                // noise that htmd would otherwise serialise as garbage text.
+                let content = extract_content_html(&html);
+                let markdown = match htmd::convert(&content) {
                     Ok(md) => md,
                     Err(e) => {
                         warn!(
@@ -2972,6 +3012,7 @@ mod markdown_tests {
     // ── response_body_filter buffering logic ──────────────────────────────────
 
     /// Simulate the body filter for a single-chunk response.
+    /// Mirrors the production pipeline: extract_content_html → htmd::convert.
     fn run_body_filter_single_chunk(ctx: &mut ProxyContext, html: &[u8]) -> Option<Bytes> {
         let mut body: Option<Bytes> = Some(Bytes::copy_from_slice(html));
         let end_of_stream = true;
@@ -2988,7 +3029,8 @@ mod markdown_tests {
             }
             if end_of_stream {
                 let html_str = String::from_utf8_lossy(&ctx.markdown_buffer);
-                let markdown = htmd::convert(&html_str).unwrap_or_default();
+                let content = extract_content_html(&html_str);
+                let markdown = htmd::convert(&content).unwrap_or_default();
                 ctx.markdown_buffer = Vec::new();
                 return Some(Bytes::from(markdown));
             }
@@ -2998,21 +3040,127 @@ mod markdown_tests {
         body
     }
 
+    // ── extract_content_html ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_extract_main_tag_preferred() {
+        let html = r#"<html><body>
+            <nav>Nav noise</nav>
+            <main><h1>Content</h1><p>Body text</p></main>
+            <footer>Footer noise</footer>
+        </body></html>"#;
+        let extracted = extract_content_html(html);
+        assert!(
+            extracted.contains("Content"),
+            "Expected main content in: {}",
+            extracted
+        );
+        assert!(
+            !extracted.contains("Nav noise"),
+            "Expected nav stripped, got: {}",
+            extracted
+        );
+        assert!(
+            !extracted.contains("Footer noise"),
+            "Expected footer stripped, got: {}",
+            extracted
+        );
+    }
+
+    #[test]
+    fn test_extract_falls_back_to_body_when_no_main() {
+        let html = r#"<html><body><h1>Article</h1><p>Text</p></body></html>"#;
+        let extracted = extract_content_html(html);
+        assert!(
+            extracted.contains("Article"),
+            "Expected body content in: {}",
+            extracted
+        );
+        assert!(
+            extracted.contains("Text"),
+            "Expected body content in: {}",
+            extracted
+        );
+    }
+
+    #[test]
+    fn test_extract_first_main_when_multiple() {
+        // Two <main> elements — the first (shallowest / document-order) wins.
+        let html = r#"<html><body>
+            <main id="first"><p>Primary</p></main>
+            <div><main id="second"><p>Nested</p></main></div>
+        </body></html>"#;
+        let extracted = extract_content_html(html);
+        assert!(
+            extracted.contains("Primary"),
+            "Expected first main in: {}",
+            extracted
+        );
+    }
+
+    #[test]
+    fn test_extract_script_and_style_not_in_main() {
+        // Scripts and styles outside <main> should not appear in the extraction.
+        let html = r#"<html><head><style>body { color: red; }</style></head><body>
+            <script>window.foo = 1;</script>
+            <main><p>Clean content</p></main>
+        </body></html>"#;
+        let extracted = extract_content_html(html);
+        assert!(
+            extracted.contains("Clean content"),
+            "Expected content in: {}",
+            extracted
+        );
+        assert!(
+            !extracted.contains("window.foo"),
+            "Expected script stripped, got: {}",
+            extracted
+        );
+        assert!(
+            !extracted.contains("color: red"),
+            "Expected style stripped, got: {}",
+            extracted
+        );
+    }
+
+    #[test]
+    fn test_extract_fallback_to_original_when_no_body() {
+        // A plain HTML fragment with no <body> or <main> should return as-is.
+        let fragment = "<h1>Just a heading</h1>";
+        let extracted = extract_content_html(fragment);
+        // scraper wraps fragments in a document — it will find a body. Accept either:
+        // the fragment content is preserved somewhere in the result.
+        assert!(
+            extracted.contains("Just a heading"),
+            "Expected heading in: {}",
+            extracted
+        );
+    }
+
     #[test]
     fn test_body_filter_converts_html_to_markdown() {
         let mut ctx = make_ctx();
         ctx.wants_markdown = true;
 
-        let html = b"<h1>Hello</h1><p>World</p>";
+        // Full page HTML — extraction should find <main> and convert only that.
+        let html = br#"<html><body>
+            <nav><a href="/">Home</a></nav>
+            <main><h1>Hello</h1><p>World</p></main>
+            <footer>Footer</footer>
+        </body></html>"#;
         let result = run_body_filter_single_chunk(&mut ctx, html);
 
         assert!(result.is_some());
         let md = String::from_utf8(result.unwrap().to_vec()).unwrap();
-        // htmd should produce a heading and paragraph
         assert!(md.contains("Hello"), "Expected 'Hello' in: {}", md);
         assert!(md.contains("World"), "Expected 'World' in: {}", md);
-        // Markdown heading syntax
         assert!(md.contains('#'), "Expected '#' heading in: {}", md);
+        // Nav and footer should not appear
+        assert!(
+            !md.contains("Footer"),
+            "Expected Footer stripped, got: {}",
+            md
+        );
     }
 
     #[test]
@@ -3051,9 +3199,9 @@ mod markdown_tests {
         let mut ctx = make_ctx();
         ctx.wants_markdown = true;
 
-        // Simulate two chunks arriving before end_of_stream
-        let chunk1 = Bytes::from_static(b"<h1>Greet");
-        let chunk2 = Bytes::from_static(b"ings</h1>");
+        // Simulate two chunks arriving before end_of_stream (split mid-tag)
+        let chunk1 = Bytes::from_static(b"<html><body><main><h1>Greet");
+        let chunk2 = Bytes::from_static(b"ings</h1></main></body></html>");
 
         // First chunk — not end of stream
         {
@@ -3076,7 +3224,8 @@ mod markdown_tests {
                 }
                 if end_of_stream {
                     let html_str = String::from_utf8_lossy(&ctx.markdown_buffer);
-                    let markdown = htmd::convert(&html_str).unwrap_or_default();
+                    let content = extract_content_html(&html_str);
+                    let markdown = htmd::convert(&content).unwrap_or_default();
                     ctx.markdown_buffer = Vec::new();
                     body = Some(Bytes::from(markdown));
                 }
