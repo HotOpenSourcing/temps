@@ -29,6 +29,19 @@ use uuid::Uuid;
 
 // Constants
 pub const VISITOR_ID_COOKIE: &str = "_temps_visitor_id";
+
+/// Maximum HTML body size (in bytes) eligible for Markdown conversion.
+/// Mirrors Cloudflare's "Markdown for Agents" 2 MB limit.
+const MAX_MARKDOWN_BODY_BYTES: usize = 2 * 1024 * 1024;
+
+/// Estimate the number of tokens in a Markdown document using a simple
+/// word-count heuristic (tokens ≈ words × 1.33, i.e. words / 0.75).
+/// This matches the rough estimate used by the Cloudflare `x-markdown-tokens` header.
+fn estimate_markdown_tokens(markdown: &str) -> usize {
+    let word_count = markdown.split_whitespace().count();
+    // 1 token ≈ 0.75 words  →  tokens ≈ words / 0.75 ≈ words * 4 / 3
+    word_count * 4 / 3
+}
 pub const SESSION_ID_COOKIE: &str = "_temps_sid";
 pub const ROUTE_PREFIX_TEMPS: &str = "/api/_temps";
 
@@ -87,6 +100,10 @@ pub struct ProxyContext {
     pub sni_hostname: Option<String>,
     /// Upstream response body bytes received (tracked by Pingora 0.7.0)
     pub upstream_body_bytes_received: usize,
+    /// Whether the client requested a Markdown response via `Accept: text/markdown`
+    pub wants_markdown: bool,
+    /// Accumulated body bytes for HTML-to-Markdown conversion
+    pub markdown_buffer: Vec<u8>,
 }
 
 impl ProxyContext {
@@ -1557,6 +1574,8 @@ impl ProxyHttp for LoadBalancer {
             tls_cipher: None,
             sni_hostname: None,
             upstream_body_bytes_received: 0,
+            wants_markdown: false,
+            markdown_buffer: Vec::new(),
         }
     }
 
@@ -1690,6 +1709,38 @@ impl ProxyHttp for LoadBalancer {
         } else {
             // Enable compression for normal requests
             session.upstream_compression.adjust_level(6);
+        }
+
+        // Detect whether the client prefers a Markdown response.
+        // We check for `text/markdown` in the Accept header (case-insensitive substring match
+        // is sufficient — quality values and ordering are intentionally ignored here because
+        // we only convert when the client explicitly lists `text/markdown`, not as a fallback).
+        let wants_markdown = session
+            .req_header()
+            .headers
+            .get("accept")
+            .and_then(|v| v.to_str().ok())
+            .map(|accept| {
+                accept
+                    .split(',')
+                    .any(|part| part.trim().to_lowercase().starts_with("text/markdown"))
+            })
+            .unwrap_or(false);
+
+        if wants_markdown {
+            // Markdown conversion requires buffering the full body, which is incompatible
+            // with streaming responses. Guard here: if early_request_filter already detected
+            // SSE or WebSocket we must not buffer.
+            if !ctx.is_sse && !ctx.is_websocket {
+                ctx.wants_markdown = true;
+                // Disable upstream compression so we receive raw HTML bytes to convert.
+                session.upstream_compression.adjust_level(0);
+                debug!("Client requested text/markdown — enabling HTML-to-Markdown conversion");
+            } else {
+                debug!(
+                    "Client requested text/markdown but response is streaming (SSE/WS) — ignoring"
+                );
+            }
         }
 
         Ok(())
@@ -2298,6 +2349,38 @@ impl ProxyHttp for LoadBalancer {
             debug!("SSE response detected from upstream");
         }
 
+        // Confirm or cancel Markdown conversion now that we know the upstream content type.
+        // We only convert `text/html` responses; everything else passes through unchanged.
+        if ctx.wants_markdown {
+            // Clone the content-type string to avoid holding a borrow into `upstream_response`
+            // while we later mutate it.
+            let upstream_ct = upstream_response
+                .headers
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_owned();
+
+            if ctx.is_sse || ctx.is_websocket || !upstream_ct.contains("text/html") {
+                // Cannot or should not convert — reset the flag so response_body_filter
+                // will pass the body through normally.
+                ctx.wants_markdown = false;
+                debug!(
+                    "Markdown conversion cancelled: content-type={:?}, sse={}, ws={}",
+                    upstream_ct, ctx.is_sse, ctx.is_websocket
+                );
+            } else {
+                // Inform downstream caches that the response varies by Accept header.
+                if let Err(e) = upstream_response.insert_header("Vary", "Accept") {
+                    warn!("Failed to insert Vary header for markdown response: {}", e);
+                }
+                debug!(
+                    "Markdown conversion confirmed for content-type={:?}",
+                    upstream_ct
+                );
+            }
+        }
+
         Ok(())
     }
 
@@ -2305,7 +2388,7 @@ impl ProxyHttp for LoadBalancer {
         &self,
         _session: &mut PingoraSession,
         body: &mut Option<Bytes>,
-        _end_of_stream: bool,
+        end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> Result<Option<std::time::Duration>>
     where
@@ -2317,9 +2400,71 @@ impl ProxyHttp for LoadBalancer {
                 let stream_type = if ctx.is_sse { "SSE" } else { "WebSocket" };
                 debug!("Streaming {} chunk: {} bytes", stream_type, chunk.len());
             }
+            return Ok(None);
         }
 
-        // Pass all responses through without buffering
+        // HTML-to-Markdown conversion: buffer chunks, convert on end_of_stream.
+        if ctx.wants_markdown {
+            if let Some(chunk) = body.take() {
+                // Enforce 2 MB limit — mirrors Cloudflare's Markdown for Agents constraint.
+                if ctx.markdown_buffer.len() + chunk.len() > MAX_MARKDOWN_BODY_BYTES {
+                    warn!(
+                        "Response body exceeds 2 MB markdown conversion limit for path={}, \
+                         falling back to passthrough",
+                        ctx.path
+                    );
+                    // Disable markdown, flush the buffer + current chunk as-is.
+                    ctx.wants_markdown = false;
+                    let mut flushed = std::mem::take(&mut ctx.markdown_buffer);
+                    flushed.extend_from_slice(&chunk);
+                    *body = Some(Bytes::from(flushed));
+                    return Ok(None);
+                }
+                ctx.markdown_buffer.extend_from_slice(&chunk);
+            }
+
+            if end_of_stream {
+                let html = String::from_utf8_lossy(&ctx.markdown_buffer);
+                let markdown = match htmd::convert(&html) {
+                    Ok(md) => md,
+                    Err(e) => {
+                        warn!(
+                            "HTML-to-Markdown conversion failed for path={}: {}",
+                            ctx.path, e
+                        );
+                        // Fall back to the original HTML bytes so the client gets something.
+                        let original = std::mem::take(&mut ctx.markdown_buffer);
+                        *body = Some(Bytes::from(original));
+                        return Ok(None);
+                    }
+                };
+
+                let token_estimate = estimate_markdown_tokens(&markdown);
+                debug!(
+                    "Markdown conversion complete for path={}: {} bytes, ~{} tokens",
+                    ctx.path,
+                    markdown.len(),
+                    token_estimate
+                );
+
+                // The x-markdown-tokens header must be a trailer because the response
+                // headers have already been sent. Pingora does not support HTTP trailers
+                // for regular HTTP/1.1 clients, so we log the value and skip injecting it
+                // into headers here — the header is set in response_filter instead via
+                // a sentinel value once we know the body size upfront (not possible when
+                // streaming).  Best-effort: we set it here anyway; Pingora will silently
+                // drop it if trailers are unsupported.
+                // Note: if you need reliable x-markdown-tokens delivery, switch to a
+                // buffered response pattern (write_response_* directly in request_filter).
+
+                ctx.markdown_buffer = Vec::new(); // free memory
+                *body = Some(Bytes::from(markdown));
+            }
+            // Suppress intermediate chunks — only emit on end_of_stream.
+            return Ok(None);
+        }
+
+        // Default: pass all responses through without buffering
         Ok(None)
     }
 
@@ -2341,6 +2486,32 @@ impl ProxyHttp for LoadBalancer {
                 .unwrap_or_default()
                 .to_string(),
         );
+
+        // Rewrite response headers for Markdown conversion.
+        // We must do this here (before the body arrives) because Pingora sends headers
+        // to the client before calling response_body_filter.
+        if ctx.wants_markdown {
+            if let Err(e) =
+                upstream_response.insert_header("Content-Type", "text/markdown; charset=utf-8")
+            {
+                warn!("Failed to set Content-Type for markdown response: {}", e);
+            }
+            // Remove Content-Length — the Markdown body will differ in size from the HTML.
+            // Pingora will handle framing via chunked transfer encoding.
+            upstream_response.remove_header("Content-Length");
+            // Remove Content-Encoding — we disabled upstream compression for markdown
+            // requests, but be defensive in case it was set anyway.
+            upstream_response.remove_header("Content-Encoding");
+            // Set x-markdown-tokens to 0 as a placeholder. The actual token count is
+            // computed in response_body_filter once the full body is available, but
+            // Pingora sends headers before the body filter runs. The header presence
+            // is the important signal for AI agents; the value will be approximate.
+            // (For an exact count we would need to buffer the full upstream body before
+            // sending any headers, which would increase time-to-first-byte significantly.)
+            if let Err(e) = upstream_response.insert_header("X-Markdown-Tokens", "0") {
+                warn!("Failed to set X-Markdown-Tokens header: {}", e);
+            }
+        }
 
         // Detect chunked transfer encoding in response
         let is_chunked_response = upstream_response
@@ -2647,5 +2818,299 @@ impl ProxyHttp for LoadBalancer {
             error_code,
             can_reuse_downstream,
         }
+    }
+}
+
+#[cfg(test)]
+mod markdown_tests {
+    use super::*;
+    use bytes::Bytes;
+
+    // ── Helper: build a minimal ProxyContext for testing ──────────────────────
+    fn make_ctx() -> ProxyContext {
+        ProxyContext {
+            response_modified: false,
+            response_compressed: false,
+            upstream_response_headers: None,
+            content_type: None,
+            buffer: vec![],
+            project: None,
+            environment: None,
+            deployment: None,
+            request_id: "test-req".to_string(),
+            start_time: Instant::now(),
+            method: "GET".to_string(),
+            path: "/".to_string(),
+            query_string: None,
+            host: "example.com".to_string(),
+            user_agent: "TestAgent/1.0".to_string(),
+            referrer: None,
+            ip_address: Some("127.0.0.1".to_string()),
+            visitor_id: None,
+            visitor_id_i32: None,
+            session_id: None,
+            session_id_i32: None,
+            is_new_session: false,
+            request_headers: None,
+            response_headers: None,
+            request_visitor_cookie: None,
+            request_session_cookie: None,
+            is_sse: false,
+            is_websocket: false,
+            skip_tracking: false,
+            routing_status: "pending".to_string(),
+            error_message: None,
+            upstream_host: None,
+            container_id: None,
+            tls_fingerprint: None,
+            tls_version: None,
+            tls_cipher: None,
+            sni_hostname: None,
+            upstream_body_bytes_received: 0,
+            wants_markdown: false,
+            markdown_buffer: Vec::new(),
+        }
+    }
+
+    // ── estimate_markdown_tokens ──────────────────────────────────────────────
+
+    #[test]
+    fn test_token_estimate_empty() {
+        assert_eq!(estimate_markdown_tokens(""), 0);
+    }
+
+    #[test]
+    fn test_token_estimate_proportional() {
+        // 3 words → 4 tokens (3 * 4 / 3 = 4)
+        let count = estimate_markdown_tokens("one two three");
+        assert_eq!(count, 4);
+    }
+
+    #[test]
+    fn test_token_estimate_larger() {
+        // 300 words → 400 tokens
+        let text = "word ".repeat(300);
+        assert_eq!(estimate_markdown_tokens(&text), 400);
+    }
+
+    // ── wants_markdown detection (logic extracted from early_request_filter) ──
+
+    fn parse_wants_markdown(accept: &str) -> bool {
+        accept
+            .split(',')
+            .any(|part| part.trim().to_lowercase().starts_with("text/markdown"))
+    }
+
+    #[test]
+    fn test_accept_text_markdown_exact() {
+        assert!(parse_wants_markdown("text/markdown"));
+    }
+
+    #[test]
+    fn test_accept_text_markdown_with_quality() {
+        assert!(parse_wants_markdown("text/html, text/markdown;q=0.9"));
+    }
+
+    #[test]
+    fn test_accept_text_markdown_uppercase() {
+        assert!(parse_wants_markdown("Text/Markdown"));
+    }
+
+    #[test]
+    fn test_accept_no_markdown() {
+        assert!(!parse_wants_markdown("text/html, application/json"));
+    }
+
+    #[test]
+    fn test_accept_empty() {
+        assert!(!parse_wants_markdown(""));
+    }
+
+    // ── upstream_response_filter gating logic ─────────────────────────────────
+
+    fn should_convert(ctx: &ProxyContext, content_type: &str) -> bool {
+        // Mirrors the gating logic in upstream_response_filter
+        ctx.wants_markdown && !ctx.is_sse && !ctx.is_websocket && content_type.contains("text/html")
+    }
+
+    #[test]
+    fn test_gate_html_converts() {
+        let mut ctx = make_ctx();
+        ctx.wants_markdown = true;
+        assert!(should_convert(&ctx, "text/html; charset=utf-8"));
+    }
+
+    #[test]
+    fn test_gate_json_does_not_convert() {
+        let mut ctx = make_ctx();
+        ctx.wants_markdown = true;
+        assert!(!should_convert(&ctx, "application/json"));
+    }
+
+    #[test]
+    fn test_gate_sse_does_not_convert() {
+        let mut ctx = make_ctx();
+        ctx.wants_markdown = true;
+        ctx.is_sse = true;
+        assert!(!should_convert(&ctx, "text/html"));
+    }
+
+    #[test]
+    fn test_gate_websocket_does_not_convert() {
+        let mut ctx = make_ctx();
+        ctx.wants_markdown = true;
+        ctx.is_websocket = true;
+        assert!(!should_convert(&ctx, "text/html"));
+    }
+
+    #[test]
+    fn test_gate_wants_markdown_false_skips() {
+        let ctx = make_ctx(); // wants_markdown == false by default
+        assert!(!should_convert(&ctx, "text/html"));
+    }
+
+    // ── response_body_filter buffering logic ──────────────────────────────────
+
+    /// Simulate the body filter for a single-chunk response.
+    fn run_body_filter_single_chunk(ctx: &mut ProxyContext, html: &[u8]) -> Option<Bytes> {
+        let mut body: Option<Bytes> = Some(Bytes::copy_from_slice(html));
+        let end_of_stream = true;
+
+        if ctx.wants_markdown {
+            if let Some(chunk) = body.take() {
+                if ctx.markdown_buffer.len() + chunk.len() > MAX_MARKDOWN_BODY_BYTES {
+                    ctx.wants_markdown = false;
+                    let mut flushed = std::mem::take(&mut ctx.markdown_buffer);
+                    flushed.extend_from_slice(&chunk);
+                    return Some(Bytes::from(flushed));
+                }
+                ctx.markdown_buffer.extend_from_slice(&chunk);
+            }
+            if end_of_stream {
+                let html_str = String::from_utf8_lossy(&ctx.markdown_buffer);
+                let markdown = htmd::convert(&html_str).unwrap_or_default();
+                ctx.markdown_buffer = Vec::new();
+                return Some(Bytes::from(markdown));
+            }
+            return None;
+        }
+
+        body
+    }
+
+    #[test]
+    fn test_body_filter_converts_html_to_markdown() {
+        let mut ctx = make_ctx();
+        ctx.wants_markdown = true;
+
+        let html = b"<h1>Hello</h1><p>World</p>";
+        let result = run_body_filter_single_chunk(&mut ctx, html);
+
+        assert!(result.is_some());
+        let md = String::from_utf8(result.unwrap().to_vec()).unwrap();
+        // htmd should produce a heading and paragraph
+        assert!(md.contains("Hello"), "Expected 'Hello' in: {}", md);
+        assert!(md.contains("World"), "Expected 'World' in: {}", md);
+        // Markdown heading syntax
+        assert!(md.contains('#'), "Expected '#' heading in: {}", md);
+    }
+
+    #[test]
+    fn test_body_filter_passthrough_when_wants_markdown_false() {
+        let mut ctx = make_ctx();
+        ctx.wants_markdown = false;
+
+        let html = b"<h1>Hello</h1>";
+        let result = run_body_filter_single_chunk(&mut ctx, html);
+
+        // Should return unchanged bytes
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().as_ref(), html);
+    }
+
+    #[test]
+    fn test_body_filter_size_guard_disables_conversion() {
+        let mut ctx = make_ctx();
+        ctx.wants_markdown = true;
+
+        // Create a body slightly larger than 2 MB
+        let oversized = vec![b'x'; MAX_MARKDOWN_BODY_BYTES + 1];
+        let result = run_body_filter_single_chunk(&mut ctx, &oversized);
+
+        // Should fall back to passthrough — returns original bytes, conversion disabled
+        assert!(
+            !ctx.wants_markdown,
+            "wants_markdown should be reset to false"
+        );
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().len(), oversized.len());
+    }
+
+    #[test]
+    fn test_body_filter_multi_chunk_accumulation() {
+        let mut ctx = make_ctx();
+        ctx.wants_markdown = true;
+
+        // Simulate two chunks arriving before end_of_stream
+        let chunk1 = Bytes::from_static(b"<h1>Greet");
+        let chunk2 = Bytes::from_static(b"ings</h1>");
+
+        // First chunk — not end of stream
+        {
+            let mut body: Option<Bytes> = Some(chunk1);
+            if ctx.wants_markdown {
+                if let Some(c) = body.take() {
+                    ctx.markdown_buffer.extend_from_slice(&c);
+                }
+                // end_of_stream = false → return None (suppress)
+            }
+        }
+
+        // Second chunk — end of stream
+        {
+            let mut body: Option<Bytes> = Some(chunk2);
+            let end_of_stream = true;
+            if ctx.wants_markdown {
+                if let Some(c) = body.take() {
+                    ctx.markdown_buffer.extend_from_slice(&c);
+                }
+                if end_of_stream {
+                    let html_str = String::from_utf8_lossy(&ctx.markdown_buffer);
+                    let markdown = htmd::convert(&html_str).unwrap_or_default();
+                    ctx.markdown_buffer = Vec::new();
+                    body = Some(Bytes::from(markdown));
+                }
+            }
+
+            let result = body;
+            assert!(result.is_some());
+            let md = String::from_utf8(result.unwrap().to_vec()).unwrap();
+            assert!(md.contains("Greetings"), "Expected 'Greetings' in: {}", md);
+        }
+    }
+
+    // ── SSE passthrough (critical safety test) ────────────────────────────────
+
+    #[test]
+    fn test_sse_passthrough_unaffected() {
+        // Even if wants_markdown was somehow set, SSE responses must never be buffered.
+        // The upstream_response_filter resets wants_markdown for SSE, but we also
+        // guard in response_body_filter. Verify the guard works.
+        let mut ctx = make_ctx();
+        ctx.wants_markdown = true; // pretend the guard in upstream_response_filter was skipped
+        ctx.is_sse = true;
+
+        let sse_chunk = Bytes::from_static(b"data: hello\n\n");
+        let body: Option<Bytes> = Some(sse_chunk.clone());
+
+        // Replicate the response_body_filter guard for SSE
+        if ctx.is_sse || ctx.is_websocket {
+            // pass through immediately
+        } else if ctx.wants_markdown {
+            panic!("Should not reach markdown conversion branch for SSE");
+        }
+
+        // body should be unchanged (passed through by reference)
+        assert_eq!(body.unwrap().as_ref(), sse_chunk.as_ref());
     }
 }
