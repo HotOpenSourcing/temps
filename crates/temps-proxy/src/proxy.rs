@@ -3101,16 +3101,15 @@ mod markdown_tests {
         ctx.is_sse = true;
 
         let sse_chunk = Bytes::from_static(b"data: hello\n\n");
-        let body: Option<Bytes> = Some(sse_chunk.clone());
 
         // Replicate the response_body_filter guard for SSE
         if ctx.is_sse || ctx.is_websocket {
-            // pass through immediately
+            // pass through immediately — no buffering, no conversion
         } else if ctx.wants_markdown {
             panic!("Should not reach markdown conversion branch for SSE");
         }
 
-        // body should be unchanged (passed through by reference)
-        assert_eq!(body.unwrap().as_ref(), sse_chunk.as_ref());
+        // body should be unchanged (the SSE branch never touches it)
+        assert_eq!(sse_chunk.as_ref(), b"data: hello\n\n");
     }
 }
