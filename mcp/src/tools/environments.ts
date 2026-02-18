@@ -345,7 +345,7 @@ export const tools: ToolDefinition[] = [
   {
     name: 'update_environment_resources',
     description:
-      'Update CPU and memory resource limits for an environment',
+      'Update CPU and memory resource limits for an environment. Values are in millicores for CPU (e.g. 500 = 0.5 CPU) and megabytes for memory (e.g. 256 = 256 MB).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -358,20 +358,20 @@ export const tools: ToolDefinition[] = [
           description: 'The environment ID',
         },
         cpu_limit: {
-          type: 'string',
-          description: 'CPU limit (e.g. "500m", "1")',
+          type: 'number',
+          description: 'CPU limit in millicores (e.g. 500 = 0.5 CPU, 1000 = 1 CPU)',
         },
         memory_limit: {
-          type: 'string',
-          description: 'Memory limit (e.g. "256Mi", "1Gi")',
+          type: 'number',
+          description: 'Memory limit in MB (e.g. 256, 512, 1024)',
         },
         cpu_request: {
-          type: 'string',
-          description: 'CPU request (e.g. "100m", "0.5")',
+          type: 'number',
+          description: 'CPU request in millicores (e.g. 100, 250, 500)',
         },
         memory_request: {
-          type: 'string',
-          description: 'Memory request (e.g. "128Mi", "512Mi")',
+          type: 'number',
+          description: 'Memory request in MB (e.g. 128, 256, 512)',
         },
       },
       required: ['project_id', 'environment_id'],
@@ -381,10 +381,10 @@ export const tools: ToolDefinition[] = [
         const client = getClient();
         const projectId = requireParam<number>(args, 'project_id');
         const envId = requireParam<number>(args, 'environment_id');
-        const cpuLimit = optionalParam<string>(args, 'cpu_limit');
-        const memoryLimit = optionalParam<string>(args, 'memory_limit');
-        const cpuRequest = optionalParam<string>(args, 'cpu_request');
-        const memoryRequest = optionalParam<string>(args, 'memory_request');
+        const cpuLimit = optionalParam<number>(args, 'cpu_limit');
+        const memoryLimit = optionalParam<number>(args, 'memory_limit');
+        const cpuRequest = optionalParam<number>(args, 'cpu_request');
+        const memoryRequest = optionalParam<number>(args, 'memory_request');
 
         const body: Record<string, unknown> = {};
         if (cpuLimit !== undefined) body.cpu_limit = cpuLimit;
@@ -392,7 +392,7 @@ export const tools: ToolDefinition[] = [
         if (cpuRequest !== undefined) body.cpu_request = cpuRequest;
         if (memoryRequest !== undefined) body.memory_request = memoryRequest;
 
-        const result = await client.patch<any>(
+        const result = await client.put<any>(
           `/projects/${projectId}/environments/${envId}/settings`,
           body
         );
@@ -428,7 +428,7 @@ export const tools: ToolDefinition[] = [
         const envId = requireParam<number>(args, 'environment_id');
         const replicas = requireParam<number>(args, 'replicas');
 
-        const result = await client.patch<any>(
+        const result = await client.put<any>(
           `/projects/${projectId}/environments/${envId}/settings`,
           { replicas }
         );

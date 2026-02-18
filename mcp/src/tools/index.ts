@@ -3,6 +3,19 @@
  *
  * Aggregates all tool modules and provides list/dispatch functions
  * for the MCP server.
+ *
+ * Supports category filtering via:
+ *   --tools deployments,analytics,projects   (include only these)
+ *   --tools all                              (include everything, default)
+ *   TEMPS_MCP_TOOLS=deployments,analytics    (env var alternative)
+ *
+ * Available categories:
+ *   projects, deployments, environments, domains, services, backups,
+ *   monitors, containers, users, settings, api-keys, webhooks, audit,
+ *   dns-providers, notifications, scans, custom-domains, errors,
+ *   proxy-logs, dsn, ip-access, incidents, funnels, presets, platform,
+ *   email-domains, email-providers, load-balancer, notification-prefs,
+ *   analytics
  */
 
 import type { ToolDefinition, ToolResult } from '../types/index.js';
@@ -36,58 +49,121 @@ import { tools as emailDomainsTools } from './email-domains.js';
 import { tools as emailProvidersTools } from './email-providers.js';
 import { tools as loadBalancerTools } from './load-balancer.js';
 import { tools as notificationPrefsTools } from './notification-prefs.js';
-// Disabled: deployment-tokens endpoints do not exist in the API
-// import { tools as tokensTools } from './tokens.js';
+import { tools as analyticsTools } from './analytics.js';
 
-/** All registered tools */
-const allTools: ToolDefinition[] = [
-  ...projectsTools,
-  ...deploymentsTools,
-  ...environmentsTools,
-  ...domainsTools,
-  ...servicesTools,
-  ...backupsTools,
-  ...monitorsTools,
-  ...containersTools,
-  ...usersTools,
-  ...settingsTools,
-  ...apiKeysTools,
-  ...webhooksTools,
-  ...auditTools,
-  ...dnsProvidersTools,
-  ...notificationsTools,
-  ...scansTools,
-  ...customDomainsTools,
-  ...errorsTools,
-  ...proxyLogsTools,
-  ...dsnTools,
-  ...ipAccessTools,
-  ...incidentsTools,
-  ...funnelsTools,
-  ...presetsTools,
-  ...platformTools,
-  ...emailDomainsTools,
-  ...emailProvidersTools,
-  ...loadBalancerTools,
-  ...notificationPrefsTools,
-  // ...tokensTools, // Disabled: deployment-tokens endpoints do not exist in the API
-];
+// ── Category registry ────────────────────────────────────────────
+
+/** Maps category name -> tool definitions */
+const categoryRegistry: Record<string, ToolDefinition[]> = {
+  projects: projectsTools,
+  deployments: deploymentsTools,
+  environments: environmentsTools,
+  domains: domainsTools,
+  services: servicesTools,
+  backups: backupsTools,
+  monitors: monitorsTools,
+  containers: containersTools,
+  users: usersTools,
+  settings: settingsTools,
+  'api-keys': apiKeysTools,
+  webhooks: webhooksTools,
+  audit: auditTools,
+  'dns-providers': dnsProvidersTools,
+  notifications: notificationsTools,
+  scans: scansTools,
+  'custom-domains': customDomainsTools,
+  errors: errorsTools,
+  'proxy-logs': proxyLogsTools,
+  dsn: dsnTools,
+  'ip-access': ipAccessTools,
+  incidents: incidentsTools,
+  funnels: funnelsTools,
+  presets: presetsTools,
+  platform: platformTools,
+  'email-domains': emailDomainsTools,
+  'email-providers': emailProvidersTools,
+  'load-balancer': loadBalancerTools,
+  'notification-prefs': notificationPrefsTools,
+  analytics: analyticsTools,
+};
+
+/** All available category names */
+export const availableCategories = Object.keys(categoryRegistry);
+
+// ── Filtering logic ──────────────────────────────────────────────
+
+function parseToolFilter(): Set<string> | null {
+  // 1. Check --tools CLI flag
+  const args = process.argv;
+  const flagIndex = args.indexOf('--tools');
+  if (flagIndex !== -1 && args[flagIndex + 1]) {
+    const value = args[flagIndex + 1];
+    if (value === 'all') return null; // null = no filter
+    return new Set(value.split(',').map((s) => s.trim().toLowerCase()));
+  }
+
+  // 2. Check TEMPS_MCP_TOOLS env var
+  const envVal = process.env.TEMPS_MCP_TOOLS;
+  if (envVal) {
+    if (envVal === 'all') return null;
+    return new Set(envVal.split(',').map((s) => s.trim().toLowerCase()));
+  }
+
+  // 3. Default: all tools
+  return null;
+}
+
+function buildToolList(): ToolDefinition[] {
+  const filter = parseToolFilter();
+
+  // Validate filter categories
+  if (filter) {
+    const invalid = [...filter].filter((c) => !categoryRegistry[c]);
+    if (invalid.length > 0) {
+      console.error(
+        `Warning: unknown tool categories: ${invalid.join(', ')}\n` +
+          `Available: ${availableCategories.join(', ')}`,
+      );
+    }
+  }
+
+  const tools: ToolDefinition[] = [];
+  const enabledCategories: string[] = [];
+
+  for (const [category, categoryTools] of Object.entries(categoryRegistry)) {
+    if (filter && !filter.has(category)) continue;
+    tools.push(...categoryTools);
+    enabledCategories.push(`${category}(${categoryTools.length})`);
+  }
+
+  if (filter) {
+    console.error(`Tool categories enabled: ${enabledCategories.join(', ')}`);
+  }
+
+  return tools;
+}
+
+// ── Build the active tool set ────────────────────────────────────
+
+const activeTools = buildToolList();
 
 /** Build lookup map for O(1) dispatch */
 const toolMap = new Map<string, ToolDefinition>();
-for (const tool of allTools) {
+for (const tool of activeTools) {
   if (toolMap.has(tool.name)) {
     throw new Error(`Duplicate tool name: ${tool.name}`);
   }
   toolMap.set(tool.name, tool);
 }
 
+// ── Public API ───────────────────────────────────────────────────
+
 /**
  * List all available tools (for ListToolsRequest)
  */
 export function listTools() {
   return {
-    tools: allTools.map((t) => ({
+    tools: activeTools.map((t) => ({
       name: t.name,
       description: t.description,
       inputSchema: t.inputSchema,
@@ -100,7 +176,7 @@ export function listTools() {
  */
 export async function callTool(
   name: string,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
 ): Promise<ToolResult> {
   const tool = toolMap.get(name);
   if (!tool) {
@@ -113,4 +189,4 @@ export async function callTool(
 }
 
 /** Total number of registered tools */
-export const toolCount = allTools.length;
+export const toolCount = activeTools.length;
