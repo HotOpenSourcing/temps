@@ -343,7 +343,7 @@ export const tools: ToolDefinition[] = [
   // ── get_deployment_logs ────────────────────────────────────────
   {
     name: 'get_deployment_logs',
-    description: 'Get combined logs for all jobs in a deployment',
+    description: 'Get all pipeline stages for a deployment with their status and logs. Shows a summary table of all stages followed by the log output for each stage.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -358,33 +358,94 @@ export const tools: ToolDefinition[] = [
         const deploymentId = requireParam<number>(args, 'deployment_id');
         const client = getClient();
 
-        // Fetch all jobs for this deployment
+        // Fetch all jobs (pipeline stages) for this deployment
         const jobsData = await client.get<DeploymentJobsResponse>(
           `/projects/${projectId}/deployments/${deploymentId}/jobs`,
         );
 
         if (!jobsData.jobs.length) {
-          return ok('No jobs found for this deployment.');
+          return ok('No pipeline stages found for this deployment.');
         }
 
+        // ── Stage summary table ──────────────────────────────────
+        const statusIcon = (s: string) => {
+          switch (s) {
+            case 'success': return '✅';
+            case 'failure': return '❌';
+            case 'running': return '🔄';
+            case 'pending': return '⏳';
+            case 'waiting': return '⏳';
+            case 'cancelled': return '🚫';
+            case 'skipped': return '⏭️';
+            default: return '❓';
+          }
+        };
+
+        const formatDuration = (start: number | null, end: number | null): string => {
+          if (!start) return '—';
+          const endMs = end ? end * 1000 : Date.now();
+          const ms = endMs - start * 1000;
+          if (ms < 1000) return `${ms}ms`;
+          const secs = Math.floor(ms / 1000);
+          if (secs < 60) return `${secs}s`;
+          const mins = Math.floor(secs / 60);
+          const remainSecs = secs % 60;
+          return `${mins}m ${remainSecs}s`;
+        };
+
+        const summaryTable = table(
+          ['#', 'Stage', 'Status', 'Duration'],
+          jobsData.jobs.map((job, i) => [
+            String(i + 1),
+            job.name,
+            `${statusIcon(job.status)} ${job.status}`,
+            formatDuration(job.started_at, job.finished_at),
+          ]),
+        );
+
+        // ── Per-stage logs ───────────────────────────────────────
         const sections: string[] = [];
 
         for (const job of jobsData.jobs) {
-          const header = `### ${job.name} (${job.status})`;
+          const icon = statusIcon(job.status);
+          const duration = formatDuration(job.started_at, job.finished_at);
+          const header = `### ${icon} ${job.name} — ${job.status} (${duration})`;
 
-          let logContent: string;
+          let logLines: string;
           try {
-            logContent = await client.get<string>(
+            const rawContent = await client.getRaw(
               `/projects/${projectId}/deployments/${deploymentId}/jobs/${encodeURIComponent(job.job_id)}/logs`,
             );
+
+            // Parse JSONL: each line is {"level":"...","message":"...","timestamp":"...","line":N}
+            const lines = rawContent
+              .split('\n')
+              .filter((line) => line.trim())
+              .map((line) => {
+                try {
+                  const entry = JSON.parse(line) as { level?: string; message?: string; timestamp?: string };
+                  const lvl = entry.level ?? 'info';
+                  const prefix = lvl === 'error' ? '❌' : lvl === 'warning' ? '⚠️' : lvl === 'success' ? '✅' : '  ';
+                  return `${prefix} ${entry.message ?? line}`;
+                } catch {
+                  return `   ${line}`;
+                }
+              });
+
+            logLines = lines.length > 0 ? lines.join('\n') : '(empty log)';
           } catch {
-            logContent = job.error_message ?? '(no logs available)';
+            logLines = job.error_message ?? '(no logs available)';
           }
 
-          sections.push(`${header}\n\`\`\`\n${logContent}\n\`\`\``);
+          sections.push(`${header}\n\`\`\`\n${logLines}\n\`\`\``);
         }
 
-        return ok(`## Deployment ${deploymentId} Logs\n\n${sections.join('\n\n')}`);
+        return ok(
+          `## Deployment ${deploymentId} — Pipeline Stages\n\n` +
+          summaryTable +
+          '\n\n---\n\n' +
+          sections.join('\n\n'),
+        );
       }),
   },
 

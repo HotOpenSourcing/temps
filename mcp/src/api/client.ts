@@ -49,6 +49,28 @@ export class TempsClient {
     return this.request<T>(url, { method: 'GET' });
   }
 
+  /** GET that returns the raw response body as a string (no JSON parsing). */
+  async getRaw(path: string, query?: Record<string, unknown>): Promise<string> {
+    const url = this.buildUrl(path, query);
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${this.config.apiKey}`,
+        Accept: '*/*',
+      },
+    });
+
+    const text = await response.text();
+
+    if (!response.ok) {
+      throw new Error(
+        `API Error ${response.status} ${response.statusText}: ${text}`
+      );
+    }
+
+    return text;
+  }
+
   async post<T = unknown>(path: string, body?: unknown): Promise<T> {
     return this.request<T>(this.buildUrl(path), {
       method: 'POST',
