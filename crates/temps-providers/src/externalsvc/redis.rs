@@ -1421,7 +1421,6 @@ mod tests {
 
     #[cfg(feature = "docker-tests")]
     #[tokio::test]
-    #[ignore] // Requires Docker
     async fn test_port_change_after_creation() {
         let docker = Arc::new(Docker::connect_with_local_defaults().unwrap());
         let service = RedisService::new("test-port-change".to_string(), docker);

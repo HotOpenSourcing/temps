@@ -1,5 +1,5 @@
 use crate::handlers::backup_handler::{CreateBackupScheduleRequest, CreateS3SourceRequest};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use aws_sdk_s3::error::ProvideErrorMetadata;
 use aws_sdk_s3::{Client as S3Client, Config};
 use chrono::{DateTime, Duration, Timelike, Utc};
@@ -29,9 +29,6 @@ use tokio_stream::StreamExt;
 
 #[derive(Error, Debug)]
 pub enum BackupError {
-    #[error("Database connection error")]
-    DatabaseConnectionError(String),
-
     #[error("Database error: {0}")]
     Database(sea_orm::DbErr),
 
@@ -44,8 +41,8 @@ pub enum BackupError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("Resource not found: {0}")]
-    NotFound(String),
+    #[error("{resource} not found: {detail}")]
+    NotFound { resource: String, detail: String },
 
     #[error("Invalid configuration: {0}")]
     Configuration(String),
@@ -59,24 +56,14 @@ pub enum BackupError {
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 
-    #[error("Backup operation failed: {0}")]
-    Operation(String),
-
-    #[error("Internal error: {0}")]
-    Internal(String),
+    #[error("Internal error: {message}")]
+    Internal { message: String },
 
     #[error("Unsupported: {0}")]
     Unsupported(String),
 
     #[error("Notification error: {0}")]
     NotificationError(String),
-}
-
-// Implementation to convert anyhow errors to BackupError
-impl From<anyhow::Error> for BackupError {
-    fn from(err: anyhow::Error) -> Self {
-        BackupError::Internal(err.to_string())
-    }
 }
 
 impl From<aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::put_object::PutObjectError>>
@@ -115,12 +102,24 @@ impl
     }
 }
 
+// Conversion from anyhow::Error is used by service methods whose helper functions
+// return anyhow::Result. This is a transitional impl; the goal is to convert all
+// helper functions to return BackupError directly.
+impl From<anyhow::Error> for BackupError {
+    fn from(err: anyhow::Error) -> Self {
+        BackupError::Internal {
+            message: format!("{:#}", err),
+        }
+    }
+}
+
 impl From<sea_orm::DbErr> for BackupError {
     fn from(err: sea_orm::DbErr) -> Self {
         match err {
-            sea_orm::DbErr::RecordNotFound(_) => {
-                BackupError::NotFound("Resource not found".to_string())
-            }
+            sea_orm::DbErr::RecordNotFound(msg) => BackupError::NotFound {
+                resource: "Backup resource".to_string(),
+                detail: msg,
+            },
             _ => BackupError::Database(err),
         }
     }
@@ -212,7 +211,10 @@ impl BackupService {
         let s3_source = temps_entities::s3_sources::Entity::find_by_id(s3_source_id)
             .one(self.db.as_ref())
             .await?
-            .ok_or_else(|| BackupError::NotFound("S3 source not found".to_string()))?;
+            .ok_or_else(|| BackupError::NotFound {
+                resource: "S3Source".to_string(),
+                detail: "S3 source not found".to_string(),
+            })?;
 
         // Create a temporary file for the backup
         let mut temp_file = NamedTempFile::new().map_err(BackupError::Io)?;
@@ -1101,7 +1103,8 @@ impl BackupService {
         let mut buffer = Vec::with_capacity(chunk_size);
 
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.context("Failed to read chunk from file")?;
+            let chunk =
+                chunk.map_err(|e| anyhow::anyhow!("Failed to read chunk from file: {}", e))?;
             buffer.extend_from_slice(&chunk);
 
             if buffer.len() >= chunk_size {
@@ -1304,13 +1307,19 @@ impl BackupService {
             .filter(temps_entities::backups::Column::BackupId.eq(backup_id))
             .one(self.db.as_ref())
             .await?
-            .ok_or_else(|| BackupError::NotFound("Backup not found".to_string()))?;
+            .ok_or_else(|| BackupError::NotFound {
+                resource: "Backup".to_string(),
+                detail: "Backup not found".to_string(),
+            })?;
 
         // Get S3 source
         let s3_source = temps_entities::s3_sources::Entity::find_by_id(backup.s3_source_id)
             .one(self.db.as_ref())
             .await?
-            .ok_or_else(|| BackupError::NotFound("S3 source not found".to_string()))?;
+            .ok_or_else(|| BackupError::NotFound {
+                resource: "S3Source".to_string(),
+                detail: "S3 source not found".to_string(),
+            })?;
 
         let backend = self.db.get_database_backend();
         match backend {
@@ -1486,8 +1495,9 @@ impl BackupService {
         let database_url = &self.config_service.get_database_url();
 
         // Parse database URL to extract connection parameters
-        let url = url::Url::parse(database_url)
-            .map_err(|e| BackupError::Internal(format!("Invalid DATABASE_URL format: {}", e)))?;
+        let url = url::Url::parse(database_url).map_err(|e| BackupError::Internal {
+            message: format!("Invalid DATABASE_URL format: {}", e),
+        })?;
 
         let host = url.host_str().unwrap_or("localhost");
         let port = url.port().unwrap_or(5432);
@@ -1517,19 +1527,18 @@ impl BackupService {
         }
 
         info!("Running pg_restore command");
-        let output = cmd.output().await.map_err(|e| {
-            BackupError::Internal(format!(
+        let output = cmd.output().await.map_err(|e| BackupError::Internal {
+            message: format!(
                 "Failed to execute pg_restore: {}. Make sure pg_restore is installed and in PATH",
                 e
-            ))
+            ),
         })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(BackupError::Internal(format!(
-                "pg_restore failed: {}",
-                stderr
-            )));
+            return Err(BackupError::Internal {
+                message: format!("pg_restore failed: {}", stderr),
+            });
         }
 
         info!("PostgreSQL backup restored successfully");
@@ -1555,12 +1564,18 @@ impl BackupService {
             .filter(temps_entities::backups::Column::BackupId.eq(backup_id))
             .one(self.db.as_ref())
             .await?
-            .ok_or_else(|| BackupError::NotFound("Backup not found".to_string()))?;
+            .ok_or_else(|| BackupError::NotFound {
+                resource: "Backup".to_string(),
+                detail: "Backup not found".to_string(),
+            })?;
 
         let s3_source = temps_entities::s3_sources::Entity::find_by_id(backup.s3_source_id)
             .one(self.db.as_ref())
             .await?
-            .ok_or_else(|| BackupError::NotFound("S3 source not found".to_string()))?;
+            .ok_or_else(|| BackupError::NotFound {
+                resource: "S3Source".to_string(),
+                detail: "S3 source not found".to_string(),
+            })?;
 
         // Create S3 client
         let s3_client = self.create_s3_client(&s3_source).await?;
@@ -1636,12 +1651,16 @@ impl BackupService {
         let encrypted_access_key = self
             .encryption_service
             .encrypt_string(&request.access_key_id)
-            .map_err(|e| BackupError::Internal(format!("Failed to encrypt access key: {}", e)))?;
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to encrypt access key: {}", e),
+            })?;
 
         let encrypted_secret_key = self
             .encryption_service
             .encrypt_string(&request.secret_key)
-            .map_err(|e| BackupError::Internal(format!("Failed to encrypt secret key: {}", e)))?;
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to encrypt secret key: {}", e),
+            })?;
 
         let new_source = temps_entities::s3_sources::ActiveModel {
             id: sea_orm::NotSet,
@@ -1671,7 +1690,10 @@ impl BackupService {
         let source = temps_entities::s3_sources::Entity::find_by_id(id)
             .one(self.db.as_ref())
             .await?
-            .ok_or_else(|| BackupError::NotFound("S3 source not found".to_string()))?;
+            .ok_or_else(|| BackupError::NotFound {
+                resource: "S3Source".to_string(),
+                detail: "S3 source not found".to_string(),
+            })?;
 
         Ok(source)
     }
@@ -1711,7 +1733,10 @@ impl BackupService {
         temps_entities::s3_sources::Entity::find_by_id(request.s3_source_id)
             .one(self.db.as_ref())
             .await?
-            .ok_or_else(|| BackupError::NotFound("S3 source not found".to_string()))?;
+            .ok_or_else(|| BackupError::NotFound {
+                resource: "S3Source".to_string(),
+                detail: "S3 source not found".to_string(),
+            })?;
 
         // Validate the schedule expression
         self.validate_backup_schedule(&request.schedule_expression)?;
@@ -1752,7 +1777,10 @@ impl BackupService {
         let schedule = temps_entities::backup_schedules::Entity::find_by_id(id)
             .one(self.db.as_ref())
             .await?
-            .ok_or_else(|| BackupError::NotFound("Backup schedule not found".to_string()))?;
+            .ok_or_else(|| BackupError::NotFound {
+                resource: "BackupSchedule".to_string(),
+                detail: "Backup schedule not found".to_string(),
+            })?;
 
         Ok(schedule)
     }
@@ -1810,7 +1838,10 @@ impl BackupService {
         temps_entities::s3_sources::Entity::find_by_id(s3_source_id)
             .one(self.db.as_ref())
             .await?
-            .ok_or_else(|| BackupError::NotFound("S3 source not found".to_string()))?;
+            .ok_or_else(|| BackupError::NotFound {
+                resource: "S3Source".to_string(),
+                detail: "S3 source not found".to_string(),
+            })?;
 
         // Create the backup
         let backup = self
@@ -1840,7 +1871,10 @@ impl BackupService {
         let current = temps_entities::s3_sources::Entity::find_by_id(id)
             .one(self.db.as_ref())
             .await?
-            .ok_or_else(|| BackupError::NotFound("S3 source not found".to_string()))?;
+            .ok_or_else(|| BackupError::NotFound {
+                resource: "S3Source".to_string(),
+                detail: "S3 source not found".to_string(),
+            })?;
 
         let mut active = current.into_active_model();
 
@@ -1858,8 +1892,8 @@ impl BackupService {
             let encrypted_access_key = self
                 .encryption_service
                 .encrypt_string(&access_key_id)
-                .map_err(|e| {
-                    BackupError::Internal(format!("Failed to encrypt access key: {}", e))
+                .map_err(|e| BackupError::Internal {
+                    message: format!("Failed to encrypt access key: {}", e),
                 })?;
             active.access_key_id = Set(encrypted_access_key);
         }
@@ -1868,8 +1902,8 @@ impl BackupService {
             let encrypted_secret_key = self
                 .encryption_service
                 .encrypt_string(&secret_key)
-                .map_err(|e| {
-                    BackupError::Internal(format!("Failed to encrypt secret key: {}", e))
+                .map_err(|e| BackupError::Internal {
+                    message: format!("Failed to encrypt secret key: {}", e),
                 })?;
             active.secret_key = Set(encrypted_secret_key);
         }
@@ -2020,7 +2054,10 @@ impl BackupService {
         let s3_source = temps_entities::s3_sources::Entity::find_by_id(s3_source_id)
             .one(self.db.as_ref())
             .await?
-            .ok_or_else(|| BackupError::NotFound("S3 source not found".to_string()))?;
+            .ok_or_else(|| BackupError::NotFound {
+                resource: "S3Source".to_string(),
+                detail: "S3 source not found".to_string(),
+            })?;
 
         // Create S3 client
         let s3_client = self.create_s3_client(&s3_source).await?;
@@ -2070,8 +2107,9 @@ impl BackupService {
         temps_entities::external_services::Entity::find_by_id(service_id)
             .one(self.db.as_ref())
             .await?
-            .ok_or_else(|| {
-                BackupError::NotFound(format!("External service with ID {} not found", service_id))
+            .ok_or_else(|| BackupError::NotFound {
+                resource: "ExternalService".to_string(),
+                detail: format!("External service with ID {} not found", service_id),
             })
     }
 
@@ -2089,7 +2127,10 @@ impl BackupService {
         let s3_source = temps_entities::s3_sources::Entity::find_by_id(s3_source_id)
             .one(self.db.as_ref())
             .await?
-            .ok_or_else(|| BackupError::NotFound("S3 source not found".to_string()))?;
+            .ok_or_else(|| BackupError::NotFound {
+                resource: "S3Source".to_string(),
+                detail: "S3 source not found".to_string(),
+            })?;
 
         // Create S3 client
         let s3_client = self
@@ -2176,8 +2217,9 @@ impl BackupService {
             .filter(temps_entities::external_service_backups::Column::BackupId.eq(backup.id))
             .one(self.db.as_ref())
             .await?
-            .ok_or_else(|| {
-                BackupError::NotFound("External service backup record not found".to_string())
+            .ok_or_else(|| BackupError::NotFound {
+                resource: "ExternalServiceBackup".to_string(),
+                detail: "External service backup record not found".to_string(),
             })?;
 
         info!(
@@ -2419,7 +2461,10 @@ impl BackupService {
         let schedule_model = temps_entities::backup_schedules::Entity::find_by_id(schedule_id)
             .one(self.db.as_ref())
             .await?
-            .ok_or_else(|| BackupError::NotFound("Backup schedule not found".to_string()))?;
+            .ok_or_else(|| BackupError::NotFound {
+                resource: "BackupSchedule".to_string(),
+                detail: "Backup schedule not found".to_string(),
+            })?;
 
         let mut schedule_update: temps_entities::backup_schedules::ActiveModel =
             schedule_model.into_active_model();
@@ -2441,7 +2486,10 @@ impl BackupService {
         let schedule_model = temps_entities::backup_schedules::Entity::find_by_id(id)
             .one(self.db.as_ref())
             .await?
-            .ok_or_else(|| BackupError::NotFound("Backup schedule not found".to_string()))?;
+            .ok_or_else(|| BackupError::NotFound {
+                resource: "BackupSchedule".to_string(),
+                detail: "Backup schedule not found".to_string(),
+            })?;
 
         let mut schedule_update: temps_entities::backup_schedules::ActiveModel =
             schedule_model.into_active_model();
@@ -2461,7 +2509,10 @@ impl BackupService {
         let schedule = temps_entities::backup_schedules::Entity::find_by_id(id)
             .one(self.db.as_ref())
             .await?
-            .ok_or_else(|| BackupError::NotFound("Backup schedule not found".to_string()))?;
+            .ok_or_else(|| BackupError::NotFound {
+                resource: "BackupSchedule".to_string(),
+                detail: "Backup schedule not found".to_string(),
+            })?;
 
         // Calculate next run time based on the schedule expression
         let cron_schedule = Schedule::from_str(&schedule.schedule_expression)
@@ -2843,7 +2894,7 @@ mod tests {
         let result = backup_service.get_s3_source(999).await;
         assert!(result.is_err());
         match result {
-            Err(BackupError::NotFound(_)) => {}
+            Err(BackupError::NotFound { .. }) => {}
             _ => panic!("Expected NotFound error"),
         }
     }
@@ -2872,14 +2923,17 @@ mod tests {
         let result = backup_service.get_backup_schedule(999).await;
         assert!(result.is_err());
         match result {
-            Err(BackupError::NotFound(_)) => {}
+            Err(BackupError::NotFound { .. }) => {}
             _ => panic!("Expected NotFound error"),
         }
     }
 
     #[tokio::test]
-    #[ignore] // Requires Docker (MinIO and PostgreSQL containers)
     async fn test_backup_to_minio_integration() {
+        if bollard::Docker::connect_with_local_defaults().is_err() {
+            println!("Docker not available, skipping test");
+            return;
+        }
         use temps_database::test_utils::TestDatabase;
         use testcontainers::{runners::AsyncRunner, GenericImage, ImageExt};
 
@@ -3086,8 +3140,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires Docker (PostgreSQL container)
     async fn test_restore_postgres_from_url() {
+        if bollard::Docker::connect_with_local_defaults().is_err() {
+            println!("Docker not available, skipping test");
+            return;
+        }
         use temps_database::test_utils::TestDatabase;
         use testcontainers::{runners::AsyncRunner, GenericImage, ImageExt};
 

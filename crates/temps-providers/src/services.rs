@@ -2298,7 +2298,6 @@ mod tests {
 
     #[cfg(feature = "docker-tests")]
     #[tokio::test]
-    #[ignore] // TODO: Implement service stop/start functionality
     async fn test_stop_and_start_service() {
         let (manager, _test_db) = setup_test_manager().await;
         let random_unused_port = get_unused_port();
@@ -2339,7 +2338,6 @@ mod tests {
 
     #[cfg(feature = "docker-tests")]
     #[tokio::test]
-    #[ignore] // TODO: Implement service deletion functionality
     async fn test_delete_service() {
         let (manager, _test_db) = setup_test_manager().await;
 
@@ -2375,7 +2373,6 @@ mod tests {
 
     #[cfg(feature = "docker-tests")]
     #[tokio::test]
-    #[ignore] // TODO: Implement service parameter update functionality
     async fn test_update_service_parameters() {
         let (manager, _test_db) = setup_test_manager().await;
 
@@ -2435,7 +2432,6 @@ mod tests {
 
     #[cfg(feature = "docker-tests")]
     #[tokio::test]
-    #[ignore] // TODO: Implement get service by name functionality
     async fn test_get_service_by_name() {
         let (manager, _test_db) = setup_test_manager().await;
 
@@ -2467,7 +2463,6 @@ mod tests {
 
     #[cfg(feature = "docker-tests")]
     #[tokio::test]
-    #[ignore] // TODO: Implement get service by slug functionality
     async fn test_get_service_by_slug() {
         let (manager, _test_db) = setup_test_manager().await;
 
@@ -2544,7 +2539,6 @@ mod tests {
 
     #[cfg(feature = "docker-tests")]
     #[tokio::test]
-    #[ignore] // TODO: Implement get_service_environment_variables functionality
     async fn test_service_environment_variables() {
         let (manager, _test_db) = setup_test_manager().await;
         let random_unused_port = get_unused_port();
@@ -2678,7 +2672,6 @@ mod tests {
 
     #[cfg(feature = "docker-tests")]
     #[tokio::test]
-    #[ignore] // FIXME: Parameter validation not implemented - code auto-generates missing parameters (port, password)
     async fn test_validate_parameters_fails_with_missing_required() {
         let (manager, _test_db) = setup_test_manager().await;
 
@@ -2910,7 +2903,6 @@ mod tests {
 
     #[cfg(feature = "docker-tests")]
     #[tokio::test]
-    #[ignore] // TODO: Implement masked environment variables functionality
     async fn test_masked_environment_variables() {
         let (manager, _test_db) = setup_test_manager().await;
         // Find a random unused port on the system

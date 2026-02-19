@@ -1025,6 +1025,15 @@ impl ExternalService for PostgresService {
     }
 
     /// Backup PostgreSQL data to S3
+    ///
+    /// Uses a disposable sidecar container running a version-matched `pg_dump` binary that
+    /// connects to the target PostgreSQL container over the shared Docker network. This avoids
+    /// competing for memory with the running PostgreSQL server — the root cause of OOM kills
+    /// (exit code 137) that occur when `pg_dumpall` is exec'd inside the service container.
+    ///
+    /// The sidecar approach also supports TimescaleDB databases: `pg_dump --format=custom` emits
+    /// circular-FK warnings for TimescaleDB catalog tables (`hypertable`, `chunk`,
+    /// `continuous_agg`) but these are advisory only and do not affect the dump.
     async fn backup_to_s3(
         &self,
         s3_client: &aws_sdk_s3::Client,
@@ -1036,9 +1045,14 @@ impl ExternalService for PostgresService {
         external_service: &temps_entities::external_services::Model,
         service_config: ServiceConfig,
     ) -> anyhow::Result<String> {
+        use bollard::exec::{CreateExecOptions, StartExecResults};
+        use bollard::models::ContainerCreateBody as Config;
+        use bollard::query_parameters::RemoveContainerOptions;
         use chrono::Utc;
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use futures::stream::StreamExt as FuturesStreamExt;
         use sea_orm::*;
-        use std::io::Write;
         use tempfile::NamedTempFile;
 
         info!("Starting PostgreSQL backup to S3");
@@ -1066,81 +1080,245 @@ impl ExternalService for PostgresService {
         .insert(pool)
         .await?;
 
-        // Get container name
-        let container_name = self.get_container_name();
+        // The DB container name is also its DNS hostname on the shared Docker network.
+        let db_container_name = self.get_container_name();
 
-        // Create a temporary file for the backup
-        let mut temp_file = tempfile::NamedTempFile::new()?;
+        // Use the exact same image as the running service container for the sidecar. This
+        // guarantees that the pg_dump binary version matches the server AND that any required
+        // extensions (e.g. TimescaleDB) are present. A plain postgres image would lack the
+        // TimescaleDB extension and fail to dump extension-dependent objects.
+        let sidecar_image = postgres_config.docker_image.clone();
 
-        // Execute pg_dumpall inside the container with actual credentials from config
-        // URL-decode password (it's stored URL-encoded in database for connection strings)
+        // Pull the sidecar image (no-op if already present)
+        info!("Pulling sidecar image {} for pg_dump", sidecar_image);
+        let (image_name, image_tag) = sidecar_image
+            .split_once(':')
+            .map(|(n, t)| (n.to_string(), t.to_string()))
+            .unwrap_or_else(|| (sidecar_image.clone(), "latest".to_string()));
+
+        self.docker
+            .create_image(
+                Some(bollard::query_parameters::CreateImageOptions {
+                    from_image: Some(image_name),
+                    tag: Some(image_tag),
+                    ..Default::default()
+                }),
+                None,
+                None,
+            )
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to pull pg_dump sidecar image {}: {}",
+                    sidecar_image,
+                    e
+                )
+            })?;
+
+        // Spin up a short-lived sidecar container attached to the same Docker network so it
+        // can reach the DB container by hostname. The container just sleeps; pg_dump is run
+        // via exec so we can stream stdout directly without buffering in memory.
+        let sidecar_name = format!("temps-pg-backup-{}", uuid::Uuid::new_v4());
         let password_env = format!("PGPASSWORD={}", postgres_config.password);
+
+        let sidecar_config = Config {
+            image: Some(sidecar_image.clone()),
+            cmd: Some(vec!["sleep".to_string(), "300".to_string()]),
+            env: Some(vec![password_env.clone()]),
+            ..Default::default()
+        };
+
+        let networking_config = Some(bollard::models::NetworkingConfig {
+            endpoints_config: Some(std::collections::HashMap::from([(
+                temps_core::NETWORK_NAME.to_string(),
+                bollard::models::EndpointSettings {
+                    ..Default::default()
+                },
+            )])),
+        });
+
+        let sidecar_config = Config {
+            networking_config,
+            ..sidecar_config
+        };
+
+        self.docker
+            .create_container(
+                Some(
+                    bollard::query_parameters::CreateContainerOptionsBuilder::new()
+                        .name(&sidecar_name)
+                        .build(),
+                ),
+                sidecar_config,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create pg_dump sidecar container: {}", e))?;
+
+        self.docker
+            .start_container(
+                &sidecar_name,
+                Some(bollard::query_parameters::StartContainerOptionsBuilder::new().build()),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to start pg_dump sidecar container: {}", e))?;
+
+        // Helper to remove the sidecar on any error path
+        let remove_sidecar = |docker: std::sync::Arc<bollard::Docker>, name: String| async move {
+            let _ = docker
+                .remove_container(
+                    &name,
+                    Some(RemoveContainerOptions {
+                        force: true,
+                        ..Default::default()
+                    }),
+                )
+                .await;
+        };
+
+        // pg_dump connects to the DB container over the Docker network using its container name
+        // as the hostname. --format=custom produces a binary dump suitable for pg_restore.
+        // --compress=0 disables pg_dump's internal compression; we apply gzip ourselves while
+        // streaming to avoid buffering the entire dump in memory (prevents OOM / exit code 137).
+        let port_str = POSTGRES_INTERNAL_PORT.to_string();
+        let pg_dump_cmd = vec![
+            "pg_dump",
+            "--format=custom",
+            "--compress=0",
+            "--no-password",
+            "--host",
+            &db_container_name,
+            "--port",
+            &port_str,
+            "--username",
+            &postgres_config.username,
+            "--dbname",
+            &postgres_config.database,
+        ];
+
+        info!(
+            "Running pg_dump sidecar for service '{}' (host={})",
+            self.name, db_container_name
+        );
+
         let exec = self
             .docker
             .create_exec(
-                &container_name,
-                bollard::exec::CreateExecOptions {
-                    cmd: Some(vec![
-                        "pg_dumpall",
-                        "-U",
-                        &postgres_config.username,
-                        "-w",
-                        "--clean",
-                        "--if-exists",
-                    ]),
-                    env: Some(vec![password_env.as_str()]),
+                &sidecar_name,
+                CreateExecOptions {
+                    cmd: Some(pg_dump_cmd),
                     attach_stdout: Some(true),
                     attach_stderr: Some(true),
+                    env: Some(vec![password_env.as_str()]),
                     ..Default::default()
                 },
             )
-            .await?;
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create pg_dump exec: {}", e))?;
 
-        let output: bollard::exec::StartExecResults =
-            self.docker.start_exec(&exec.id, None).await?;
-        if let bollard::exec::StartExecResults::Attached { output, .. } = output {
-            let mut stream = output.boxed();
-            while let Some(result) = stream.next().await {
-                match result {
-                    Ok(log_output) => match log_output {
-                        bollard::container::LogOutput::StdOut { message }
-                        | bollard::container::LogOutput::StdErr { message } => {
-                            temp_file.write_all(&message)?;
+        // Stream pg_dump stdout directly into a gzip encoder writing to a temp file.
+        // This avoids buffering the entire dump in memory, preventing OOM kills.
+        let mut temp_file = NamedTempFile::new()?;
+        let mut encoder = GzEncoder::new(&mut temp_file, Compression::default());
+        let mut stderr_data = Vec::new();
+
+        if let StartExecResults::Attached { mut output, .. } =
+            self.docker.start_exec(&exec.id, None).await?
+        {
+            while let Some(chunk) = FuturesStreamExt::next(&mut output).await {
+                match chunk {
+                    Ok(bollard::container::LogOutput::StdOut { message }) => {
+                        if let Err(e) = std::io::Write::write_all(&mut encoder, &message) {
+                            remove_sidecar(self.docker.clone(), sidecar_name.clone()).await;
+                            let mut backup_update: external_service_backups::ActiveModel =
+                                backup_record.clone().into();
+                            backup_update.state = Set("failed".to_string());
+                            backup_update.error_message = Set(Some(e.to_string()));
+                            backup_update.finished_at = Set(Some(Utc::now()));
+                            backup_update.update(pool).await?;
+                            return Err(anyhow::anyhow!("Failed to write pg_dump output: {}", e));
                         }
-                        _ => (),
-                    },
+                    }
+                    Ok(bollard::container::LogOutput::StdErr { message }) => {
+                        stderr_data.extend_from_slice(&message);
+                    }
+                    Ok(bollard::container::LogOutput::Console { message }) => {
+                        if let Err(e) = std::io::Write::write_all(&mut encoder, &message) {
+                            remove_sidecar(self.docker.clone(), sidecar_name.clone()).await;
+                            let mut backup_update: external_service_backups::ActiveModel =
+                                backup_record.clone().into();
+                            backup_update.state = Set("failed".to_string());
+                            backup_update.error_message = Set(Some(e.to_string()));
+                            backup_update.finished_at = Set(Some(Utc::now()));
+                            backup_update.update(pool).await?;
+                            return Err(anyhow::anyhow!("Failed to write pg_dump output: {}", e));
+                        }
+                    }
                     Err(e) => {
-                        error!("Error streaming backup data: {}", e);
-                        // Update backup record with error
+                        remove_sidecar(self.docker.clone(), sidecar_name.clone()).await;
                         let mut backup_update: external_service_backups::ActiveModel =
                             backup_record.clone().into();
                         backup_update.state = Set("failed".to_string());
                         backup_update.error_message = Set(Some(e.to_string()));
                         backup_update.finished_at = Set(Some(Utc::now()));
                         backup_update.update(pool).await?;
-                        return Err(anyhow::anyhow!("Failed to stream backup data: {}", e));
+                        return Err(anyhow::anyhow!("Error reading pg_dump output: {}", e));
                     }
+                    _ => {}
                 }
             }
+        } else {
+            remove_sidecar(self.docker.clone(), sidecar_name.clone()).await;
+            let mut backup_update: external_service_backups::ActiveModel =
+                backup_record.clone().into();
+            backup_update.state = Set("failed".to_string());
+            backup_update.error_message = Set(Some("Unexpected exec result type".to_string()));
+            backup_update.finished_at = Set(Some(Utc::now()));
+            backup_update.update(pool).await?;
+            return Err(anyhow::anyhow!("Unexpected exec result type"));
         }
+
+        // Check pg_dump exit code. Warnings from TimescaleDB (circular FK constraints on
+        // hypertable / chunk / continuous_agg) are printed to stderr but do not cause a
+        // non-zero exit code, so they are logged but do not fail the backup.
+        let exec_inspect = self.docker.inspect_exec(&exec.id).await?;
+        if let Some(exit_code) = exec_inspect.exit_code {
+            if exit_code != 0 {
+                let stderr = String::from_utf8_lossy(&stderr_data);
+                remove_sidecar(self.docker.clone(), sidecar_name.clone()).await;
+                let error_msg = format!("pg_dump failed with exit code {}: {}", exit_code, stderr);
+                let mut backup_update: external_service_backups::ActiveModel =
+                    backup_record.clone().into();
+                backup_update.state = Set("failed".to_string());
+                backup_update.error_message = Set(Some(error_msg.clone()));
+                backup_update.finished_at = Set(Some(Utc::now()));
+                backup_update.update(pool).await?;
+                return Err(anyhow::anyhow!("{}", error_msg));
+            }
+        }
+
+        // Log any stderr warnings (e.g. TimescaleDB circular FK hints) without failing
+        if !stderr_data.is_empty() {
+            let stderr = String::from_utf8_lossy(&stderr_data);
+            tracing::debug!("pg_dump stderr for service '{}': {}", self.name, stderr);
+        }
+
+        // Finalize the gzip stream before reading the file size
+        encoder.finish()?;
+
+        // Remove the sidecar now that pg_dump has finished
+        remove_sidecar(self.docker.clone(), sidecar_name).await;
 
         // Generate backup path in S3
         let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
         let backup_key = format!(
-            "{}/postgres_backup_{}.sql",
+            "{}/postgres_backup_{}.pgdump.gz",
             subpath.trim_matches('/'),
             timestamp
         );
 
-        // Compress the backup
-        let mut compressed_file = NamedTempFile::new()?;
-        let mut encoder =
-            flate2::write::GzEncoder::new(&mut compressed_file, flate2::Compression::default());
-        std::io::copy(&mut std::fs::File::open(temp_file.path())?, &mut encoder)?;
-        encoder.finish()?;
-
         // Get file size after compression
-        let size_bytes = compressed_file.as_file().metadata()?.len() as i32;
+        let size_bytes = temp_file.as_file().metadata()?.len() as i32;
 
         // Validate backup size - a zero-size backup indicates failure
         if size_bytes == 0 {
@@ -1160,7 +1338,7 @@ impl ExternalService for PostgresService {
             .put_object()
             .bucket(&s3_source.bucket_name)
             .key(&backup_key)
-            .body(aws_sdk_s3::primitives::ByteStream::from_path(compressed_file.path()).await?)
+            .body(aws_sdk_s3::primitives::ByteStream::from_path(temp_file.path()).await?)
             .content_type("application/x-gzip")
             .send()
             .await
@@ -1920,7 +2098,6 @@ mod tests {
 
     #[cfg(feature = "docker-tests")]
     #[tokio::test]
-    #[ignore] // Requires Docker
     async fn test_port_change_after_creation() {
         let docker = Arc::new(Docker::connect_with_local_defaults().unwrap());
         let service = PostgresService::new("test-port-change".to_string(), docker);

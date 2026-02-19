@@ -25,55 +25,31 @@ use utoipa::{OpenApi, ToSchema};
 impl From<BackupError> for Problem {
     fn from(error: BackupError) -> Self {
         match error {
-            BackupError::DatabaseConnectionError(msg) => {
-                problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
-                    .with_title("Database connection Error")
-                    .with_detail(msg)
-            }
-
-            BackupError::Database(e) => problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
-                .with_title("Database Error")
-                .with_detail(e.to_string()),
-
-            BackupError::S3(e) => problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
-                .with_title("S3 Storage Error")
-                .with_detail(e.to_string()),
-
-            BackupError::NotFound(msg) => problemdetails::new(StatusCode::NOT_FOUND)
+            BackupError::NotFound { .. } => problemdetails::new(StatusCode::NOT_FOUND)
                 .with_title("Resource Not Found")
-                .with_detail(msg),
+                .with_detail(error.to_string()),
 
-            BackupError::Validation(msg) => problemdetails::new(StatusCode::BAD_REQUEST)
+            BackupError::Validation(ref msg) => problemdetails::new(StatusCode::BAD_REQUEST)
                 .with_title("Validation Error")
-                .with_detail(msg),
+                .with_detail(msg.clone()),
 
-            BackupError::Configuration(msg) => {
-                problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
-                    .with_title("Configuration Error")
-                    .with_detail(msg)
-            }
-
-            BackupError::ExternalService(msg) => {
-                problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
-                    .with_title("External Service Error")
-                    .with_detail(msg)
-            }
-
-            BackupError::Schedule(msg) => problemdetails::new(StatusCode::BAD_REQUEST)
+            BackupError::Schedule(ref msg) => problemdetails::new(StatusCode::BAD_REQUEST)
                 .with_title("Schedule Error")
-                .with_detail(msg),
+                .with_detail(msg.clone()),
 
-            BackupError::Operation(msg) => problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
-                .with_title("Operation Failed")
-                .with_detail(msg),
-
-            BackupError::Internal(msg) => problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
-                .with_title("Internal Server Error")
-                .with_detail(msg),
-
-            _ => problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
-                .with_title("Internal Server Error")
-                .with_detail("An unexpected error occurred"),
+            BackupError::Database(_)
+            | BackupError::S3(_)
+            | BackupError::Configuration(_)
+            | BackupError::ExternalService(_)
+            | BackupError::Internal { .. }
+            | BackupError::NotificationError(_)
+            | BackupError::Unsupported(_)
+            | BackupError::Io(_)
+            | BackupError::Serialization(_) => {
+                problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
+                    .with_title("Internal Server Error")
+                    .with_detail(error.to_string())
+            }
         }
     }
 }
