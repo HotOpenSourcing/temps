@@ -382,7 +382,9 @@ impl BackupCommand {
             format!("Reading backup metadata from: {}", backup.metadata_location).bright_white()
         );
         let metadata_key = backup.metadata_location.trim_start_matches('/').to_string();
-        let binding = metadata_key.replace("backup.postgresql.gz", "metadata.json");
+        let binding = metadata_key
+            .replace("backup.sql.gz", "metadata.json")
+            .replace("backup.postgresql.gz", "metadata.json");
         let metadata_key = binding;
         let metadata_key = metadata_key.as_str();
         let metadata_data = rt.block_on(async {
@@ -991,7 +993,9 @@ impl BackupCommand {
         // Download and parse metadata.json
         println!("{}", "Reading backup metadata...".bright_white());
         let metadata_key = backup.metadata_location.trim_start_matches('/').to_string();
-        let binding = metadata_key.replace("backup.postgresql.gz", "metadata.json");
+        let binding = metadata_key
+            .replace("backup.sql.gz", "metadata.json")
+            .replace("backup.postgresql.gz", "metadata.json");
         let metadata_key = binding;
         let metadata_key = metadata_key.as_str();
 

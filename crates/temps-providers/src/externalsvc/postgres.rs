@@ -1199,10 +1199,20 @@ impl ExternalService for PostgresService {
         let sidecar_name = format!("temps-pg-backup-{}", uuid::Uuid::new_v4());
         let password_env = format!("PGPASSWORD={}", postgres_config.password);
 
+        // Override the entrypoint to prevent the PostgreSQL image from starting a full
+        // database server inside the sidecar. The default entrypoint (docker-entrypoint.sh)
+        // initializes a PG cluster and allocates shared_buffers, consuming 1-2 GB of RAM
+        // that competes with the actual database server and triggers OOM kills (exit 137).
         let sidecar_config = Config {
             image: Some(sidecar_image.clone()),
-            cmd: Some(vec!["sleep".to_string(), "300".to_string()]),
+            entrypoint: Some(vec!["/bin/sleep".to_string()]),
+            cmd: Some(vec!["300".to_string()]),
             env: Some(vec![password_env.clone()]),
+            host_config: Some(bollard::models::HostConfig {
+                // Protect the sidecar from the OOM killer during large dumps.
+                oom_score_adj: Some(-500),
+                ..Default::default()
+            }),
             ..Default::default()
         };
 

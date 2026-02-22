@@ -245,9 +245,11 @@ impl BackupService {
             ));
         }
 
-        // Generate S3 location
+        // Generate S3 location. Use .sql.gz extension to match the plain-format pg_dump
+        // output (--format=plain). The restore logic uses this extension to decide whether
+        // to pipe through psql (plain) or pg_restore (custom).
         let s3_location = format!(
-            "{}/backups/{}/{}/backup.postgresql.gz",
+            "{}/backups/{}/{}/backup.sql.gz",
             s3_source.bucket_path.trim_matches('/'),
             Utc::now().format("%Y/%m/%d"),
             backup_id
@@ -536,14 +538,24 @@ impl BackupService {
         let pgpassword_env = format!("PGPASSWORD={}", decoded_password);
         let env_vars = vec![pgpassword_env];
 
-        // Create container config with version-matched postgres image (includes pg_dump)
+        // Create container config with version-matched postgres image (includes pg_dump).
+        // Override the entrypoint to prevent the timescaledb-ha image from starting a full
+        // PostgreSQL server instance inside the sidecar. The default entrypoint
+        // (docker-entrypoint.sh) initializes a PG cluster and allocates shared_buffers,
+        // consuming 1-2 GB of RAM that competes with the actual database server for memory
+        // and triggers OOM kills (exit code 137).
         let config = Config {
             image: Some(image_tag),
-            cmd: Some(vec!["sleep".to_string(), "300".to_string()]), // Keep container alive for exec
+            entrypoint: Some(vec!["/bin/sleep".to_string()]),
+            cmd: Some(vec!["300".to_string()]),
             env: Some(env_vars),
             host_config: Some(bollard::models::HostConfig {
                 network_mode: Some("host".to_string()), // Use host network to access database
                 auto_remove: Some(true),
+                // Protect the sidecar from the OOM killer. Without this, the kernel may
+                // kill the sidecar (which has no oom_score_adj) instead of less important
+                // processes when the system is under memory pressure during large dumps.
+                oom_score_adj: Some(-500),
                 ..Default::default()
             }),
             ..Default::default()
@@ -1526,8 +1538,8 @@ impl BackupService {
         let password = url.password();
 
         // Detect backup format from S3 location path:
-        // - .pgdump.gz / backup.postgresql.gz = custom format (pg_restore)
-        // - .sql.gz = plain SQL format (psql)
+        // - .pgdump.gz / backup.postgresql.gz = custom format (pg_restore) [legacy backups]
+        // - .sql.gz = plain SQL format (psql) [current format]
         let is_plain_format = backup.s3_location.ends_with(".sql.gz");
 
         let mut cmd;
@@ -2081,7 +2093,9 @@ impl BackupService {
                 "created_at": backup.started_at.to_rfc3339(),
                 "size_bytes": backup.size_bytes,
                 "location": backup.s3_location.clone(),
-                "metadata_location": backup.s3_location.replace("backup.postgresql.gz", "metadata.json")
+                "metadata_location": backup.s3_location
+                    .replace("backup.sql.gz", "metadata.json")
+                    .replace("backup.postgresql.gz", "metadata.json")
             }));
         }
         index["last_updated"] = json!(Utc::now().to_rfc3339());
@@ -3226,14 +3240,13 @@ mod tests {
         std::io::Read::read_to_end(&mut decoder, &mut decompressed)
             .expect("Failed to decompress backup — gzip stream is corrupt");
 
+        // Backups use --format=plain so the decompressed content is SQL text starting
+        // with a comment header ("--"), not the binary PGDMP magic bytes.
+        let content_str = String::from_utf8_lossy(&decompressed);
         assert!(
-            decompressed.len() >= 5,
-            "Decompressed backup too small to contain pg_dump magic"
-        );
-        assert_eq!(
-            &decompressed[..5],
-            b"PGDMP",
-            "Decompressed backup does not start with PGDMP — not a valid pg_dump custom format file"
+            content_str.starts_with("--"),
+            "Decompressed backup does not start with SQL comment header — expected plain-format pg_dump output, got: {:?}",
+            &decompressed[..std::cmp::min(20, decompressed.len())]
         );
 
         println!("\n✓ Integration test passed:");
