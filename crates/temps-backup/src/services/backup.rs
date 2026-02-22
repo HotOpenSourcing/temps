@@ -493,11 +493,10 @@ impl BackupService {
     }
 
     async fn backup_postgres_database(&self, temp_file: &mut NamedTempFile) -> Result<()> {
-        use bollard::exec::{CreateExecOptions, StartExecResults};
+        use bollard::exec::CreateExecOptions;
         use bollard::models::ContainerCreateBody as Config;
         use bollard::query_parameters::RemoveContainerOptions;
         use bollard::Docker;
-        use futures::stream::StreamExt as FuturesStreamExt;
 
         info!("Creating PostgreSQL database backup using Docker");
 
@@ -622,10 +621,6 @@ impl BackupService {
         // Run pg_dump | gzip inside the sidecar, writing directly to the bind-mounted
         // host filesystem. This keeps the Temps process memory flat regardless of DB size.
         let port_str = port.to_string();
-        let pg_dump_shell_cmd = format!(
-            "pg_dump --format=plain --no-password --host={} --port={} --username={} --dbname={} | gzip > {}",
-            host, port_str, username, database, container_backup_path
-        );
 
         info!("Running pg_dump command in Docker container (bind-mount mode)");
 
@@ -635,13 +630,24 @@ impl BackupService {
             .unwrap_or_else(|_| password.to_string());
         let pgpassword = format!("PGPASSWORD={}", decoded_password);
 
+        // Run pg_dump fully detached — no stdout/stderr streaming through the Temps process.
+        // Previous approach used attach_stdout which caused Bollard's hyper HTTP client
+        // to buffer the chunked transfer encoding internally, leading to unbounded memory
+        // growth (19+ GB) even when we weren't reading stdout data.
+        // Instead we redirect stderr to a file inside the container and poll for completion.
+        let stderr_path = format!("/backup/{}.stderr", uuid::Uuid::new_v4());
+        let pg_dump_shell_cmd = format!(
+            "pg_dump --format=plain --no-password --host={} --port={} --username={} --dbname={} 2>{} | gzip > {}",
+            host, port_str, username, database, stderr_path, container_backup_path
+        );
+
         let exec = docker
             .create_exec(
                 &container_name,
                 CreateExecOptions {
                     cmd: Some(vec!["sh", "-c", &pg_dump_shell_cmd]),
-                    attach_stdout: Some(true),
-                    attach_stderr: Some(true),
+                    attach_stdout: Some(false),
+                    attach_stderr: Some(false),
                     env: Some(vec![pgpassword.as_str()]),
                     ..Default::default()
                 },
@@ -649,32 +655,34 @@ impl BackupService {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create exec: {}", e))?;
 
-        // Consume the exec stream to let the command run. Only capture stderr for error
-        // reporting. stdout is empty because pg_dump output is piped to gzip > file
-        // inside the container.
-        let mut stderr_data = Vec::new();
+        // Start the exec in detached mode — no HTTP stream through the Temps process
+        use bollard::exec::StartExecOptions;
+        docker
+            .start_exec(
+                &exec.id,
+                Some(StartExecOptions {
+                    detach: true,
+                    ..Default::default()
+                }),
+            )
+            .await?;
 
-        if let StartExecResults::Attached { mut output, .. } =
-            docker.start_exec(&exec.id, None).await?
-        {
-            while let Some(chunk) = FuturesStreamExt::next(&mut output).await {
-                match chunk {
-                    Ok(bollard::container::LogOutput::StdErr { message }) => {
-                        stderr_data.extend_from_slice(&message);
-                    }
-                    Err(e) => {
-                        remove_sidecar(docker.clone(), container_name.clone()).await;
-                        let _ = tokio::fs::remove_file(&host_backup_path).await;
-                        return Err(anyhow::anyhow!("Error reading pg_dump output: {}", e));
-                    }
-                    _ => {} // stdout/console are empty (piped to file inside container)
+        // Poll for completion instead of streaming
+        loop {
+            let inspect = docker.inspect_exec(&exec.id).await?;
+            if let Some(running) = inspect.running {
+                if !running {
+                    break;
                 }
             }
-        } else {
-            remove_sidecar(docker.clone(), container_name.clone()).await;
-            let _ = tokio::fs::remove_file(&host_backup_path).await;
-            return Err(anyhow::anyhow!("Unexpected exec result type"));
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
+
+        // Read stderr from the file inside the container (via bind mount on host)
+        let host_stderr_path =
+            backup_dir.join(std::path::Path::new(&stderr_path).file_name().unwrap());
+        let stderr_data = tokio::fs::read(&host_stderr_path).await.unwrap_or_default();
+        let _ = tokio::fs::remove_file(&host_stderr_path).await;
 
         // Check if command was successful
         let exec_inspect = docker.inspect_exec(&exec.id).await?;
