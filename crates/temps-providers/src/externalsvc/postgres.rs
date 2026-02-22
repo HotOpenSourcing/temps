@@ -1206,7 +1206,7 @@ impl ExternalService for PostgresService {
         let sidecar_config = Config {
             image: Some(sidecar_image.clone()),
             entrypoint: Some(vec!["/bin/sleep".to_string()]),
-            cmd: Some(vec!["300".to_string()]),
+            cmd: Some(vec!["86400".to_string()]), // 24h: must outlive pg_dump on large DBs
             env: Some(vec![password_env.clone()]),
             host_config: Some(bollard::models::HostConfig {
                 // Protect the sidecar from the OOM killer during large dumps.

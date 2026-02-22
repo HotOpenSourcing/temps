@@ -564,7 +564,7 @@ impl BackupService {
         let config = Config {
             image: Some(image_tag),
             entrypoint: Some(vec!["/bin/sleep".to_string()]),
-            cmd: Some(vec!["300".to_string()]),
+            cmd: Some(vec!["86400".to_string()]), // 24h: must outlive pg_dump on large DBs (42+ GB)
             env: Some(env_vars),
             host_config: Some(bollard::models::HostConfig {
                 network_mode: Some("host".to_string()),
