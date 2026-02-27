@@ -76,18 +76,32 @@ impl DockerRuntime {
         use bytes::Bytes;
         use http_body_util::Full;
 
-        let mut tar_buffer = Vec::new();
-        {
-            let mut tar_builder = tar::Builder::new(&mut tar_buffer);
+        // Write the tar archive to a temporary file to avoid holding the entire
+        // build context in memory.  The temp file is cleaned up when `_tmp` drops.
+        let tmp = tempfile::NamedTempFile::new().map_err(BuilderError::IoError)?;
+        let tmp_path = tmp.path().to_path_buf();
+
+        // Tar creation is synchronous and CPU-bound — run it on a blocking thread.
+        let ctx = context_path.clone();
+        let out_path = tmp_path.clone();
+        tokio::task::spawn_blocking(move || {
+            let file = std::fs::File::create(&out_path).map_err(BuilderError::IoError)?;
+            let mut tar_builder = tar::Builder::new(file);
             tar_builder
-                .append_dir_all(".", context_path)
+                .append_dir_all(".", ctx)
                 .map_err(BuilderError::IoError)?;
             tar_builder.finish().map_err(BuilderError::IoError)?;
-        }
+            Ok::<(), BuilderError>(())
+        })
+        .await
+        .map_err(|e| BuilderError::Other(format!("Tar task panicked: {}", e)))??;
 
-        // Create body from tar buffer as expected by Bollard
-        // Return Full<Bytes> which will be converted to Either::Left automatically
-        Ok(Full::new(Bytes::from(tar_buffer)))
+        // Read the completed tar file back into memory for Bollard.
+        let tar_data = tokio::fs::read(&tmp_path)
+            .await
+            .map_err(BuilderError::IoError)?;
+
+        Ok(Full::new(Bytes::from(tar_data)))
     }
 
     fn get_resource_limits() -> (usize, u64) {
@@ -475,12 +489,43 @@ impl ImageBuilder for DockerRuntime {
                         return Err(BuilderError::BuildFailed(error));
                     }
                     if let Some(bollard::models::BuildInfoAux::BuildKit(res)) = info.aux {
+                        // Emit vertex names (build step descriptions) when they
+                        // start or complete.  This gives visibility into cached
+                        // layers and overall build progress even when there is
+                        // no command output (logs).
+                        for vertex in &res.vertices {
+                            if vertex.name.is_empty() {
+                                continue;
+                            }
+                            let status = if vertex.error.is_empty() {
+                                if vertex.completed.is_some() {
+                                    if vertex.cached {
+                                        "CACHED"
+                                    } else {
+                                        "DONE"
+                                    }
+                                } else if vertex.started.is_some() {
+                                    "RUNNING"
+                                } else {
+                                    continue; // Not started yet, skip
+                                }
+                            } else {
+                                "ERROR"
+                            };
+                            let line = format!("[{}] {}\n", status, vertex.name);
+                            let _ = log_file.write_all(line.as_bytes()).await;
+                            debug!("BuildKit vertex: {}", line.trim());
+
+                            if let Some(ref callback) = log_callback {
+                                callback(line).await;
+                            }
+                        }
+
+                        // Emit actual command output from build steps
                         for log in res.logs {
-                            // Write to file
                             let _ = log_file.write_all(&log.msg[..]).await;
                             debug!("BuildKit: {}", String::from_utf8_lossy(&log.msg));
 
-                            // Call log callback if provided
                             if let Some(ref callback) = log_callback {
                                 callback(String::from_utf8_lossy(&log.msg[..]).to_string()).await;
                             }

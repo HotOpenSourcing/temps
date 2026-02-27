@@ -92,7 +92,6 @@ fn matches_tail_filter(line: &LogLine, filter: &TailFilter) -> bool {
 mod tests {
     use super::*;
     use crate::types::{LogLevel, LogStream};
-    use uuid::Uuid;
 
     fn make_line(service: &str, level: LogLevel, msg: &str) -> LogLine {
         LogLine {
@@ -103,17 +102,17 @@ mod tests {
             fields: None,
             container_id: "cnt1".to_string(),
             service: service.to_string(),
-            env: "production".to_string(),
-            project_id: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+            env: "1".to_string(),
+            project_id: 42,
             deploy_id: None,
         }
     }
 
     fn make_filter(service: &str) -> TailFilter {
         TailFilter {
-            project_id: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+            project_id: 42,
             service: service.to_string(),
-            env: "production".to_string(),
+            env: "1".to_string(),
             levels: vec![],
             text: None,
         }
@@ -155,7 +154,7 @@ mod tests {
     #[test]
     fn test_matches_tail_filter_wrong_project() {
         let mut line = make_line("web", LogLevel::Info, "hello");
-        line.project_id = Uuid::new_v4(); // Different project
+        line.project_id = 999; // Different project
         let filter = make_filter("web");
         assert!(!matches_tail_filter(&line, &filter));
     }

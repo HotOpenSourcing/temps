@@ -12,7 +12,7 @@ pub struct Model {
     /// TimescaleDB time column — partition key
     #[sea_orm(primary_key, auto_increment = false)]
     pub time: DBDateTime,
-    pub project_id: Uuid,
+    pub project_id: i32,
     pub service: String,
     pub env: String,
     /// Normalized level: ERROR or WARN

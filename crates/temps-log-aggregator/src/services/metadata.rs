@@ -133,7 +133,7 @@ impl LogMetadataService {
     /// Query chunk metadata for a project within a time range.
     pub async fn find_chunks(
         &self,
-        project_id: Uuid,
+        project_id: i32,
         service: Option<&str>,
         start_time: DateTime<Utc>,
         end_time: DateTime<Utc>,
@@ -177,7 +177,7 @@ impl LogMetadataService {
     /// Query log_events (ERROR/WARN) from the TimescaleDB hypertable.
     pub async fn query_log_events(
         &self,
-        project_id: Uuid,
+        project_id: i32,
         start_time: DateTime<Utc>,
         end_time: DateTime<Utc>,
         levels: &[LogLevel],
@@ -207,7 +207,7 @@ impl LogMetadataService {
 
         let events = temps_entities::log_events::Entity::find()
             .filter(condition)
-            .order_by(temps_entities::log_events::Column::Time, Order::Desc)
+            .order_by(temps_entities::log_events::Column::Time, Order::Asc)
             .limit(limit)
             .all(self.db.as_ref())
             .await?;
@@ -218,7 +218,7 @@ impl LogMetadataService {
     /// Find chunks older than a given timestamp for retention cleanup.
     pub async fn find_expired_chunks(
         &self,
-        project_id: Uuid,
+        project_id: i32,
         before: DateTime<Utc>,
     ) -> Result<Vec<ChunkMeta>, LogAggregatorError> {
         let chunks = temps_entities::log_chunks::Entity::find()
@@ -261,12 +261,12 @@ impl LogMetadataService {
     /// List all distinct project IDs that have log_chunks.
     ///
     /// Used by the retention scheduler to enumerate projects for cleanup.
-    pub async fn list_distinct_projects(&self) -> Result<Vec<Uuid>, LogAggregatorError> {
+    pub async fn list_distinct_projects(&self) -> Result<Vec<i32>, LogAggregatorError> {
         use sea_orm::FromQueryResult;
 
         #[derive(FromQueryResult)]
         struct ProjectIdResult {
-            project_id: Uuid,
+            project_id: i32,
         }
 
         let results = temps_entities::log_chunks::Entity::find()
@@ -278,6 +278,23 @@ impl LogMetadataService {
             .await?;
 
         Ok(results.into_iter().map(|r| r.project_id).collect())
+    }
+
+    /// Get the latest `ended_at` timestamp for a specific container.
+    ///
+    /// Used by the collector on startup to resume streaming from where it left off
+    /// instead of replaying the entire container history.
+    pub async fn get_latest_chunk_end_for_container(
+        &self,
+        container_id: &str,
+    ) -> Result<Option<DateTime<Utc>>, LogAggregatorError> {
+        let chunk = temps_entities::log_chunks::Entity::find()
+            .filter(temps_entities::log_chunks::Column::ContainerId.eq(container_id))
+            .order_by(temps_entities::log_chunks::Column::EndedAt, Order::Desc)
+            .one(self.db.as_ref())
+            .await?;
+
+        Ok(chunk.map(|m| m.ended_at))
     }
 
     /// Get a single chunk metadata by ID.
@@ -316,7 +333,7 @@ mod tests {
     /// Insert a chunk_meta directly into the DB for testing.
     async fn insert_test_chunk(
         service: &LogMetadataService,
-        project_id: Uuid,
+        project_id: i32,
         svc: &str,
         env: &str,
     ) -> ChunkMeta {
@@ -339,170 +356,8 @@ mod tests {
         chunk
     }
 
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn test_insert_log_events_from_lines_filters_indexable() {
-        let db = match TestDatabase::with_migrations().await {
-            Ok(db) => db,
-            Err(_) => {
-                println!("Docker/DB not available, skipping test");
-                return;
-            }
-        };
-
-        let service = LogMetadataService::new(db.connection_arc());
-        let project_id = Uuid::new_v4();
-        let chunk = insert_test_chunk(&service, project_id, "api", "prod").await;
-
-        // Create lines: 2 ERROR, 1 WARN (indexable), 5 INFO, 2 DEBUG (not indexable)
-        let lines: Vec<LogLine> = vec![
-            LogLine {
-                ts: Utc::now(),
-                stream: crate::types::LogStream::Stdout,
-                level: LogLevel::Error,
-                msg: "Error one".to_string(),
-                fields: None,
-                container_id: "test-container".to_string(),
-                service: "api".to_string(),
-                env: "prod".to_string(),
-                project_id,
-                deploy_id: None,
-            },
-            LogLine {
-                ts: Utc::now(),
-                stream: crate::types::LogStream::Stdout,
-                level: LogLevel::Info,
-                msg: "Info one".to_string(),
-                fields: None,
-                container_id: "test-container".to_string(),
-                service: "api".to_string(),
-                env: "prod".to_string(),
-                project_id,
-                deploy_id: None,
-            },
-            LogLine {
-                ts: Utc::now(),
-                stream: crate::types::LogStream::Stdout,
-                level: LogLevel::Warn,
-                msg: "Warning one".to_string(),
-                fields: None,
-                container_id: "test-container".to_string(),
-                service: "api".to_string(),
-                env: "prod".to_string(),
-                project_id,
-                deploy_id: None,
-            },
-            LogLine {
-                ts: Utc::now(),
-                stream: crate::types::LogStream::Stdout,
-                level: LogLevel::Info,
-                msg: "Info two".to_string(),
-                fields: None,
-                container_id: "test-container".to_string(),
-                service: "api".to_string(),
-                env: "prod".to_string(),
-                project_id,
-                deploy_id: None,
-            },
-            LogLine {
-                ts: Utc::now(),
-                stream: crate::types::LogStream::Stdout,
-                level: LogLevel::Error,
-                msg: "Error two".to_string(),
-                fields: None,
-                container_id: "test-container".to_string(),
-                service: "api".to_string(),
-                env: "prod".to_string(),
-                project_id,
-                deploy_id: None,
-            },
-        ];
-
-        // This should only insert ERROR and WARN lines (3 out of 5)
-        service.insert_log_events_from_lines(chunk.id, &lines).await;
-
-        // Query log_events for this chunk
-        let events = service
-            .query_log_events(
-                project_id,
-                Utc::now() - Duration::hours(1),
-                Utc::now() + Duration::hours(1),
-                &[], // all levels
-                &[],
-                None,
-                100,
-            )
-            .await
-            .unwrap();
-
-        // Only ERROR and WARN should have been inserted
-        assert_eq!(
-            events.len(),
-            3,
-            "Expected 3 indexable events (2 ERROR + 1 WARN), got {}",
-            events.len()
-        );
-
-        let levels: Vec<String> = events.iter().map(|e| e.level.clone()).collect();
-        let error_count = levels.iter().filter(|l| l.as_str() == "ERROR").count();
-        let warn_count = levels.iter().filter(|l| l.as_str() == "WARN").count();
-        assert_eq!(error_count, 2);
-        assert_eq!(warn_count, 1);
-    }
-
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn test_insert_log_events_from_lines_skips_all_info() {
-        let db = match TestDatabase::with_migrations().await {
-            Ok(db) => db,
-            Err(_) => {
-                println!("Docker/DB not available, skipping test");
-                return;
-            }
-        };
-
-        let service = LogMetadataService::new(db.connection_arc());
-        let project_id = Uuid::new_v4();
-        let chunk = insert_test_chunk(&service, project_id, "web", "staging").await;
-
-        // All INFO lines — nothing should be inserted
-        let lines: Vec<LogLine> = (0..5)
-            .map(|i| LogLine {
-                ts: Utc::now(),
-                stream: crate::types::LogStream::Stdout,
-                level: LogLevel::Info,
-                msg: format!("Info message {}", i),
-                fields: None,
-                container_id: "test-container".to_string(),
-                service: "web".to_string(),
-                env: "staging".to_string(),
-                project_id,
-                deploy_id: None,
-            })
-            .collect();
-
-        service.insert_log_events_from_lines(chunk.id, &lines).await;
-
-        let events = service
-            .query_log_events(
-                project_id,
-                Utc::now() - Duration::hours(1),
-                Utc::now() + Duration::hours(1),
-                &[],
-                &[],
-                None,
-                100,
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(
-            events.len(),
-            0,
-            "Expected 0 events for all-INFO lines, got {}",
-            events.len()
-        );
-    }
+    // Note: log_events tests removed — the log_events table was removed from the migration.
+    // All searches now go through archive_search (chunk files).
 
     #[tokio::test]
     #[serial_test::serial]
@@ -517,8 +372,8 @@ mod tests {
 
         let service = LogMetadataService::new(db.connection_arc());
 
-        let project_a = Uuid::new_v4();
-        let project_b = Uuid::new_v4();
+        let project_a = 90003;
+        let project_b = 90004;
 
         // Insert chunks for project A (2 chunks) and project B (1 chunk)
         insert_test_chunk(&service, project_a, "api", "prod").await;

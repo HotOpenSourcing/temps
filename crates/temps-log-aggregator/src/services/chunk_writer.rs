@@ -306,7 +306,8 @@ impl ChunkWriterService {
             .parse::<u32>()
             .unwrap_or(0);
         let storage_key = build_storage_key(
-            &project_id,
+            project_id,
+            &env,
             &service,
             &date,
             hour,
@@ -378,8 +379,8 @@ mod tests {
             fields: None,
             container_id: container_id.to_string(),
             service: "web".to_string(),
-            env: "production".to_string(),
-            project_id: Uuid::new_v4(),
+            env: "1".to_string(),
+            project_id: 1,
             deploy_id: None,
         }
     }
@@ -481,7 +482,7 @@ mod tests {
         let writer = ChunkWriterService::new(storage);
 
         // Write 250 lines
-        let project_id = Uuid::new_v4();
+        let project_id = 100;
         for _ in 0..250 {
             let mut line = make_line("cnt1", LogLevel::Info);
             line.project_id = project_id;
@@ -501,7 +502,7 @@ mod tests {
         let storage = Arc::new(FilesystemStorage::new(tmp.path().to_path_buf()).unwrap());
         let writer = ChunkWriterService::new(storage);
 
-        let project_id = Uuid::new_v4();
+        let project_id = 101;
         let mut written_messages = Vec::new();
 
         for i in 0..10 {
@@ -533,7 +534,7 @@ mod tests {
         let storage = Arc::new(FilesystemStorage::new(tmp.path().to_path_buf()).unwrap());
         let writer = ChunkWriterService::new(storage.clone());
 
-        let project_id = Uuid::new_v4();
+        let project_id = 102;
 
         // Write 3 lines to container A
         for i in 0..3 {
@@ -580,7 +581,7 @@ mod tests {
         let storage = Arc::new(FilesystemStorage::new(tmp.path().to_path_buf()).unwrap());
         let writer = ChunkWriterService::new(storage.clone());
 
-        let project_id = Uuid::new_v4();
+        let project_id = 103;
         let mut auto_flushed = Vec::new();
 
         // Write large messages until auto-flush triggers (MAX_BUFFER_SIZE = 1MB)
@@ -620,7 +621,7 @@ mod tests {
         let storage = Arc::new(FilesystemStorage::new(tmp.path().to_path_buf()).unwrap());
         let writer = ChunkWriterService::new(storage.clone());
 
-        let project_id = Uuid::new_v4();
+        let project_id = 104;
 
         // Write 1000 diverse lines
         for i in 0..1000 {

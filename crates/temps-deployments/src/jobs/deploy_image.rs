@@ -627,7 +627,7 @@ impl DeployImageJob {
         let mut labels = HashMap::new();
         labels.insert(
             "sh.temps.project_id".to_string(),
-            temps_log_aggregator::project_id_to_uuid(context.project_id).to_string(),
+            context.project_id.to_string(),
         );
         labels.insert(
             "sh.temps.environment".to_string(),

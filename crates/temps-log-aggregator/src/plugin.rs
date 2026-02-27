@@ -88,13 +88,22 @@ impl TempsPlugin for LogAggregatorPlugin {
             // Docker (required for collector)
             let docker = context.require_service::<bollard::Docker>();
 
-            // Collector service — set the on_chunk_flushed callback before wrapping in Arc
-            let mut collector = CollectorService::new(docker, chunk_writer.clone(), 10_000);
+            // Metadata service (used by collector to resume from last known position on restart)
+            let collector_metadata = Arc::new(LogMetadataService::new(db.clone()));
 
-            // Wire callback: when a chunk is flushed during streaming, insert metadata + log_events into DB.
+            // Collector service — set the on_chunk_flushed callback before wrapping in Arc
+            let mut collector = CollectorService::new(
+                docker,
+                chunk_writer.clone(),
+                collector_metadata.clone(),
+                10_000,
+            );
+
+            // Wire callback: when a chunk is flushed during streaming, insert chunk metadata into DB.
             // This callback runs in the collector's streaming task, so it must be Send + Sync.
-            let cb_metadata = Arc::new(LogMetadataService::new(db.clone()));
-            collector.set_on_chunk_flushed(Arc::new(move |meta, lines| {
+            // Note: we do NOT insert into log_events — all searches read directly from chunk files.
+            let cb_metadata = collector_metadata;
+            collector.set_on_chunk_flushed(Arc::new(move |meta, _lines| {
                 let metadata_svc = cb_metadata.clone();
                 tokio::spawn(async move {
                     if let Err(e) = metadata_svc.insert_chunk_meta(&meta).await {
@@ -103,12 +112,7 @@ impl TempsPlugin for LogAggregatorPlugin {
                             error = %e,
                             "Failed to insert chunk metadata from collector callback"
                         );
-                        return;
                     }
-                    // Insert log_events for indexable lines
-                    metadata_svc
-                        .insert_log_events_from_lines(meta.id, &lines)
-                        .await;
                 });
             }));
 
@@ -171,7 +175,7 @@ impl TempsPlugin for LogAggregatorPlugin {
 
             // ── Flush ticker ────────────────────────────────────────────
             // Periodically flushes expired buffers (those that have exceeded the 30s threshold)
-            // and inserts chunk metadata + log_events into the database
+            // and inserts chunk metadata into the database
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(FLUSH_TICKER_INTERVAL);
                 loop {
@@ -188,16 +192,7 @@ impl TempsPlugin for LogAggregatorPlugin {
                                         error = %e,
                                         "Failed to insert chunk metadata from flush ticker"
                                     );
-                                    continue;
                                 }
-
-                                // Insert log_events for indexable (ERROR/WARN) lines
-                                metadata_service
-                                    .insert_log_events_from_lines(
-                                        flush_result.meta.id,
-                                        &flush_result.lines,
-                                    )
-                                    .await;
                             }
                             Err(e) => {
                                 tracing::warn!(

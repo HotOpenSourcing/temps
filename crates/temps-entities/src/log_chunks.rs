@@ -7,7 +7,7 @@ use temps_core::DBDateTime;
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: Uuid,
-    pub project_id: Uuid,
+    pub project_id: i32,
     pub env: String,
     pub service: String,
     pub container_id: String,

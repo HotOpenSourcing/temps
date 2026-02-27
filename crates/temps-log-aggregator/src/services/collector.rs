@@ -26,7 +26,7 @@ use uuid::Uuid;
 
 use crate::error::LogAggregatorError;
 use crate::parser::{parse_docker_timestamp, parse_log_line};
-use crate::services::ChunkWriterService;
+use crate::services::{ChunkWriterService, LogMetadataService};
 use crate::types::{ContainerContext, LogLine, LogStream};
 
 /// Docker label keys set by temps.sh at container creation
@@ -52,6 +52,7 @@ struct StreamTask {
 pub struct CollectorService {
     docker: Arc<Docker>,
     chunk_writer: Arc<ChunkWriterService>,
+    metadata_service: Arc<LogMetadataService>,
     /// Broadcast channel for live tail subscribers
     tail_tx: broadcast::Sender<LogLine>,
     /// Active streaming tasks per container_id
@@ -65,12 +66,14 @@ impl CollectorService {
     pub fn new(
         docker: Arc<Docker>,
         chunk_writer: Arc<ChunkWriterService>,
+        metadata_service: Arc<LogMetadataService>,
         tail_capacity: usize,
     ) -> Self {
         let (tail_tx, _) = broadcast::channel(tail_capacity);
         Self {
             docker,
             chunk_writer,
+            metadata_service,
             tail_tx,
             active_streams: Mutex::new(HashMap::new()),
             on_chunk_flushed: None,
@@ -125,6 +128,24 @@ impl CollectorService {
             }
         };
 
+        // Query the DB for the latest chunk end timestamp for this container.
+        // On server restart, this prevents replaying the entire container history.
+        let resume_after = self
+            .metadata_service
+            .get_latest_chunk_end_for_container(container_id)
+            .await
+            .unwrap_or(None)
+            .map(|ts| ts.timestamp())
+            .unwrap_or(0);
+
+        if resume_after > 0 {
+            info!(
+                container_id = container_id,
+                resume_after_ts = resume_after,
+                "Resuming log stream from last known position"
+            );
+        }
+
         let docker = self.docker.clone();
         let chunk_writer = self.chunk_writer.clone();
         let tail_tx = self.tail_tx.clone();
@@ -139,6 +160,7 @@ impl CollectorService {
                 container_id_owned.clone(),
                 ctx,
                 on_chunk_flushed,
+                resume_after,
             )
             .await;
         });
@@ -237,8 +259,8 @@ impl CollectorService {
         };
 
         let project_id = match labels.get(LABEL_PROJECT_ID) {
-            Some(id) => match Uuid::parse_str(id) {
-                Ok(uuid) => uuid,
+            Some(id) => match id.parse::<i32>() {
+                Ok(pid) => pid,
                 Err(_) => return Ok(None),
             },
             None => return Ok(None),
@@ -303,11 +325,13 @@ impl CollectorService {
         on_chunk_flushed: Option<
             Arc<dyn Fn(crate::types::ChunkMeta, Vec<LogLine>) + Send + Sync + 'static>,
         >,
+        resume_after: i64,
     ) {
         // Track the timestamp of the last successfully received line.
         // On reconnect we use this so we only re-fetch at most one second of overlap
-        // instead of the entire history.
-        let mut last_seen_ts: i64 = 0;
+        // instead of the entire history. On fresh startup, resume_after comes from
+        // the DB (latest chunk ended_at), preventing replay of already-collected logs.
+        let mut last_seen_ts: i64 = resume_after;
         let mut consecutive_errors: u32 = 0;
         let mut retry_delay = std::time::Duration::from_secs(1);
         let max_retry_delay = std::time::Duration::from_secs(30);

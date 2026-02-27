@@ -5,21 +5,6 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-/// Fixed namespace UUID for generating deterministic project UUIDs from integer IDs.
-/// This allows the log aggregator (which uses UUIDs) to map to the platform's integer project IDs.
-const PROJECT_UUID_NAMESPACE: Uuid = Uuid::from_bytes([
-    0x6b, 0xa7, 0xb8, 0x10, 0x9d, 0xad, 0x11, 0xd1, 0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8,
-]);
-
-/// Convert an integer project ID to a deterministic UUID.
-///
-/// Uses UUID v5 (SHA-1 name-based) with a fixed namespace so the same project_id
-/// always maps to the same UUID. This bridges the platform's `i32` project IDs
-/// with the log aggregator's UUID-based storage.
-pub fn project_id_to_uuid(project_id: i32) -> Uuid {
-    Uuid::new_v5(&PROJECT_UUID_NAMESPACE, project_id.to_string().as_bytes())
-}
-
 /// A single parsed log line ready for storage
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogLine {
@@ -38,10 +23,10 @@ pub struct LogLine {
     pub container_id: String,
     /// Service name from Docker label
     pub service: String,
-    /// Environment from Docker label
+    /// Environment (ID as string) from Docker label
     pub env: String,
-    /// Project UUID from Docker label
-    pub project_id: Uuid,
+    /// Platform integer project ID from Docker label
+    pub project_id: i32,
     /// Active deploy UUID at time of log
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deploy_id: Option<Uuid>,
@@ -112,7 +97,7 @@ impl std::fmt::Display for LogLevel {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChunkMeta {
     pub id: Uuid,
-    pub project_id: Uuid,
+    pub project_id: i32,
     pub env: String,
     pub service: String,
     pub container_id: String,
@@ -130,7 +115,7 @@ pub struct ChunkMeta {
 /// Enrichment context applied to every log line from a container
 #[derive(Debug, Clone)]
 pub struct ContainerContext {
-    pub project_id: Uuid,
+    pub project_id: i32,
     pub env: String,
     pub service: String,
     pub container_id: String,
@@ -140,7 +125,7 @@ pub struct ContainerContext {
 /// Search filter parameters
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogSearchFilter {
-    pub project_id: Uuid,
+    pub project_id: i32,
     pub start_time: DateTime<Utc>,
     pub end_time: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -266,7 +251,7 @@ pub struct ContextLine {
 /// Live tail filter
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TailFilter {
-    pub project_id: Uuid,
+    pub project_id: i32,
     pub service: String,
     pub env: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -278,7 +263,7 @@ pub struct TailFilter {
 /// Service tag
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceTag {
-    pub project_id: Uuid,
+    pub project_id: i32,
     pub service: String,
     pub key: String,
     pub value: String,
@@ -369,39 +354,6 @@ mod tests {
     }
 
     #[test]
-    fn test_project_id_to_uuid_determinism() {
-        // Same integer always maps to the same UUID
-        let uuid1 = project_id_to_uuid(42);
-        let uuid2 = project_id_to_uuid(42);
-        assert_eq!(uuid1, uuid2, "Same project_id must produce the same UUID");
-
-        // Different integers produce different UUIDs
-        let uuid3 = project_id_to_uuid(43);
-        assert_ne!(
-            uuid1, uuid3,
-            "Different project_ids must produce different UUIDs"
-        );
-
-        // Edge cases: 0, negative, i32::MAX, i32::MIN
-        let uuid_zero = project_id_to_uuid(0);
-        let uuid_neg = project_id_to_uuid(-1);
-        let uuid_max = project_id_to_uuid(i32::MAX);
-        let uuid_min = project_id_to_uuid(i32::MIN);
-        let all_uuids = vec![uuid_zero, uuid_neg, uuid_max, uuid_min, uuid1];
-        for i in 0..all_uuids.len() {
-            for j in (i + 1)..all_uuids.len() {
-                assert_ne!(
-                    all_uuids[i], all_uuids[j],
-                    "All project_id UUIDs must be unique"
-                );
-            }
-        }
-
-        // UUID version must be 5 (name-based SHA-1)
-        assert_eq!(uuid1.get_version_num(), 5, "Must be UUID v5");
-    }
-
-    #[test]
     fn test_log_line_serialization() {
         let line = LogLine {
             ts: Utc::now(),
@@ -411,8 +363,8 @@ mod tests {
             fields: Some(serde_json::json!({"key": "value"})),
             container_id: "abc123".to_string(),
             service: "web".to_string(),
-            env: "production".to_string(),
-            project_id: Uuid::new_v4(),
+            env: "2".to_string(),
+            project_id: 42,
             deploy_id: None,
         };
 
@@ -421,5 +373,6 @@ mod tests {
         assert_eq!(parsed.msg, "test message");
         assert_eq!(parsed.level, LogLevel::Info);
         assert_eq!(parsed.stream, LogStream::Stdout);
+        assert_eq!(parsed.project_id, 42);
     }
 }

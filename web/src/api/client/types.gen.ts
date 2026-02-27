@@ -889,6 +889,35 @@ export type ContainerResponse = {
 };
 
 /**
+ * A line in context response
+ */
+export type ContextLine = {
+    fields?: unknown;
+    /**
+     * Whether this line matched the original search
+     */
+    is_match: boolean;
+    level: LogLevel;
+    line_offset: number;
+    message: string;
+    timestamp: string;
+};
+
+export type ContextLogsRequest = {
+    chunk_id: string;
+    line_offset: number;
+    /**
+     * Number of context lines before and after (default: 25)
+     */
+    lines?: number | null;
+};
+
+export type ContextLogsResponse = {
+    lines: Array<ContextLine>;
+    target_index: number;
+};
+
+/**
  * Request to copy a blob
  */
 export type CopyBlobRequest = {
@@ -4640,6 +4669,30 @@ export type LocationInfo = {
     region?: string | null;
 };
 
+/**
+ * Normalized log level
+ */
+export type LogLevel = 'TRACE' | 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
+
+/**
+ * A single line in search results
+ */
+export type LogSearchLine = {
+    chunk_id: string;
+    deploy_id?: string | null;
+    fields?: unknown;
+    level: LogLevel;
+    line_offset: number;
+    message: string;
+    service: string;
+    timestamp: string;
+};
+
+/**
+ * Log output stream
+ */
+export type LogStream = 'stdout' | 'stderr';
+
 export type LoginRequest = {
     email: string;
     password: string;
@@ -6195,6 +6248,13 @@ export type PublicRepositoryInfo = {
     stars: number;
 };
 
+export type PurgeLogsRequest = {
+    /**
+     * Delete all logs before this timestamp (ISO 8601)
+     */
+    before: string;
+};
+
 /**
  * Request to push an external image
  */
@@ -6601,6 +6661,61 @@ export type ScreenshotSettings = {
     provider?: string;
     url?: string;
 };
+
+export type SearchLogsRequest = {
+    /**
+     * Pagination cursor
+     */
+    cursor?: string | null;
+    /**
+     * Filter by deploy ID
+     */
+    deploy_id?: string | null;
+    /**
+     * End of time range (ISO 8601). Defaults to now.
+     */
+    end_time?: string | null;
+    /**
+     * Filter by environments
+     */
+    envs?: Array<string>;
+    /**
+     * Filter by log levels
+     */
+    levels?: Array<string>;
+    /**
+     * Page size (default: 100, max: 500)
+     */
+    page_size?: number | null;
+    /**
+     * Project ID (integer, as used by the rest of the platform)
+     */
+    project_id: number;
+    /**
+     * Filter by services
+     */
+    services?: Array<string>;
+    /**
+     * Start of time range (ISO 8601). Defaults to 1 hour ago.
+     */
+    start_time?: string | null;
+    /**
+     * Full text search query
+     */
+    text?: string | null;
+};
+
+export type SearchLogsResponse = {
+    lines: Array<LogSearchLine>;
+    next_cursor?: string | null;
+    search_mode: SearchMode;
+    total_scanned: number;
+};
+
+/**
+ * Search execution mode
+ */
+export type SearchMode = 'index' | 'archive';
 
 /**
  * Security configuration for projects and environments
@@ -7626,6 +7741,17 @@ export type TagInfo = {
 
 export type TagListResponse = {
     tags: Array<TagInfo>;
+};
+
+export type TailLogsRequest = {
+    env: string;
+    levels?: Array<string>;
+    /**
+     * Project ID (integer, as used by the rest of the platform)
+     */
+    project_id: number;
+    service: string;
+    text?: string | null;
 };
 
 /**
@@ -16643,6 +16769,133 @@ export type LogoutResponses = {
     200: unknown;
 };
 
+export type GetLogContextData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Chunk ID
+         */
+        chunk_id: string;
+        /**
+         * Line offset within the chunk
+         */
+        line_offset: number;
+        /**
+         * Context lines before and after (default: 25)
+         */
+        lines?: number;
+    };
+    url: '/logs/context';
+};
+
+export type GetLogContextErrors = {
+    /**
+     * Invalid parameters
+     */
+    400: ProblemDetails;
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Chunk not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type GetLogContextError = GetLogContextErrors[keyof GetLogContextErrors];
+
+export type GetLogContextResponses = {
+    /**
+     * Context lines
+     */
+    200: ContextLogsResponse;
+};
+
+export type GetLogContextResponse = GetLogContextResponses[keyof GetLogContextResponses];
+
+export type SearchLogsData = {
+    body: SearchLogsRequest;
+    path?: never;
+    query?: never;
+    url: '/logs/search';
+};
+
+export type SearchLogsErrors = {
+    /**
+     * Invalid search parameters
+     */
+    400: ProblemDetails;
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type SearchLogsError = SearchLogsErrors[keyof SearchLogsErrors];
+
+export type SearchLogsResponses = {
+    /**
+     * Search results
+     */
+    200: SearchLogsResponse;
+};
+
+export type SearchLogsResponse2 = SearchLogsResponses[keyof SearchLogsResponses];
+
+export type TailLogsData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Project ID
+         */
+        project_id: string;
+        /**
+         * Service name
+         */
+        service: string;
+        /**
+         * Environment
+         */
+        env: string;
+        /**
+         * Optional level filters
+         */
+        levels: Array<string>;
+        /**
+         * Optional text filter
+         */
+        text?: string;
+    };
+    url: '/logs/tail';
+};
+
+export type TailLogsErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+};
+
+export type TailLogsError = TailLogsErrors[keyof TailLogsErrors];
+
+export type TailLogsResponses = {
+    /**
+     * SSE stream of log lines
+     */
+    200: unknown;
+};
+
 export type DeleteMonitorData = {
     body?: never;
     path: {
@@ -21699,6 +21952,46 @@ export type GetBucketedIncidentsResponses = {
 };
 
 export type GetBucketedIncidentsResponse = GetBucketedIncidentsResponses[keyof GetBucketedIncidentsResponses];
+
+export type PurgeProjectLogsData = {
+    body: PurgeLogsRequest;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/logs';
+};
+
+export type PurgeProjectLogsErrors = {
+    /**
+     * Invalid parameters
+     */
+    400: ProblemDetails;
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type PurgeProjectLogsError = PurgeProjectLogsErrors[keyof PurgeProjectLogsErrors];
+
+export type PurgeProjectLogsResponses = {
+    /**
+     * Purge completed
+     */
+    200: unknown;
+};
 
 export type ListMonitorsData = {
     body?: never;

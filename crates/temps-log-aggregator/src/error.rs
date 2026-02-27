@@ -9,7 +9,7 @@ pub enum LogAggregatorError {
     #[error("Failed to write chunk {chunk_id} for service '{service}' in project {project_id}: {reason}")]
     ChunkWriteFailed {
         chunk_id: Uuid,
-        project_id: Uuid,
+        project_id: i32,
         service: String,
         reason: String,
     },
@@ -33,7 +33,7 @@ pub enum LogAggregatorError {
 
     #[error("Failed to list chunks for project {project_id}, service '{service}': {reason}")]
     ChunkListFailed {
-        project_id: Uuid,
+        project_id: i32,
         service: String,
         reason: String,
     },
@@ -111,7 +111,7 @@ mod tests {
     fn test_error_display_includes_context() {
         let err = LogAggregatorError::ChunkWriteFailed {
             chunk_id: Uuid::nil(),
-            project_id: Uuid::nil(),
+            project_id: 0,
             service: "web".to_string(),
             reason: "disk full".to_string(),
         };

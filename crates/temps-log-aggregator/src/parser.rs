@@ -272,12 +272,19 @@ fn try_prefix_level(line: &str) -> Option<(LogLevel, String)> {
 ///
 /// Docker daemon logs come as: `2026-02-25T14:00:00.123456789Z message`
 pub fn parse_docker_timestamp(line: &str) -> (DateTime<Utc>, &str) {
-    // Docker timestamps are RFC 3339 with nanoseconds
-    // Try to find the space after the timestamp
+    // Docker timestamps are RFC 3339 with nanoseconds, always ASCII.
+    // Format: `2026-02-25T14:00:00.123456789Z <message>`
+    //
+    // We search for the first space in the line. The timestamp is pure ASCII
+    // so the space delimiter is always a single byte. We avoid fixed-offset
+    // byte slicing because the message portion may contain multi-byte UTF-8
+    // characters (e.g. `▲ Next.js ...`).
     if line.len() > 30 {
-        if let Some(space_pos) = line[..35.min(line.len())].find(' ') {
-            if let Ok(ts) = DateTime::parse_from_rfc3339(line[..space_pos].trim()) {
-                return (ts.with_timezone(&Utc), &line[space_pos + 1..]);
+        if let Some(space_pos) = line.find(' ') {
+            if space_pos <= 40 {
+                if let Ok(ts) = DateTime::parse_from_rfc3339(line[..space_pos].trim()) {
+                    return (ts.with_timezone(&Utc), &line[space_pos + 1..]);
+                }
             }
         }
     }
@@ -292,8 +299,8 @@ mod tests {
 
     fn test_ctx() -> ContainerContext {
         ContainerContext {
-            project_id: Uuid::new_v4(),
-            env: "production".to_string(),
+            project_id: 1,
+            env: "1".to_string(),
             service: "web".to_string(),
             container_id: "abc123".to_string(),
             deploy_id: None,
@@ -440,18 +447,38 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_docker_timestamp_with_multibyte_utf8() {
+        // Regression: the `▲` character is 3 bytes (U+25B2). A naive byte slice
+        // at a fixed offset (e.g. 35) can land inside this character and panic.
+        let line = "2026-02-26T21:44:10.430590805Z    ▲ Next.js 15.2.8\n";
+        let (ts, msg) = parse_docker_timestamp(line);
+        assert_eq!(ts.format("%Y-%m-%d").to_string(), "2026-02-26");
+        assert!(msg.contains("Next.js"));
+        assert!(msg.contains("▲"));
+    }
+
+    #[test]
+    fn test_parse_docker_timestamp_with_emoji() {
+        let line = "2026-02-26T12:00:00.000000000Z 🚀 Server started";
+        let (ts, msg) = parse_docker_timestamp(line);
+        assert_eq!(ts.format("%Y-%m-%d").to_string(), "2026-02-26");
+        assert!(msg.contains("🚀"));
+    }
+
+    #[test]
     fn test_context_fields_applied() {
         let ctx = ContainerContext {
-            project_id: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap(),
-            env: "staging".to_string(),
+            project_id: 7,
+            env: "2".to_string(),
             service: "api".to_string(),
             container_id: "container-abc".to_string(),
             deploy_id: Some(Uuid::parse_str("660e8400-e29b-41d4-a716-446655440000").unwrap()),
         };
         let line = parse_log_line("test", Utc::now(), LogStream::Stdout, &ctx);
         assert_eq!(line.service, "api");
-        assert_eq!(line.env, "staging");
+        assert_eq!(line.env, "2");
         assert_eq!(line.container_id, "container-abc");
+        assert_eq!(line.project_id, 7);
         assert!(line.deploy_id.is_some());
     }
 }

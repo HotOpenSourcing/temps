@@ -1,12 +1,10 @@
 //! Log search service
 //!
-//! Enforces time range constraints and routes queries to the appropriate execution path:
-//! - Structured filters on ERROR/WARN within 7 days: TimescaleDB log_events
-//! - Full text or INFO/DEBUG levels or > 7 days: S3/filesystem chunk scan
+//! All searches read directly from compressed chunk files on disk/S3.
+//! The log_chunks table provides the index of which files to read.
 
 use std::sync::Arc;
 
-use chrono::Duration;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
@@ -18,10 +16,7 @@ use crate::types::*;
 /// Maximum time range for full text search (hours)
 const MAX_FULLTEXT_HOURS: u32 = 24;
 
-/// Maximum time range for structured TimescaleDB search (days)
-const MAX_INDEX_DAYS: i64 = 7;
-
-/// Maximum concurrent S3 fetches for archive search
+/// Maximum concurrent chunk file fetches
 const MAX_CONCURRENT_FETCHES: usize = 20;
 
 /// Search service that routes log queries to the appropriate execution path.
@@ -46,17 +41,10 @@ impl LogSearchService {
         // Validate required params
         self.validate_filter(filter)?;
 
-        let time_range = filter.end_time - filter.start_time;
         let page_size = std::cmp::min(filter.page_size, 500) as u64;
 
-        // Determine execution path
-        let needs_archive = self.needs_archive_scan(filter, time_range);
-
-        if needs_archive {
-            self.archive_search(filter, page_size).await
-        } else {
-            self.index_search(filter, page_size).await
-        }
+        // Always search from chunk files — no log_events table needed
+        self.archive_search(filter, page_size).await
     }
 
     /// Get context lines around a specific log line in a chunk.
@@ -136,76 +124,7 @@ impl LogSearchService {
         Ok(())
     }
 
-    /// Determine if this query requires archive (S3/filesystem) scanning.
-    fn needs_archive_scan(&self, filter: &LogSearchFilter, time_range: Duration) -> bool {
-        // If querying INFO/DEBUG/TRACE levels, we need archive
-        let has_non_indexable = filter.levels.iter().any(|l| !l.is_indexable());
-        let no_levels_specified = filter.levels.is_empty();
-
-        // If time range exceeds 7 days, we need archive
-        let exceeds_index_range = time_range > Duration::days(MAX_INDEX_DAYS);
-
-        // If requesting all levels (empty = all), we need archive for INFO/DEBUG
-        (has_non_indexable || no_levels_specified) || exceeds_index_range
-    }
-
-    /// Search against TimescaleDB log_events index (fast path).
-    async fn index_search(
-        &self,
-        filter: &LogSearchFilter,
-        page_size: u64,
-    ) -> Result<LogSearchResult, LogAggregatorError> {
-        let events = self
-            .metadata_service
-            .query_log_events(
-                filter.project_id,
-                filter.start_time,
-                filter.end_time,
-                &filter.levels,
-                &filter.services,
-                filter.deploy_id,
-                page_size + 1, // Fetch one extra to detect next page
-            )
-            .await?;
-
-        let has_more = events.len() > page_size as usize;
-        let events = if has_more {
-            &events[..page_size as usize]
-        } else {
-            &events
-        };
-
-        let lines: Vec<LogSearchLine> = events
-            .iter()
-            .map(|e| LogSearchLine {
-                timestamp: e.time,
-                level: LogLevel::parse(&e.level).unwrap_or(LogLevel::Info),
-                service: e.service.clone(),
-                message: e.message.clone(),
-                fields: e.fields.clone(),
-                chunk_id: e.chunk_id,
-                line_offset: e.line_offset,
-                deploy_id: e.deploy_id,
-            })
-            .collect();
-
-        let next_cursor = if has_more {
-            lines
-                .last()
-                .map(|l| format!("{}:{}", l.timestamp.timestamp_millis(), l.chunk_id))
-        } else {
-            None
-        };
-
-        Ok(LogSearchResult {
-            lines,
-            next_cursor,
-            search_mode: SearchMode::Index,
-            total_scanned: events.len() as u64,
-        })
-    }
-
-    /// Search against S3/filesystem archive (slower path).
+    /// Search against S3/filesystem chunk files.
     ///
     /// 1. Query log_chunks metadata to identify relevant chunks
     /// 2. Fetch and decompress chunks in parallel
@@ -304,8 +223,8 @@ impl LogSearchService {
             }
         }
 
-        // Sort by timestamp descending
-        all_matches.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        // Sort by timestamp ascending (oldest first, like a terminal)
+        all_matches.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
 
         let has_more = all_matches.len() > page_size as usize;
         all_matches.truncate(page_size as usize);
@@ -413,11 +332,11 @@ impl LogSearchService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
+    use chrono::{Duration, Utc};
 
     fn make_filter() -> LogSearchFilter {
         LogSearchFilter {
-            project_id: Uuid::new_v4(),
+            project_id: 1,
             start_time: Utc::now() - Duration::hours(1),
             end_time: Utc::now() + Duration::hours(1),
             levels: vec![],
@@ -440,47 +359,10 @@ mod tests {
             fields: None,
             container_id: "cnt1".to_string(),
             service: "web".to_string(),
-            env: "production".to_string(),
-            project_id: Uuid::new_v4(),
+            env: "1".to_string(),
+            project_id: 1,
             deploy_id: None,
         }
-    }
-
-    #[test]
-    fn test_needs_archive_scan_with_info_level() {
-        let storage: Arc<dyn LogStorage> = Arc::new(
-            crate::storage::FilesystemStorage::new(std::path::PathBuf::from("/tmp/test-logs-na"))
-                .unwrap_or_else(|_| {
-                    // Fallback for test environments
-                    panic!("test setup failed")
-                }),
-        );
-        let metadata = Arc::new(LogMetadataService::new(Arc::new(
-            sea_orm::DatabaseConnection::Disconnected,
-        )));
-        let service = LogSearchService::new(storage, metadata);
-
-        let mut filter = make_filter();
-        filter.levels = vec![LogLevel::Info];
-        let time_range = filter.end_time - filter.start_time;
-        assert!(service.needs_archive_scan(&filter, time_range));
-    }
-
-    #[test]
-    fn test_needs_archive_scan_error_only_within_range() {
-        let storage: Arc<dyn LogStorage> = Arc::new(
-            crate::storage::FilesystemStorage::new(std::path::PathBuf::from("/tmp/test-logs-eo"))
-                .unwrap_or_else(|_| panic!("test setup failed")),
-        );
-        let metadata = Arc::new(LogMetadataService::new(Arc::new(
-            sea_orm::DatabaseConnection::Disconnected,
-        )));
-        let service = LogSearchService::new(storage, metadata);
-
-        let mut filter = make_filter();
-        filter.levels = vec![LogLevel::Error];
-        let time_range = filter.end_time - filter.start_time;
-        assert!(!service.needs_archive_scan(&filter, time_range));
     }
 
     #[test]
@@ -589,8 +471,8 @@ mod tests {
         use crate::types::ContainerContext;
 
         /// Shared project_id for integration tests
-        fn test_project_id() -> Uuid {
-            Uuid::parse_str("a0000000-0000-0000-0000-000000000001").unwrap()
+        fn test_project_id() -> i32 {
+            50001
         }
 
         fn test_deploy_id() -> Uuid {

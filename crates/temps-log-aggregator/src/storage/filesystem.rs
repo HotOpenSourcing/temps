@@ -70,7 +70,7 @@ impl LogStorage for FilesystemStorage {
             .await
             .map_err(|e| LogAggregatorError::ChunkWriteFailed {
                 chunk_id: uuid::Uuid::nil(),
-                project_id: uuid::Uuid::nil(),
+                project_id: 0,
                 service: String::new(),
                 reason: format!("Failed to write to '{}': {}", path.display(), e),
             })?;
@@ -127,7 +127,7 @@ impl LogStorage for FilesystemStorage {
         while let Some(current_dir) = stack.pop() {
             let mut entries = tokio::fs::read_dir(&current_dir).await.map_err(|e| {
                 LogAggregatorError::ChunkListFailed {
-                    project_id: uuid::Uuid::nil(),
+                    project_id: 0,
                     service: String::new(),
                     reason: format!(
                         "Failed to read directory '{}': {}",
@@ -142,7 +142,7 @@ impl LogStorage for FilesystemStorage {
                     .next_entry()
                     .await
                     .map_err(|e| LogAggregatorError::ChunkListFailed {
-                        project_id: uuid::Uuid::nil(),
+                        project_id: 0,
                         service: String::new(),
                         reason: format!("Failed to read directory entry: {}", e),
                     })?

@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
 use tracing::{debug, error, info, warn};
-use uuid::Uuid;
 
 use crate::error::LogAggregatorError;
 use crate::services::LogMetadataService;
@@ -46,7 +45,7 @@ impl RetentionService {
     /// Storage object is deleted first; metadata row is deleted only after confirmed.
     pub async fn cleanup_project(
         &self,
-        project_id: Uuid,
+        project_id: i32,
         config: &RetentionConfig,
     ) -> Result<RetentionResult, LogAggregatorError> {
         let cutoff = Utc::now() - Duration::days(config.chunk_retention_days as i64);
@@ -133,7 +132,7 @@ impl RetentionService {
     /// Deletes both S3 chunks and log_events rows within the time range.
     pub async fn manual_purge(
         &self,
-        project_id: Uuid,
+        project_id: i32,
         before: DateTime<Utc>,
     ) -> Result<RetentionResult, LogAggregatorError> {
         info!(

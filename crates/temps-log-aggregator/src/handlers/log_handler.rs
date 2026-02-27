@@ -122,7 +122,7 @@ impl From<LogAggregatorError> for Problem {
 #[derive(Debug, Clone, serde::Serialize)]
 struct LogsPurgedAudit {
     pub context: temps_core::AuditContext,
-    pub project_id: Uuid,
+    pub project_id: i32,
     pub before_timestamp: String,
     pub chunks_deleted: u64,
 }
@@ -153,9 +153,8 @@ impl temps_core::AuditOperation for LogsPurgedAudit {
 
 #[derive(Deserialize, ToSchema)]
 pub struct SearchLogsRequest {
-    /// Project ID (required)
-    #[schema(value_type = String)]
-    pub project_id: Uuid,
+    /// Project ID (integer, as used by the rest of the platform)
+    pub project_id: i32,
     /// Start of time range (ISO 8601). Defaults to 1 hour ago.
     pub start_time: Option<String>,
     /// End of time range (ISO 8601). Defaults to now.
@@ -205,8 +204,8 @@ pub struct ContextLogsResponse {
 
 #[derive(Deserialize, ToSchema)]
 pub struct TailLogsRequest {
-    #[schema(value_type = String)]
-    pub project_id: Uuid,
+    /// Project ID (integer, as used by the rest of the platform)
+    pub project_id: i32,
     pub service: String,
     pub env: String,
     #[serde(default)]
@@ -433,7 +432,7 @@ async fn tail_logs(
     delete,
     path = "/projects/{project_id}/logs",
     params(
-        ("project_id" = String, Path, description = "Project ID"),
+        ("project_id" = i32, Path, description = "Project ID"),
     ),
     request_body = PurgeLogsRequest,
     responses(
@@ -449,7 +448,7 @@ async fn purge_project_logs(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<LogAggregatorAppState>>,
     Extension(metadata): Extension<RequestMetadata>,
-    Path(project_id): Path<Uuid>,
+    Path(project_id): Path<i32>,
     Json(request): Json<PurgeLogsRequest>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, LogsDelete);
@@ -472,7 +471,7 @@ async fn purge_project_logs(
             ip_address: Some(metadata.ip_address.clone()),
             user_agent: metadata.user_agent.clone(),
         },
-        project_id,
+        project_id: project_id as i32,
         before_timestamp: request.before,
         chunks_deleted: result.chunks_deleted,
     };
@@ -499,11 +498,20 @@ mod tests {
     use temps_database::test_utils::TestDatabase;
     use uuid::Uuid;
 
+    use std::sync::atomic::{AtomicI32, Ordering};
+
     use crate::services::{
         ChunkWriterService, LogMetadataService, LogSearchService, RetentionService, TailService,
     };
     use crate::storage::FilesystemStorage;
     use crate::types::{LogLevel, LogLine, LogStream};
+
+    /// Atomic counter for unique test project IDs (avoids cross-test collision)
+    static TEST_PROJECT_COUNTER: AtomicI32 = AtomicI32::new(10_000);
+
+    fn next_test_project_id() -> i32 {
+        TEST_PROJECT_COUNTER.fetch_add(1, Ordering::Relaxed)
+    }
 
     // ── Mock audit logger ───────────────────────────────────────────────
 
@@ -654,7 +662,7 @@ mod tests {
 
     /// Create a test log line with the given parameters.
     fn make_log_line(
-        project_id: Uuid,
+        project_id: i32,
         service: &str,
         env: &str,
         level: LogLevel,
@@ -703,20 +711,6 @@ mod tests {
             .insert_chunk_meta(&flush_result.meta)
             .await
             .expect("Failed to insert chunk metadata");
-
-        // Insert indexable log events (ERROR/WARN)
-        let indexable: Vec<(usize, &LogLine)> = lines
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| l.level.is_indexable())
-            .collect();
-
-        if !indexable.is_empty() {
-            ctx.metadata_service
-                .insert_log_events(flush_result.meta.id, &lines, &indexable)
-                .await
-                .expect("Failed to insert log events");
-        }
     }
 
     // ── Tests ───────────────────────────────────────────────────────────
@@ -725,7 +719,7 @@ mod tests {
     #[serial_test::serial]
     async fn test_search_logs_returns_results() {
         let ctx = create_test_context().await;
-        let project_id = Uuid::new_v4();
+        let project_id = next_test_project_id();
         let now = Utc::now();
 
         // Seed some log lines
@@ -765,7 +759,7 @@ mod tests {
         let response = server
             .post("/logs/search")
             .json(&serde_json::json!({
-                "project_id": project_id.to_string(),
+                "project_id": project_id,
                 "start_time": (now - Duration::hours(1)).to_rfc3339(),
                 "end_time": (now + Duration::hours(1)).to_rfc3339(),
             }))
@@ -785,7 +779,7 @@ mod tests {
     #[serial_test::serial]
     async fn test_search_logs_empty_project() {
         let ctx = create_test_context().await;
-        let project_id = Uuid::new_v4(); // No logs seeded
+        let project_id = next_test_project_id(); // No logs seeded
 
         let server = build_test_server(ctx.app_state.clone());
         let now = Utc::now();
@@ -793,7 +787,7 @@ mod tests {
         let response = server
             .post("/logs/search")
             .json(&serde_json::json!({
-                "project_id": project_id.to_string(),
+                "project_id": project_id,
                 "start_time": (now - Duration::hours(1)).to_rfc3339(),
                 "end_time": (now + Duration::hours(1)).to_rfc3339(),
             }))
@@ -814,7 +808,7 @@ mod tests {
     #[serial_test::serial]
     async fn test_search_logs_filters_by_level() {
         let ctx = create_test_context().await;
-        let project_id = Uuid::new_v4();
+        let project_id = next_test_project_id();
         let now = Utc::now();
 
         let lines = vec![
@@ -853,7 +847,7 @@ mod tests {
         let response = server
             .post("/logs/search")
             .json(&serde_json::json!({
-                "project_id": project_id.to_string(),
+                "project_id": project_id,
                 "start_time": (now - Duration::hours(1)).to_rfc3339(),
                 "end_time": (now + Duration::hours(1)).to_rfc3339(),
                 "levels": ["ERROR"],
@@ -883,7 +877,7 @@ mod tests {
     #[serial_test::serial]
     async fn test_search_logs_filters_by_service() {
         let ctx = create_test_context().await;
-        let project_id = Uuid::new_v4();
+        let project_id = next_test_project_id();
         let now = Utc::now();
 
         // Seed logs for two different services in separate containers
@@ -913,7 +907,7 @@ mod tests {
         let response = server
             .post("/logs/search")
             .json(&serde_json::json!({
-                "project_id": project_id.to_string(),
+                "project_id": project_id,
                 "start_time": (now - Duration::hours(1)).to_rfc3339(),
                 "end_time": (now + Duration::hours(1)).to_rfc3339(),
                 "services": ["web"],
@@ -942,7 +936,7 @@ mod tests {
     #[serial_test::serial]
     async fn test_search_logs_fulltext_search() {
         let ctx = create_test_context().await;
-        let project_id = Uuid::new_v4();
+        let project_id = next_test_project_id();
         let now = Utc::now();
 
         let lines = vec![
@@ -972,7 +966,7 @@ mod tests {
         let response = server
             .post("/logs/search")
             .json(&serde_json::json!({
-                "project_id": project_id.to_string(),
+                "project_id": project_id,
                 "start_time": (now - Duration::hours(1)).to_rfc3339(),
                 "end_time": (now + Duration::hours(1)).to_rfc3339(),
                 "text": "Connection refused",
@@ -1000,7 +994,7 @@ mod tests {
     #[serial_test::serial]
     async fn test_get_log_context() {
         let ctx = create_test_context().await;
-        let project_id = Uuid::new_v4();
+        let project_id = next_test_project_id();
         let now = Utc::now();
 
         // Seed enough lines to have meaningful context
@@ -1028,7 +1022,7 @@ mod tests {
         let search_response = server
             .post("/logs/search")
             .json(&serde_json::json!({
-                "project_id": project_id.to_string(),
+                "project_id": project_id,
                 "start_time": (now - Duration::hours(1)).to_rfc3339(),
                 "end_time": (now + Duration::hours(1)).to_rfc3339(),
             }))
@@ -1096,7 +1090,7 @@ mod tests {
     #[serial_test::serial]
     async fn test_purge_project_logs() {
         let ctx = create_test_context().await;
-        let project_id = Uuid::new_v4();
+        let project_id = next_test_project_id();
         let now = Utc::now();
 
         // Seed logs that we'll purge
@@ -1144,7 +1138,7 @@ mod tests {
         let search_response = server
             .post("/logs/search")
             .json(&serde_json::json!({
-                "project_id": project_id.to_string(),
+                "project_id": project_id,
                 "start_time": (now - Duration::hours(3)).to_rfc3339(),
                 "end_time": (now + Duration::hours(1)).to_rfc3339(),
             }))
@@ -1167,7 +1161,7 @@ mod tests {
         let server = build_test_server(ctx.app_state.clone());
 
         let response = server
-            .delete(&format!("/projects/{}/logs", Uuid::new_v4()))
+            .delete(&format!("/projects/{}/logs", next_test_project_id()))
             .json(&serde_json::json!({
                 "before": "not-a-valid-timestamp",
             }))
@@ -1187,7 +1181,7 @@ mod tests {
         use tokio::net::TcpListener;
 
         let ctx = create_test_context().await;
-        let project_id = Uuid::new_v4();
+        let project_id = next_test_project_id();
         let tail_tx = ctx.tail_tx.clone();
 
         // SSE endpoints stream indefinitely so we can't use axum-test's .await
@@ -1293,7 +1287,7 @@ mod tests {
     #[serial_test::serial]
     async fn test_search_logs_with_pagination() {
         let ctx = create_test_context().await;
-        let project_id = Uuid::new_v4();
+        let project_id = next_test_project_id();
         let now = Utc::now();
 
         // Seed many log lines
@@ -1317,7 +1311,7 @@ mod tests {
         let response = server
             .post("/logs/search")
             .json(&serde_json::json!({
-                "project_id": project_id.to_string(),
+                "project_id": project_id,
                 "start_time": (now - Duration::hours(1)).to_rfc3339(),
                 "end_time": (now + Duration::hours(1)).to_rfc3339(),
                 "page_size": 5,
@@ -1347,7 +1341,7 @@ mod tests {
         let response = server
             .post("/logs/search")
             .json(&serde_json::json!({
-                "project_id": Uuid::new_v4().to_string(),
+                "project_id": 99999,
                 "start_time": (now - Duration::hours(1)).to_rfc3339(),
                 "end_time": (now + Duration::hours(1)).to_rfc3339(),
             }))
@@ -1366,7 +1360,7 @@ mod tests {
     #[serial_test::serial]
     async fn test_reader_cannot_purge_logs() {
         let ctx = create_test_context().await;
-        let project_id = Uuid::new_v4();
+        let project_id = next_test_project_id();
         let now = Utc::now();
 
         // Seed some logs so purge has something to target
@@ -1403,7 +1397,7 @@ mod tests {
     #[serial_test::serial]
     async fn test_reader_can_search_logs() {
         let ctx = create_test_context().await;
-        let project_id = Uuid::new_v4();
+        let project_id = next_test_project_id();
         let now = Utc::now();
 
         let lines = vec![make_log_line(
@@ -1423,7 +1417,7 @@ mod tests {
         let response = server
             .post("/logs/search")
             .json(&serde_json::json!({
-                "project_id": project_id.to_string(),
+                "project_id": project_id,
                 "start_time": (now - Duration::hours(1)).to_rfc3339(),
                 "end_time": (now + Duration::hours(1)).to_rfc3339(),
             }))

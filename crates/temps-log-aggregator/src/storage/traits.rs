@@ -48,9 +48,10 @@ pub trait LogStorage: Send + Sync + 'static {
 
 /// Build the storage key for a log chunk.
 ///
-/// Layout: `logs/{project_id}/{service}/{YYYY-MM-DD}/{HH}/{container_id}-{sequence}.ndjson.zst`
+/// Layout: `logs/{project_id}/{env}/{service}/{YYYY-MM-DD}/{HH}/{container_id}-{sequence}.ndjson.zst`
 pub fn build_storage_key(
-    project_id: &uuid::Uuid,
+    project_id: i32,
+    env: &str,
     service: &str,
     date: &chrono::NaiveDate,
     hour: u32,
@@ -58,8 +59,9 @@ pub fn build_storage_key(
     sequence: u64,
 ) -> String {
     format!(
-        "logs/{project_id}/{service}/{date}/{hour:02}/{container_id}-{sequence:06}.ndjson.zst",
+        "logs/{project_id}/{env}/{service}/{date}/{hour:02}/{container_id}-{sequence:06}.ndjson.zst",
         project_id = project_id,
+        env = env,
         service = service,
         date = date.format("%Y-%m-%d"),
         hour = hour,
@@ -72,24 +74,21 @@ pub fn build_storage_key(
 mod tests {
     use super::*;
     use chrono::NaiveDate;
-    use uuid::Uuid;
 
     #[test]
     fn test_build_storage_key() {
-        let project_id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
         let date = NaiveDate::from_ymd_opt(2026, 2, 25).unwrap();
-        let key = build_storage_key(&project_id, "web", &date, 14, "abc123def456", 1);
+        let key = build_storage_key(2, "3", "web", &date, 14, "abc123def456", 1);
         assert_eq!(
             key,
-            "logs/550e8400-e29b-41d4-a716-446655440000/web/2026-02-25/14/abc123def456-000001.ndjson.zst"
+            "logs/2/3/web/2026-02-25/14/abc123def456-000001.ndjson.zst"
         );
     }
 
     #[test]
     fn test_build_storage_key_truncates_long_container_id() {
-        let project_id = Uuid::new_v4();
         let date = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
-        let key = build_storage_key(&project_id, "api", &date, 0, "abcdef123456789extra", 42);
+        let key = build_storage_key(5, "1", "api", &date, 0, "abcdef123456789extra", 42);
         assert!(key.contains("abcdef123456-000042.ndjson.zst"));
     }
 }
