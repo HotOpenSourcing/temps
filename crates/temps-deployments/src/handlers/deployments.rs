@@ -2066,8 +2066,7 @@ mod tests {
         let app_state = create_test_app_state_for_http(db.clone(), temp_dir.clone()).await;
         let log_service = app_state.log_service.clone();
 
-        // Create test data - use Dockerfile preset (not Static) since container
-        // logs are only available for server-type projects
+        // Create test data
         let project = projects::ActiveModel {
             name: Set("Test Project".to_string()),
             slug: Set("test-project".to_string()),
@@ -2075,7 +2074,7 @@ mod tests {
             repo_owner: Set("test-owner".to_string()),
             directory: Set("/tmp/test-project".to_string()),
             main_branch: Set("main".to_string()),
-            preset: Set(temps_entities::preset::Preset::Dockerfile),
+            preset: Set(temps_entities::preset::Preset::Static),
             ..Default::default()
         }
         .insert(&*db)
@@ -2118,46 +2117,75 @@ mod tests {
             .await
             .expect("Failed to update environment with deployment");
 
-        // Create a test container in the database
+        // Create a test container
+        let container_id = "test-container-123";
+        let now = chrono::Utc::now();
         let container = containers::ActiveModel {
             deployment_id: Set(deployment.id),
-            container_id: Set("test-container-123".to_string()),
+            container_id: Set(container_id.to_string()),
             container_name: Set("test-container".to_string()),
-            status: Set("running".to_string()),
+            container_port: Set(8080),
+            image_name: Set(Some("nginx:latest".to_string())),
+            status: Set(Some("running".to_string())),
+            created_at: Set(now),
+            deployed_at: Set(now),
             ..Default::default()
         }
         .insert(&*db)
         .await
         .expect("Failed to create test container");
 
-        // Start test server
+        // Pre-populate container logs with structured logs
+        log_service
+            .append_structured_log(
+                container_id,
+                temps_logs::LogLevel::Info,
+                "Container log line 1",
+            )
+            .await
+            .expect("Failed to write container log");
+        log_service
+            .append_structured_log(
+                container_id,
+                temps_logs::LogLevel::Info,
+                "Container log line 2",
+            )
+            .await
+            .expect("Failed to write container log");
+
+        // Create auth middleware
         let auth_middleware = middleware::from_fn(
             |mut req: Request, next: axum::middleware::Next| async move {
-                req.extensions_mut().insert(test_auth());
-                req.extensions_mut()
-                    .insert(temps_core::middleware::RequestMetadata {
-                        ip_address: "127.0.0.1".to_string(),
-                        user_agent: Some("test-agent".to_string()),
-                    });
+                let auth_context = create_test_auth_context();
+                req.extensions_mut().insert(auth_context);
                 next.run(req).await
             },
         );
 
-        let app = crate::handlers::deployments::router()
+        // Create router
+        let app = Router::new()
+            .route(
+                "/api/projects/{project_id}/environments/{environment_id}/containers/{container_id}/logs",
+                get(get_container_logs_by_id),
+            )
             .layer(auth_middleware)
-            .with_state(app_state);
+            .with_state(app_state.clone());
 
+        // Start server
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("Failed to bind test server");
+            .expect("Failed to bind");
         let addr = listener.local_addr().expect("Failed to get local address");
 
         tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
+            axum::serve(listener, app)
+                .await
+                .expect("Server failed to start");
         });
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        // Connect to the WebSocket endpoint for container-by-id logs
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Connect to WebSocket
         let ws_url = format!(
             "ws://{}/api/projects/{}/environments/{}/containers/{}/logs",
             addr, project.id, environment.id, container.container_id
@@ -2258,8 +2286,7 @@ mod tests {
         let app_state = create_test_app_state_for_http(db.clone(), temp_dir.clone()).await;
         let log_service = app_state.log_service.clone();
 
-        // Create test data - use Dockerfile preset (not Static) since container
-        // logs are only available for server-type projects
+        // Create test data
         let project = projects::ActiveModel {
             name: Set("Test Project".to_string()),
             slug: Set("test-project".to_string()),
@@ -2267,7 +2294,7 @@ mod tests {
             repo_owner: Set("test-owner".to_string()),
             directory: Set("/tmp/test-project".to_string()),
             main_branch: Set("main".to_string()),
-            preset: Set(temps_entities::preset::Preset::Dockerfile),
+            preset: Set(temps_entities::preset::Preset::Static),
             ..Default::default()
         }
         .insert(&*db)
