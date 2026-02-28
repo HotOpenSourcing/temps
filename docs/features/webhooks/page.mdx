@@ -1,0 +1,740 @@
+export const metadata = {
+  title: 'Webhooks',
+  description: 'Real-time notifications about events in your Temps projects via HTTP webhooks.',
+  alternates: {
+    canonical: '/docs/features/webhooks',
+  },
+}
+
+# Webhooks
+
+Webhooks allow you to receive real-time notifications about events in your Temps projects. When an event occurs (like a deployment succeeding or a domain being provisioned), Temps will send an HTTP POST request to your configured webhook URL with a JSON payload containing event details.
+
+## Webhook Event Structure
+
+All webhook events follow this base structure:
+
+```json
+{
+  "id": "58fe24a7-3e21-451d-9210-33093e6f91cc",
+  "event_type": "deployment_succeeded",
+  "timestamp": "2025-11-24T18:38:10.000Z",
+  "project_id": 1,
+  "payload": {
+    // Event-specific data (see below)
+  }
+}
+```
+
+### Base Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | `string` | Unique identifier for this event (UUID) |
+| `event_type` | `string` | Type of event (see Event Types below) |
+| `timestamp` | `string` | ISO 8601 timestamp when the event occurred |
+| `project_id` | `number` or `null` | ID of the project this event relates to |
+| `payload` | `object` | Event-specific data (structure varies by event type) |
+
+## Event Types
+
+### Deployment Events
+
+Events related to deployment lifecycle.
+
+#### `deployment.created`
+
+Triggered when a new deployment is initiated.
+
+**Payload Structure:**
+
+```typescript
+{
+  deployment_id: number
+  project_id: number
+  project_name: string
+  environment: string
+  branch: string | null
+  commit_sha: string | null
+  commit_message: string | null
+  url: string | null
+  status: string
+  error_message: string | null
+  started_at: string | null      // ISO 8601 timestamp
+  finished_at: string | null      // ISO 8601 timestamp
+}
+```
+
+**Example:**
+
+```json
+{
+  "id": "58fe24a7-3e21-451d-9210-33093e6f91cc",
+  "event_type": "deployment_created",
+  "timestamp": "2025-11-24T18:35:00.000Z",
+  "project_id": 1,
+  "payload": {
+    "deployment_id": 123,
+    "project_id": 1,
+    "project_name": "my-app",
+    "environment": "production",
+    "branch": "main",
+    "commit_sha": "abc123def456",
+    "commit_message": "Deploy version 2.0",
+    "url": null,
+    "status": "pending",
+    "error_message": null,
+    "started_at": "2025-11-24T18:35:00.000Z",
+    "finished_at": null
+  }
+}
+```
+
+#### `deployment.succeeded`
+
+Triggered when a deployment completes successfully.
+
+**Payload Structure:** Same as `deployment.created`
+
+**Example:**
+
+```json
+{
+  "id": "58fe24a7-3e21-451d-9210-33093e6f91cc",
+  "event_type": "deployment_succeeded",
+  "timestamp": "2025-11-24T18:38:10.000Z",
+  "project_id": 1,
+  "payload": {
+    "deployment_id": 123,
+    "project_id": 1,
+    "project_name": "my-app",
+    "environment": "production",
+    "branch": "main",
+    "commit_sha": "abc123def456",
+    "commit_message": "Deploy version 2.0",
+    "url": "https://my-app.temps.dev",
+    "status": "succeeded",
+    "error_message": null,
+    "started_at": "2025-11-24T18:35:00.000Z",
+    "finished_at": "2025-11-24T18:38:10.000Z"
+  }
+}
+```
+
+#### `deployment.failed`
+
+Triggered when a deployment fails.
+
+**Payload Structure:** Same as `deployment.created`
+
+**Example:**
+
+```json
+{
+  "id": "58fe24a7-3e21-451d-9210-33093e6f91cc",
+  "event_type": "deployment_failed",
+  "timestamp": "2025-11-24T18:38:10.000Z",
+  "project_id": 1,
+  "payload": {
+    "deployment_id": 123,
+    "project_id": 1,
+    "project_name": "my-app",
+    "environment": "production",
+    "branch": "main",
+    "commit_sha": "abc123def456",
+    "commit_message": "Deploy version 2.0",
+    "url": null,
+    "status": "failed",
+    "error_message": "Build failed: npm run build exited with code 1",
+    "started_at": "2025-11-24T18:35:00.000Z",
+    "finished_at": "2025-11-24T18:38:10.000Z"
+  }
+}
+```
+
+#### `deployment.cancelled`
+
+Triggered when a deployment is cancelled by a user.
+
+**Payload Structure:** Same as `deployment.created`
+
+#### `deployment.ready`
+
+Triggered when a deployment is ready to receive traffic.
+
+**Payload Structure:** Same as `deployment.created`
+
+### Project Events
+
+Events related to project lifecycle.
+
+#### `project.created`
+
+Triggered when a new project is created.
+
+**Payload Structure:**
+
+```typescript
+{
+  project_id: number
+  project_name: string
+  slug: string
+  repo_url: string | null
+}
+```
+
+**Example:**
+
+```json
+{
+  "id": "9a8b7c6d-5e4f-3a2b-1c0d-9e8f7a6b5c4d",
+  "event_type": "project_created",
+  "timestamp": "2025-11-24T12:00:00.000Z",
+  "project_id": 1,
+  "payload": {
+    "project_id": 1,
+    "project_name": "My New Project",
+    "slug": "my-new-project",
+    "repo_url": "https://github.com/user/my-repo"
+  }
+}
+```
+
+#### `project.deleted`
+
+Triggered when a project is deleted.
+
+**Payload Structure:** Same as `project.created`
+
+### Domain Events
+
+Events related to custom domains and SSL provisioning.
+
+#### `domain.created`
+
+Triggered when a new domain is added to a project.
+
+**Payload Structure:**
+
+```typescript
+{
+  domain_id: number
+  domain_name: string
+  project_id: number
+  project_name: string
+  is_primary: boolean
+  ssl_status: string | null
+}
+```
+
+**Example:**
+
+```json
+{
+  "id": "7f6e5d4c-3b2a-1098-7654-3210fedcba98",
+  "event_type": "domain_created",
+  "timestamp": "2025-11-24T14:30:00.000Z",
+  "project_id": 1,
+  "payload": {
+    "domain_id": 5,
+    "domain_name": "example.com",
+    "project_id": 1,
+    "project_name": "my-app",
+    "is_primary": true,
+    "ssl_status": "pending"
+  }
+}
+```
+
+#### `domain.provisioned`
+
+Triggered when SSL is provisioned for a domain (via Let's Encrypt).
+
+**Payload Structure:** Same as `domain.created`
+
+**Example:**
+
+```json
+{
+  "id": "7f6e5d4c-3b2a-1098-7654-3210fedcba98",
+  "event_type": "domain_provisioned",
+  "timestamp": "2025-11-24T14:35:00.000Z",
+  "project_id": 1,
+  "payload": {
+    "domain_id": 5,
+    "domain_name": "example.com",
+    "project_id": 1,
+    "project_name": "my-app",
+    "is_primary": true,
+    "ssl_status": "provisioned"
+  }
+}
+```
+
+## API Endpoints
+
+### List Available Event Types
+
+Get a list of all available webhook event types.
+
+```http
+GET /webhook-event-types
+```
+
+**Response:**
+
+```json
+[
+  {
+    "event_type": "deployment.created",
+    "description": "Triggered when a new deployment is initiated",
+    "category": "Deployment"
+  },
+  {
+    "event_type": "deployment.succeeded",
+    "description": "Triggered when a deployment completes successfully",
+    "category": "Deployment"
+  }
+  // ... more event types
+]
+```
+
+### Create a Webhook
+
+Create a new webhook for a project.
+
+```http
+POST /projects/{project_id}/webhooks
+Authorization: Bearer {token}
+Content-Type: application/json
+```
+
+**Request Body:**
+
+```json
+{
+  "url": "https://example.com/webhook",
+  "secret": "your-secret-key",
+  "events": [
+    "deployment.created",
+    "deployment.succeeded",
+    "deployment.failed"
+  ],
+  "enabled": true
+}
+```
+
+**Response (201 Created):**
+
+```json
+{
+  "id": 1,
+  "project_id": 1,
+  "url": "https://example.com/webhook",
+  "events": [
+    "deployment.created",
+    "deployment.succeeded",
+    "deployment.failed"
+  ],
+  "enabled": true,
+  "has_secret": true,
+  "created_at": "2025-11-24T12:00:00.000Z",
+  "updated_at": "2025-11-24T12:00:00.000Z"
+}
+```
+
+### List Webhooks
+
+List all webhooks for a project.
+
+```http
+GET /projects/{project_id}/webhooks
+Authorization: Bearer {token}
+```
+
+**Response (200 OK):**
+
+```json
+[
+  {
+    "id": 1,
+    "project_id": 1,
+    "url": "https://example.com/webhook",
+    "events": ["deployment.succeeded"],
+    "enabled": true,
+    "has_secret": true,
+    "created_at": "2025-11-24T12:00:00.000Z",
+    "updated_at": "2025-11-24T12:00:00.000Z"
+  }
+]
+```
+
+### Get a Webhook
+
+Get details of a specific webhook.
+
+```http
+GET /projects/{project_id}/webhooks/{webhook_id}
+Authorization: Bearer {token}
+```
+
+**Response (200 OK):**
+
+```json
+{
+  "id": 1,
+  "project_id": 1,
+  "url": "https://example.com/webhook",
+  "events": ["deployment.succeeded"],
+  "enabled": true,
+  "has_secret": true,
+  "created_at": "2025-11-24T12:00:00.000Z",
+  "updated_at": "2025-11-24T12:00:00.000Z"
+}
+```
+
+### Update a Webhook
+
+Update an existing webhook.
+
+```http
+PUT /projects/{project_id}/webhooks/{webhook_id}
+Authorization: Bearer {token}
+Content-Type: application/json
+```
+
+**Request Body (all fields optional):**
+
+```json
+{
+  "url": "https://example.com/new-webhook",
+  "secret": "new-secret-key",
+  "events": ["deployment.succeeded", "deployment.failed"],
+  "enabled": false
+}
+```
+
+**Response (200 OK):**
+
+```json
+{
+  "id": 1,
+  "project_id": 1,
+  "url": "https://example.com/new-webhook",
+  "events": ["deployment.succeeded", "deployment.failed"],
+  "enabled": false,
+  "has_secret": true,
+  "created_at": "2025-11-24T12:00:00.000Z",
+  "updated_at": "2025-11-24T12:15:00.000Z"
+}
+```
+
+### Delete a Webhook
+
+Delete a webhook.
+
+```http
+DELETE /projects/{project_id}/webhooks/{webhook_id}
+Authorization: Bearer {token}
+```
+
+**Response (204 No Content)**
+
+### List Webhook Deliveries
+
+Get delivery history for a webhook.
+
+```http
+GET /projects/{project_id}/webhooks/{webhook_id}/deliveries?limit=50
+Authorization: Bearer {token}
+```
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Max | Description |
+|-----------|------|---------|-----|-------------|
+| `limit` | `number` | 50 | 100 | Number of deliveries to return |
+
+**Response (200 OK):**
+
+```json
+[
+  {
+    "id": 3,
+    "webhook_id": 1,
+    "event_type": "deployment.succeeded",
+    "event_id": "58fe24a7-3e21-451d-9210-33093e6f91cc",
+    "payload": "{\"id\":\"58fe24a7...\",\"event_type\":\"deployment_succeeded\",...}",
+    "success": true,
+    "status_code": 200,
+    "response_body": "{\"received\":true}",
+    "error_message": null,
+    "attempt_number": 1,
+    "created_at": "2025-11-24T18:38:10.000Z",
+    "delivered_at": "2025-11-24T18:38:10.000Z"
+  }
+]
+```
+
+### Get a Webhook Delivery
+
+Get details of a specific webhook delivery, including the full payload that was sent.
+
+```http
+GET /projects/{project_id}/webhooks/{webhook_id}/deliveries/{delivery_id}
+Authorization: Bearer {token}
+```
+
+**Response (200 OK):**
+
+```json
+{
+  "id": 3,
+  "webhook_id": 1,
+  "event_type": "deployment.succeeded",
+  "event_id": "58fe24a7-3e21-451d-9210-33093e6f91cc",
+  "payload": "{\"id\":\"58fe24a7-3e21-451d-9210-33093e6f91cc\",\"event_type\":\"deployment_succeeded\",\"timestamp\":\"2025-11-24T18:38:10.000Z\",\"project_id\":1,\"payload\":{\"deployment_id\":123,\"project_id\":1,\"project_name\":\"my-app\",\"environment\":\"production\",\"branch\":\"main\",\"commit_sha\":\"abc123\",\"commit_message\":\"Deploy v2.0\",\"url\":\"https://my-app.temps.dev\",\"status\":\"succeeded\",\"error_message\":null,\"started_at\":\"2025-11-24T18:35:00.000Z\",\"finished_at\":\"2025-11-24T18:38:10.000Z\"}}",
+  "success": true,
+  "status_code": 200,
+  "response_body": "{\"received\":true}",
+  "error_message": null,
+  "attempt_number": 1,
+  "created_at": "2025-11-24T18:38:10.000Z",
+  "delivered_at": "2025-11-24T18:38:10.000Z"
+}
+```
+
+### Retry a Failed Delivery
+
+Retry a failed webhook delivery.
+
+```http
+POST /projects/{project_id}/webhooks/{webhook_id}/deliveries/{delivery_id}/retry
+Authorization: Bearer {token}
+```
+
+**Response (200 OK):**
+
+```json
+{
+  "success": true,
+  "status_code": 200,
+  "error_message": null,
+  "attempt_number": 2
+}
+```
+
+## Security
+
+### HMAC Signature Verification
+
+All webhook deliveries include an HMAC-SHA256 signature for verification. The signature is sent in the `X-Webhook-Signature` header.
+
+**Headers Sent:**
+
+```http
+POST /your-webhook-endpoint
+Content-Type: application/json
+X-Webhook-Event: deployment.succeeded
+X-Webhook-Delivery: 3
+X-Webhook-Timestamp: 1732471090
+X-Webhook-Signature: sha256=a1b2c3d4e5f6...
+```
+
+**Verifying the Signature (Node.js example):**
+
+```javascript
+const crypto = require('crypto');
+
+function verifyWebhookSignature(payload, timestamp, signature, secret) {
+  const message = `${timestamp}.${payload}`;
+  const hmac = crypto.createHmac('sha256', secret);
+  hmac.update(message);
+  const expectedSignature = `sha256=${hmac.digest('hex')}`;
+
+  return crypto.timingSafeEqual(
+    Buffer.from(signature),
+    Buffer.from(expectedSignature)
+  );
+}
+
+// In your webhook handler
+app.post('/webhook', (req, res) => {
+  const signature = req.headers['x-webhook-signature'];
+  const timestamp = req.headers['x-webhook-timestamp'];
+  const payload = JSON.stringify(req.body);
+  const secret = 'your-webhook-secret';
+
+  if (!verifyWebhookSignature(payload, timestamp, signature, secret)) {
+    return res.status(401).send('Invalid signature');
+  }
+
+  // Process the webhook
+  console.log('Valid webhook received:', req.body);
+  res.status(200).send('OK');
+});
+```
+
+**Verifying the Signature (Python example):**
+
+```python
+import hmac
+import hashlib
+
+def verify_webhook_signature(payload: str, timestamp: str, signature: str, secret: str) -> bool:
+    message = f"{timestamp}.{payload}"
+    expected_signature = "sha256=" + hmac.new(
+        secret.encode(),
+        message.encode(),
+        hashlib.sha256
+    ).hexdigest()
+
+    return hmac.compare_digest(signature, expected_signature)
+
+# In your webhook handler (Flask example)
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    signature = request.headers.get('X-Webhook-Signature')
+    timestamp = request.headers.get('X-Webhook-Timestamp')
+    payload = request.get_data(as_text=True)
+    secret = 'your-webhook-secret'
+
+    if not verify_webhook_signature(payload, timestamp, signature, secret):
+        return 'Invalid signature', 401
+
+    # Process the webhook
+    data = request.get_json()
+    print(f"Valid webhook received: {data}")
+    return 'OK', 200
+```
+
+### Best Practices
+
+1. **Always verify signatures** - Never skip signature verification in production
+2. **Use HTTPS** - Only use HTTPS URLs for webhook endpoints
+3. **Validate event types** - Check that the event type is one you expect
+4. **Respond quickly** - Return a 2xx status code within 30 seconds
+5. **Process asynchronously** - Queue long-running tasks instead of processing them in the webhook handler
+6. **Handle retries idempotently** - Failed deliveries may be retried, so use the `event_id` to deduplicate
+
+## Testing Webhooks
+
+### Error Messages
+
+When a webhook delivery fails, you'll receive detailed error messages:
+
+**Connection Errors:**
+```
+Connection failed to http://localhost:3020/test. The service may not be running or the URL is incorrect. Please verify the endpoint is accessible and listening on the correct port.
+```
+
+**Timeout Errors:**
+```
+Request timeout after 30 seconds. The endpoint at https://example.com/webhook did not respond in time. Check if the service is running and responding quickly enough.
+```
+
+**HTTP Errors:**
+```
+HTTP 500 error from https://example.com/webhook: Internal Server Error. The endpoint rejected the webhook request.
+```
+
+### Local Testing with ngrok
+
+For local development, use [ngrok](https://ngrok.com/) to expose your local server:
+
+```bash
+# Start your local webhook server
+node server.js  # or python app.py, etc.
+
+# In another terminal, start ngrok
+ngrok http 3000
+
+# Use the ngrok URL in your webhook configuration
+# e.g., https://abc123.ngrok.io/webhook
+```
+
+### Testing with RequestBin
+
+Use [RequestBin](https://requestbin.com/) or [Webhook.site](https://webhook.site/) to inspect webhook payloads:
+
+1. Create a new RequestBin
+2. Copy the generated URL
+3. Create a webhook with that URL
+4. Trigger an event in Temps
+5. View the received payload in RequestBin
+
+## Data Structures (Rust)
+
+For reference, here are the Rust type definitions:
+
+```rust
+// Base event structure
+pub struct WebhookEvent {
+    pub id: String,
+    pub event_type: WebhookEventType,
+    pub timestamp: DateTime<Utc>,
+    pub project_id: Option<i32>,
+    pub payload: WebhookPayload,
+}
+
+// Event types
+pub enum WebhookEventType {
+    DeploymentCreated,
+    DeploymentSucceeded,
+    DeploymentFailed,
+    DeploymentCancelled,
+    DeploymentReady,
+    ProjectCreated,
+    ProjectDeleted,
+    DomainCreated,
+    DomainProvisioned,
+}
+
+// Payload variants
+pub enum WebhookPayload {
+    Deployment(DeploymentPayload),
+    Project(ProjectPayload),
+    Domain(DomainPayload),
+}
+
+// Deployment payload
+pub struct DeploymentPayload {
+    pub deployment_id: i32,
+    pub project_id: i32,
+    pub project_name: String,
+    pub environment: String,
+    pub branch: Option<String>,
+    pub commit_sha: Option<String>,
+    pub commit_message: Option<String>,
+    pub url: Option<String>,
+    pub status: String,
+    pub error_message: Option<String>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
+// Project payload
+pub struct ProjectPayload {
+    pub project_id: i32,
+    pub project_name: String,
+    pub slug: String,
+    pub repo_url: Option<String>,
+}
+
+// Domain payload
+pub struct DomainPayload {
+    pub domain_id: i32,
+    pub domain_name: String,
+    pub project_id: i32,
+    pub project_name: String,
+    pub is_primary: bool,
+    pub ssl_status: Option<String>,
+}
+```
+
+## Support
+
+For questions or issues with webhooks:
+- Check the [API documentation](https://api.temps.dev/docs)
+- Review delivery logs in the Temps dashboard
+- Contact support at support@temps.dev

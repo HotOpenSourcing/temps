@@ -233,6 +233,7 @@ impl DownloadRepoJob {
             // Clone full history to ensure we have the commit
             let clone_output = tokio::process::Command::new("git")
                 .arg("clone")
+                .arg("--")
                 .arg(git_url)
                 .arg(repo_dir)
                 .output()
@@ -252,6 +253,7 @@ impl DownloadRepoJob {
             // Checkout the specific commit
             let checkout_output = tokio::process::Command::new("git")
                 .arg("checkout")
+                .arg("--")
                 .arg(commit_sha)
                 .current_dir(repo_dir)
                 .output()
@@ -291,6 +293,7 @@ impl DownloadRepoJob {
                 .arg("--depth=1")
                 .arg("--branch")
                 .arg(&branch_arg)
+                .arg("--")
                 .arg(git_url)
                 .arg(repo_dir)
                 .output()

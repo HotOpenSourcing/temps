@@ -1,0 +1,236 @@
+export const metadata = {
+  title: 'Set Up a CI/CD Pipeline',
+  description:
+    'Trigger Temps deployments from GitHub Actions, GitLab CI, or any CI system using the API or CLI.',
+  alternates: {
+    canonical: '/docs/howto/set-up-ci-cd-pipeline',
+  },
+}
+
+export const sections = [
+  { title: 'Deployment methods', id: 'deployment-methods' },
+  { title: 'Deploy from a pre-built Docker image', id: 'deploy-from-a-pre-built-docker-image' },
+  { title: 'Deploy a static bundle', id: 'deploy-a-static-bundle' },
+  { title: 'Trigger a Git-based deployment', id: 'trigger-a-git-based-deployment' },
+  { title: 'GitHub Actions example', id: 'github-actions-example' },
+  { title: 'Set up webhooks for notifications', id: 'set-up-webhooks-for-notifications' },
+]
+
+# Set Up a CI/CD Pipeline
+
+By default, Temps deploys automatically when you push to a connected Git repository. For more control — building in your own CI, running tests first, or deploying pre-built images — use the Temps API to trigger deployments from any CI/CD system. {{ className: 'lead' }}
+
+---
+
+## Deployment methods {{ anchor: true, id: 'deployment-methods' }}
+
+Temps supports several ways to deploy from CI:
+
+| Method | When to use | API endpoint |
+|--------|------------|--------------|
+| **Pre-built Docker image** | You build and push to a registry in CI, then tell Temps to deploy it | `POST /projects/{id}/environments/{id}/deploy/image` |
+| **Docker image upload** | You build a Docker image in CI and upload the tarball directly (no registry needed) | `POST /projects/{id}/environments/{id}/deploy/image-upload` |
+| **Static bundle** | You build static files in CI and upload a zip/tar.gz | `POST /projects/{id}/environments/{id}/deploy/static` |
+| **Git trigger** | You want Temps to build from source but triggered by your CI (not by a webhook) | `POST /projects/{id}/trigger-pipeline` |
+
+All endpoints require an API token. Generate one from **Settings > API Keys** in the dashboard, or use the per-project deployment token available in your environment variables as `TEMPS_API_TOKEN`.
+
+---
+
+## Deploy from a pre-built Docker image {{ anchor: true, id: 'deploy-from-a-pre-built-docker-image' }}
+
+If your CI builds and pushes a Docker image to a registry (Docker Hub, GitHub Container Registry, etc.), tell Temps to pull and deploy it:
+
+```bash
+curl -X POST "https://your-temps-instance/api/projects/{project_id}/environments/{environment_id}/deploy/image" \
+  -H "Authorization: Bearer YOUR_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "image": "ghcr.io/your-org/your-app:sha-abc1234"
+  }'
+```
+
+Temps pulls the image, starts a container, runs health checks, and routes traffic to it. The old container is stopped once the new one is healthy.
+
+### Upload a Docker image without a registry
+
+If you do not want to push to a registry, you can upload the image tarball directly:
+
+```bash
+# Save the image as a tarball in your CI
+docker save your-app:latest | gzip > image.tar.gz
+
+# Upload to Temps (max 1 GB)
+curl -X POST "https://your-temps-instance/api/projects/{project_id}/environments/{environment_id}/deploy/image-upload" \
+  -H "Authorization: Bearer YOUR_API_TOKEN" \
+  -F "image=@image.tar.gz"
+```
+
+---
+
+## Deploy a static bundle {{ anchor: true, id: 'deploy-a-static-bundle' }}
+
+For static sites (React, Vue, Astro, etc.) built in CI:
+
+```bash
+# Build in CI
+npm run build
+
+# Upload the build output (max 500 MB, tar.gz or zip)
+tar -czf build.tar.gz -C dist .
+
+# First, upload the bundle
+BUNDLE_RESPONSE=$(curl -X POST "https://your-temps-instance/api/projects/{project_id}/upload/static" \
+  -H "Authorization: Bearer YOUR_API_TOKEN" \
+  -F "file=@build.tar.gz")
+
+# Then trigger the deployment
+curl -X POST "https://your-temps-instance/api/projects/{project_id}/environments/{environment_id}/deploy/static" \
+  -H "Authorization: Bearer YOUR_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "$BUNDLE_RESPONSE"
+```
+
+---
+
+## Trigger a Git-based deployment {{ anchor: true, id: 'trigger-a-git-based-deployment' }}
+
+If you want Temps to build from source but want to control when the build starts (e.g. after tests pass in CI):
+
+```bash
+curl -X POST "https://your-temps-instance/api/projects/{project_id}/trigger-pipeline" \
+  -H "Authorization: Bearer YOUR_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "branch": "main",
+    "environment_id": 1
+  }'
+```
+
+Optional fields:
+
+<Properties>
+  <Property name="branch">
+    The Git branch to build from. Required.
+  </Property>
+  <Property name="environment_id">
+    The target environment. Required.
+  </Property>
+  <Property name="commit">
+    A specific commit SHA to deploy. If omitted, Temps uses the latest commit on the branch.
+  </Property>
+  <Property name="tag">
+    A Git tag to deploy.
+  </Property>
+</Properties>
+
+---
+
+## GitHub Actions example {{ anchor: true, id: 'github-actions-example' }}
+
+Here is a complete GitHub Actions workflow that runs tests, builds a Docker image, and deploys to Temps:
+
+```yaml {{ title: '.github/workflows/deploy.yml' }}
+name: Deploy to Temps
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npm test
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t my-app:${{ github.sha }} .
+
+      - name: Save and upload image
+        run: |
+          docker save my-app:${{ github.sha }} | gzip > image.tar.gz
+          curl -X POST "${{ secrets.TEMPS_URL }}/api/projects/${{ secrets.TEMPS_PROJECT_ID }}/environments/${{ secrets.TEMPS_ENVIRONMENT_ID }}/deploy/image-upload" \
+            -H "Authorization: Bearer ${{ secrets.TEMPS_API_TOKEN }}" \
+            -F "image=@image.tar.gz"
+```
+
+Add these secrets to your GitHub repository settings:
+
+| Secret | Value |
+|--------|-------|
+| `TEMPS_URL` | Your Temps instance URL (e.g. `https://temps.yourdomain.com`) |
+| `TEMPS_API_TOKEN` | An API token from Temps with deployment permissions |
+| `TEMPS_PROJECT_ID` | Your project ID (visible in the dashboard URL) |
+| `TEMPS_ENVIRONMENT_ID` | The target environment ID |
+
+### Simpler: trigger Temps build after tests
+
+If you prefer Temps to handle the build, just trigger the pipeline after tests pass:
+
+```yaml {{ title: '.github/workflows/deploy.yml' }}
+name: Test and Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  test-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npm test
+
+      - name: Trigger Temps deployment
+        run: |
+          curl -X POST "${{ secrets.TEMPS_URL }}/api/projects/${{ secrets.TEMPS_PROJECT_ID }}/trigger-pipeline" \
+            -H "Authorization: Bearer ${{ secrets.TEMPS_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"branch\": \"main\", \"environment_id\": ${{ secrets.TEMPS_ENVIRONMENT_ID }}}"
+```
+
+---
+
+## Set up webhooks for notifications {{ anchor: true, id: 'set-up-webhooks-for-notifications' }}
+
+Temps can notify external systems when deployments happen. This is useful for posting to Slack, updating a status page, or triggering downstream workflows.
+
+1. Open your project in the dashboard
+2. Go to **Settings > Webhooks**
+3. Click **Add Webhook**
+4. Enter the destination URL and select which events to subscribe to
+
+Available events:
+
+| Event | Fires when |
+|-------|-----------|
+| `deployment.created` | A new deployment starts |
+| `deployment.succeeded` | A deployment completes successfully |
+| `deployment.failed` | A deployment fails |
+| `deployment.cancelled` | A deployment is cancelled |
+| `deployment.ready` | A deployment is live and serving traffic |
+| `project.created` | A new project is created |
+| `project.deleted` | A project is deleted |
+| `domain.created` | A custom domain is added |
+| `domain.provisioned` | An SSL certificate is issued for a domain |
+
+Webhooks include an HMAC signature for verification. Temps signs the payload with a shared secret (shown when you create the webhook) using the `X-Temps-Signature` header.
+
+### View delivery history
+
+On the webhook settings page, click on a webhook to see all delivery attempts. Each entry shows the HTTP status code, response time, and payload. Failed deliveries can be retried manually.

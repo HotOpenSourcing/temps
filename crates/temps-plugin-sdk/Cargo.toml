@@ -16,9 +16,6 @@ tokio = { workspace = true }
 # HTTP framework (plugins build axum routers)
 axum = { workspace = true }
 
-# Database (plugins get direct DB access)
-sea-orm = { workspace = true }
-
 # Error handling
 thiserror = { workspace = true }
 
@@ -35,11 +32,14 @@ hyper-util = { version = "0.1", features = ["tokio", "http1", "http2"] }
 tower = { version = "0.5", features = ["util"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 
+# WebSocket support for the platform channel
+tokio-tungstenite = "0.28"
+futures = { workspace = true }
+
 # OpenAPI
 utoipa = { workspace = true }
 
 # Shared types from temps
-temps-entities = { path = "../temps-entities" }
 temps-core = { path = "../temps-core" }
 
 # Tar extraction for UI bundles

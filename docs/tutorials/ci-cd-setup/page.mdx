@@ -1,0 +1,190 @@
+export const metadata = {
+  title: 'Set Up CI/CD Pipeline',
+  description: 'Tutorial: Configure automated CI/CD workflows with Temps.',
+  alternates: {
+    canonical: '/docs/tutorials/ci-cd-setup',
+  },
+}
+
+# Set Up CI/CD Pipeline
+
+## Page Goal
+Guide users through setting up professional CI/CD workflows with automated testing, linting, and deployments. Show that Temps fits into modern development workflows.
+
+## Target Persona
+**Professional Paul** - A developer who:
+- Wants automated testing before deployment
+- Works in a team environment
+- Needs code quality gates
+- Values: Automation, reliability, team workflows
+- Experience: Comfortable with GitHub Actions / GitLab CI
+- Timeline: Setting up proper workflow
+
+## Key Content to Include
+
+**1. What You'll Build**
+- Automated tests on every push
+- Linting and type checking
+- Automated deployment after tests pass
+- Preview deployments for PRs
+- Time: 20-30 minutes
+
+**2. Prerequisites**
+- Application on Temps
+- GitHub/GitLab repository
+- Test suite in your project
+- (Optional) Temps API key for advanced workflows
+
+**3. Basic Workflow: Auto-Deploy on Push**
+
+**How it Works:**
+- Push to main → Auto-deploy (default in Temps)
+- Already enabled!
+- Branch configuration
+
+**4. Advanced Workflow: Test Then Deploy**
+
+**GitHub Actions Example:**
+```yaml
+name: Test and Deploy
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+      - run: npm ci
+      - run: npm test
+      - run: npm run lint
+
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Temps Deploy
+        run: |
+          # Auto-deploy happens automatically
+          # Or use Temps API for advanced control
+```
+
+**GitLab CI Example:**
+```yaml
+stages:
+  - test
+  - deploy
+
+test:
+  stage: test
+  script:
+    - npm ci
+    - npm test
+    - npm run lint
+
+deploy:
+  stage: deploy
+  only:
+    - main
+  script:
+    - echo "Temps auto-deploys main branch"
+```
+
+**5. Pull Request Workflow**
+
+**Step 1: Enable Preview Deployments**
+- Configure in Temps dashboard
+- Select which branches get previews
+- PR-based preview URLs
+
+**Step 2: GitHub Action for PR Comments**
+```yaml
+- name: Comment Preview URL
+  uses: actions/github-script@v6
+  with:
+    script: |
+      github.rest.issues.createComment({
+        issue_number: context.issue.number,
+        body: 'Preview: https://pr-${{ github.event.pull_request.number }}.app.temps.dev'
+      })
+```
+
+**6. Quality Gates**
+
+**Linting:**
+- ESLint for JavaScript/TypeScript
+- Prettier for formatting
+- Fail build on errors
+
+**Type Checking:**
+- TypeScript type checking
+- Only deploy if types pass
+
+**Testing:**
+- Unit tests
+- Integration tests
+- E2E tests (optional)
+- Coverage requirements
+
+**7. Environment-Specific Deployments**
+
+**Deploy to Staging First:**
+```yaml
+deploy-staging:
+  if: github.ref == 'refs/heads/develop'
+  # Deploy to staging environment
+
+deploy-production:
+  if: github.ref == 'refs/heads/main'
+  # Deploy to production
+```
+
+**8. Using Temps API**
+- API key generation
+- Triggering deployments
+- Getting deployment status
+- Advanced automation
+
+**9. Notifications**
+
+**Slack Notifications:**
+```yaml
+- name: Notify Slack
+  if: always()
+  uses: 8398a7/action-slack@v3
+  with:
+    status: ${{ job.status }}
+    text: 'Deployment to Temps: ${{ job.status }}'
+```
+
+**Discord/Email:**
+- Similar webhook integrations
+- Deployment status alerts
+
+**10. Rollback Strategy**
+- Automatic rollback on health check failure
+- Manual rollback via Temps dashboard
+- Git-based rollback (revert + push)
+
+**11. Complete Example Workflows**
+- Next.js with tests
+- Node.js API with tests
+- Monorepo with multiple apps
+- Link to example repositories
+
+**12. Troubleshooting**
+- Build fails in CI but works locally
+- Tests timeout
+- Environment variable access in CI
+- Deployment doesn't trigger
+
+## Success Metrics
+- User sets up automated testing
+- Deployments only happen when tests pass
+- Professional workflow established
+- Team confidence in deployments
+- Broken code doesn't reach production

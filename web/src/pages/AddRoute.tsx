@@ -84,7 +84,7 @@ export function AddRoute() {
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: 'Load Balancer', href: '/load-balancer' },
+      { label: 'Load Balancer', href: '/settings/load-balancer' },
       { label: 'Add Route' },
     ])
   }, [setBreadcrumbs])
@@ -117,7 +117,7 @@ export function AddRoute() {
     },
     onSuccess: () => {
       toast.success('Route created successfully!')
-      navigate('/load-balancer')
+      navigate('/settings/load-balancer')
     },
   })
 
@@ -162,7 +162,7 @@ export function AddRoute() {
           <Button
             variant="ghost"
             size="icon"
-            onClick={() => navigate('/load-balancer')}
+            onClick={() => navigate('/settings/load-balancer')}
           >
             <ArrowLeft className="h-4 w-4" />
           </Button>
@@ -519,7 +519,7 @@ export function AddRoute() {
               <Button
                 type="button"
                 variant="outline"
-                onClick={() => navigate('/load-balancer')}
+                onClick={() => navigate('/settings/load-balancer')}
               >
                 Cancel
               </Button>

@@ -10780,11 +10780,20 @@ version = "0.1.0"
 dependencies = [
  "axum 0.8.6",
  "chrono",
+ "include_dir",
+ "mime_guess",
+ "reqwest",
+ "scraper",
+ "sea-orm",
  "serde",
  "serde_json",
+ "tempfile",
  "temps-plugin-sdk",
+ "thiserror 2.0.17",
  "tokio",
  "tracing",
+ "url",
+ "uuid",
 ]
 
 [[package]]
@@ -10792,14 +10801,21 @@ name = "temps-external-plugins"
 version = "0.1.0"
 dependencies = [
  "axum 0.8.6",
+ "chrono",
+ "futures",
  "hyper 1.7.0",
  "hyper-util",
+ "libc",
+ "sea-orm",
  "serde",
  "serde_json",
  "tempfile",
  "temps-config",
  "temps-core",
+ "temps-entities",
  "tokio",
+ "tokio-tungstenite 0.28.0",
+ "tower 0.5.2",
  "tracing",
  "utoipa",
  "uuid",
@@ -10994,6 +11010,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "temps-lighthouse-plugin"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.6",
+ "chrono",
+ "include_dir",
+ "mime_guess",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "temps-plugin-sdk",
+ "thiserror 2.0.17",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "temps-log-aggregator"
 version = "0.1.0"
 dependencies = [
@@ -11177,17 +11212,17 @@ dependencies = [
  "axum 0.8.6",
  "clap",
  "flate2",
+ "futures",
  "hyper 1.7.0",
  "hyper-util",
- "sea-orm",
  "serde",
  "serde_json",
  "tar",
  "temps-core",
- "temps-entities",
  "thiserror 2.0.17",
  "tokio",
  "tokio-stream",
+ "tokio-tungstenite 0.28.0",
  "tower 0.5.2",
  "tracing",
  "tracing-subscriber",

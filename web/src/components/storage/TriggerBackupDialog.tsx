@@ -138,7 +138,7 @@ export function TriggerBackupDialog({
               <Button variant="outline" onClick={() => onOpenChange(false)}>
                 Cancel
               </Button>
-              <Link to="/backups">
+              <Link to="/settings/backups">
                 <Button>Configure S3 Sources</Button>
               </Link>
             </div>

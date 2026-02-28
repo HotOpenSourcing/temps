@@ -71,7 +71,7 @@ export default function ApiKeyEdit() {
       queryClient.invalidateQueries({ queryKey: ['apiKeys'] })
       queryClient.invalidateQueries({ queryKey: ['apiKey', id] })
       toast.success('API key updated successfully')
-      navigate('/keys')
+      navigate('/settings/keys')
     },
   })
 
@@ -123,7 +123,7 @@ export default function ApiKeyEdit() {
               The API key you&apos;re looking for doesn&apos;t exist or has been
               deleted.
             </p>
-            <Button className="mt-4" onClick={() => navigate('/keys')}>
+            <Button className="mt-4" onClick={() => navigate('/settings/keys')}>
               Back to API Keys
             </Button>
           </CardContent>
@@ -139,7 +139,7 @@ export default function ApiKeyEdit() {
     <div className="container max-w-4xl mx-auto py-6 space-y-6">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4">
-          <Button variant="ghost" size="icon" onClick={() => navigate('/keys')}>
+          <Button variant="ghost" size="icon" onClick={() => navigate('/settings/keys')}>
             <ArrowLeft className="h-4 w-4" />
           </Button>
           <div>
@@ -372,7 +372,7 @@ export default function ApiKeyEdit() {
           <Button
             type="button"
             variant="outline"
-            onClick={() => navigate('/keys')}
+            onClick={() => navigate('/settings/keys')}
           >
             Cancel
           </Button>

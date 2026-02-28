@@ -93,7 +93,7 @@ impl EncryptionService {
 
         let plaintext = cipher
             .decrypt(Nonce::from_slice(nonce_bytes), ciphertext)
-            .map_err(|e| anyhow::anyhow!("Error decrypting {} with error: {}", encoded_data, e))?;
+            .map_err(|e| anyhow::anyhow!("Decryption failed: {}", e))?;
 
         Ok(plaintext)
     }
@@ -352,6 +352,74 @@ mod tests {
         let result = service2.decrypt_string(&encrypted1);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decryption_error_does_not_leak_ciphertext() {
+        let key1 = "12345678901234567890123456789012";
+        let key2 = "09876543210987654321098765432109";
+
+        let service1 = EncryptionService::new(key1).unwrap();
+        let service2 = EncryptionService::new(key2).unwrap();
+
+        let secret_data = "super_secret_api_key_12345";
+        let encrypted = service1.encrypt_string(secret_data).unwrap();
+
+        // Attempt decryption with wrong key -- should fail
+        let result = service2.decrypt_string(&encrypted);
+        assert!(result.is_err());
+
+        let error_msg = result.unwrap_err().to_string();
+
+        // The error message must NOT contain the ciphertext
+        assert!(
+            !error_msg.contains(&encrypted),
+            "Decryption error message must not contain ciphertext. Got: {}",
+            error_msg
+        );
+
+        // The error message must NOT contain the original plaintext
+        assert!(
+            !error_msg.contains(secret_data),
+            "Decryption error message must not contain plaintext. Got: {}",
+            error_msg
+        );
+
+        // The error message should be generic
+        assert!(
+            error_msg.contains("Decryption failed"),
+            "Expected generic decryption error message. Got: {}",
+            error_msg
+        );
+    }
+
+    #[test]
+    fn test_corrupted_data_error_does_not_leak_ciphertext() {
+        let key = "12345678901234567890123456789012";
+        let service = EncryptionService::new(key).unwrap();
+
+        let original = "sensitive_password_123";
+        let encrypted = service.encrypt_string(original).unwrap();
+
+        // Corrupt the encrypted data
+        let mut corrupted = encrypted.clone();
+        corrupted.pop();
+        corrupted.push('X');
+
+        let result = service.decrypt_string(&corrupted);
+        if let Err(e) = result {
+            let error_msg = e.to_string();
+            assert!(
+                !error_msg.contains(&corrupted),
+                "Corrupted data decryption error must not contain the ciphertext. Got: {}",
+                error_msg
+            );
+            assert!(
+                !error_msg.contains(original),
+                "Error must not contain plaintext. Got: {}",
+                error_msg
+            );
+        }
     }
 
     #[test]

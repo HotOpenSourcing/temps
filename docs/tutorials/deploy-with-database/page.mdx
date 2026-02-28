@@ -1,0 +1,455 @@
+export const metadata = {
+  title: 'Deploy with a Database',
+  description:
+    'Provision a managed PostgreSQL database, connect it to your application, and deploy — all without leaving Temps.',
+  alternates: {
+    canonical: '/docs/tutorials/deploy-with-database',
+  },
+}
+
+export const sections = [
+  { title: 'What you will build', id: 'what-you-will-build' },
+  { title: 'Prerequisites', id: 'prerequisites' },
+  { title: 'Create a PostgreSQL service', id: 'create-a-postgresql-service' },
+  { title: 'Link the service to your project', id: 'link-the-service-to-your-project' },
+  { title: 'Understand the injected environment variables', id: 'understand-the-injected-environment-variables' },
+  { title: 'Update your application', id: 'update-your-application' },
+  { title: 'Deploy and verify', id: 'deploy-and-verify' },
+  { title: 'Explore your data', id: 'explore-your-data' },
+  { title: 'Add Redis for caching', id: 'add-redis-for-caching' },
+  { title: 'What you have accomplished', id: 'what-you-have-accomplished' },
+]
+
+# Deploy with a Database
+
+This tutorial walks you through provisioning a managed PostgreSQL database on Temps, connecting it to your application, and deploying. No external database providers, no connection string juggling — Temps runs the database on your server and wires everything together automatically. {{ className: 'lead' }}
+
+---
+
+## What you will build {{ anchor: true, id: 'what-you-will-build' }}
+
+By the end of this tutorial, you will have:
+
+- A managed PostgreSQL database running as a Docker container on your server
+- The database linked to your project with environment variables injected automatically
+- An application deployed and connected to the database
+- A Redis cache added as a bonus second service
+- Knowledge of how Temps manages per-environment database isolation
+
+**Time required:** approximately 15 minutes.
+
+**What this tutorial covers and does not cover:**
+
+| Covered | Not covered |
+|---------|-------------|
+| Provisioning PostgreSQL and Redis | MongoDB and S3 storage (same process, different service type) |
+| Linking services to projects | Database migrations and schema management |
+| Automatic environment variable injection | Connection pooling and performance tuning |
+| Per-environment database isolation | Replication and high availability |
+| Querying data from the dashboard | Backup and restore ([previous tutorial](/docs/tutorials/set-up-backups-and-monitoring)) |
+
+---
+
+## Prerequisites {{ anchor: true, id: 'prerequisites' }}
+
+You need:
+
+- A **running Temps instance** with a deployed project (complete [Your First Deployment](/docs/tutorials/your-first-deployment) first)
+- An **application that uses a database** — any framework that reads a database connection string from an environment variable will work. This tutorial shows examples for Next.js, Express, and generic Node.js.
+
+If your current project does not use a database, that is fine. You can still follow along to provision the service and link it — then add database code later.
+
+---
+
+## Create a PostgreSQL service {{ anchor: true, id: 'create-a-postgresql-service' }}
+
+A managed service in Temps is a Docker container that Temps provisions, monitors, and backs up for you. You create the service once and then link it to any number of projects.
+
+1. In the sidebar, click **Services**
+2. Click **Create Service**
+3. Select **PostgreSQL** as the service type
+4. Configure it:
+
+<Properties>
+  <Property name="Name">
+    A unique name for this service, e.g. `my-app-db`. This becomes part of the Docker container name (`postgres-my-app-db`) and the volume name.
+  </Property>
+  <Property name="Parameters">
+    Temps auto-fills sensible defaults. You can adjust:
+
+    - **Port** — The host port to bind. Auto-assigned starting from 5432. Bound to `127.0.0.1` only (not publicly accessible).
+    - **Docker Image** — Default: `gotempsh/postgres-walg:18-bookworm` (PostgreSQL 18 with WAL-G for streaming backups). You can also use `timescale/timescaledb-ha:pg18` if you need TimescaleDB.
+    - **Max Connections** — Default: `100`. Increase for high-concurrency applications.
+
+    Fields that are auto-generated and read-only after creation:
+    - **Database** — `postgres` (the root database; per-project databases are created automatically when linked)
+    - **Username** — `postgres`
+    - **Password** — A random 16-character alphanumeric string, encrypted at rest
+  </Property>
+</Properties>
+
+Click **Create**. Temps pulls the Docker image (if not cached), creates a container and a persistent volume, starts the service, and waits for the health check (`pg_isready`) to pass.
+
+When the status shows **Running**, your database is ready.
+
+<Note>
+**Where does data live?** PostgreSQL data is stored in a Docker volume named `postgres-{service-name}_data`, mounted at `/var/lib/postgresql` inside the container. The volume persists across container restarts and Temps upgrades. Back it up with the [backup system](/docs/tutorials/set-up-backups-and-monitoring) for off-site protection.
+</Note>
+
+---
+
+## Link the service to your project {{ anchor: true, id: 'link-the-service-to-your-project' }}
+
+Creating a service does not automatically connect it to any project. You need to explicitly link them.
+
+1. Open your project in the dashboard
+2. Click **Services** in the project sidebar
+3. Click **Link Service**
+4. Select the PostgreSQL service you just created
+5. Click **Link**
+
+That is it. The next time your project deploys, Temps will inject the database connection details as environment variables into your application container.
+
+### What linking does under the hood
+
+When you link a PostgreSQL service to a project, Temps:
+
+1. Creates a **dedicated database** inside the PostgreSQL instance named `{project_slug}_{environment_slug}` (e.g. `my_app_production`). Each project-environment combination gets its own isolated database.
+2. Generates **environment variables** with the connection details, using the Docker container name as the hostname (so containers can talk to each other over the Docker network).
+3. Stores the link in a `project_services` table — only one service of each type can be linked per project.
+
+<Note>
+**One service, many projects:** A single PostgreSQL service can be linked to multiple projects. Each project gets its own database inside the same PostgreSQL instance. This is efficient for a single server — you run one PostgreSQL container instead of one per project.
+</Note>
+
+---
+
+## Understand the injected environment variables {{ anchor: true, id: 'understand-the-injected-environment-variables' }}
+
+When a PostgreSQL service is linked to your project, Temps injects these environment variables at deploy time:
+
+<Properties>
+  <Property name="POSTGRES_URL">
+    The full connection string: `postgres://postgres:PASSWORD@postgres-SERVICE-NAME:5432/PROJECT_ENV_DB`
+
+    This is the variable most frameworks expect. The hostname is the Docker container name (e.g. `postgres-my-app-db`), the port is always `5432` (the internal port, not the host-mapped port), and the database name is your project-environment combination.
+  </Property>
+  <Property name="POSTGRES_HOST">
+    The container hostname: `postgres-my-app-db`
+  </Property>
+  <Property name="POSTGRES_PORT">
+    The internal port: `5432`
+  </Property>
+  <Property name="POSTGRES_NAME">
+    The root database name: `postgres`
+  </Property>
+  <Property name="POSTGRES_DATABASE">
+    The per-project database name: `my_app_production`
+  </Property>
+  <Property name="POSTGRES_USER">
+    The username: `postgres`
+  </Property>
+  <Property name="POSTGRES_PASSWORD">
+    The auto-generated password.
+  </Property>
+</Properties>
+
+### Preview before deploying
+
+To see exactly which variables will be injected without deploying:
+
+1. Go to your project's **Services** page
+2. Click on the linked PostgreSQL service
+3. Click **Preview Environment** to see all variable names and masked values
+
+### Common framework mappings
+
+Most frameworks expect `DATABASE_URL` rather than `POSTGRES_URL`. You have two options:
+
+**Option A: Add an alias environment variable (recommended)**
+
+In your project's **Environment Variables** page, add:
+
+| Key | Value |
+|-----|-------|
+| `DATABASE_URL` | `$POSTGRES_URL` |
+
+Temps supports variable interpolation — `$POSTGRES_URL` expands to the actual connection string at deploy time.
+
+**Option B: Update your application code**
+
+Read from `POSTGRES_URL` instead of `DATABASE_URL`:
+
+```typescript
+// Before
+const db = new Pool({ connectionString: process.env.DATABASE_URL });
+
+// After
+const db = new Pool({ connectionString: process.env.POSTGRES_URL });
+```
+
+---
+
+## Update your application {{ anchor: true, id: 'update-your-application' }}
+
+Add database access to your application. Below are examples for common frameworks. The key point: read the connection string from `POSTGRES_URL` (or `DATABASE_URL` if you set up the alias).
+
+<CodeGroup title="Connect to PostgreSQL">
+
+```typescript {{ title: 'Next.js / Drizzle' }}
+// db/index.ts
+import { drizzle } from 'drizzle-orm/node-postgres';
+import { Pool } from 'pg';
+
+const pool = new Pool({
+  connectionString: process.env.POSTGRES_URL,
+});
+
+export const db = drizzle(pool);
+```
+
+```typescript {{ title: 'Next.js / Prisma' }}
+// prisma/schema.prisma
+// Set DATABASE_URL = $POSTGRES_URL in your Temps env vars
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Then generate and push schema:
+// npx prisma generate
+// npx prisma db push
+```
+
+```typescript {{ title: 'Express / pg' }}
+// server.ts
+import express from 'express';
+import { Pool } from 'pg';
+
+const pool = new Pool({
+  connectionString: process.env.POSTGRES_URL,
+});
+
+const app = express();
+
+app.get('/health', async (req, res) => {
+  const result = await pool.query('SELECT NOW()');
+  res.json({ status: 'ok', time: result.rows[0].now });
+});
+
+app.listen(3000);
+```
+
+```python {{ title: 'Flask / SQLAlchemy' }}
+# app.py
+import os
+from flask import Flask
+from flask_sqlalchemy import SQLAlchemy
+
+app = Flask(__name__)
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ['POSTGRES_URL']
+db = SQLAlchemy(app)
+```
+
+</CodeGroup>
+
+### Add a health check that verifies database connectivity
+
+A good health endpoint confirms the database is reachable:
+
+```typescript {{ title: 'api/health/route.ts (Next.js App Router)' }}
+import { Pool } from 'pg';
+import { NextResponse } from 'next/server';
+
+const pool = new Pool({
+  connectionString: process.env.POSTGRES_URL,
+});
+
+export async function GET() {
+  try {
+    await pool.query('SELECT 1');
+    return NextResponse.json({ status: 'ok', database: 'connected' });
+  } catch (error) {
+    return NextResponse.json(
+      { status: 'error', database: 'disconnected' },
+      { status: 500 }
+    );
+  }
+}
+```
+
+This gives your [uptime monitor](/docs/tutorials/set-up-backups-and-monitoring#create-an-uptime-monitor) a way to detect database outages, not just application crashes.
+
+---
+
+## Deploy and verify {{ anchor: true, id: 'deploy-and-verify' }}
+
+Commit your changes and push:
+
+```bash
+git add .
+git commit -m "feat: add PostgreSQL database connection"
+git push
+```
+
+Temps detects the push, builds your application, and deploys it. This time, the deploy includes the database environment variables.
+
+### Verify the connection
+
+After the deployment completes:
+
+1. Visit your application's health endpoint (e.g. `https://my-app.yourdomain.com/health` or `/api/health`)
+2. Confirm you see `"database": "connected"` in the response
+3. In the Temps dashboard, go to your project's **Services** page — the linked service should show the environment variables that were injected
+
+### Troubleshooting
+
+If your application fails to connect to the database:
+
+<Properties>
+  <Property name="Connection refused">
+    Your app is trying to connect to `localhost` instead of the container name. Make sure you are reading `POSTGRES_URL` (which uses the Docker container hostname) rather than hardcoding `localhost`.
+  </Property>
+  <Property name="Database does not exist">
+    Temps creates the per-project database on first deploy. If you linked the service after the last deploy, trigger a new deployment (push a commit or use the **Redeploy** button).
+  </Property>
+  <Property name="Authentication failed">
+    The password in `POSTGRES_URL` is auto-generated. Do not set the password manually in your environment variables — let Temps inject it.
+  </Property>
+  <Property name="Timeout connecting">
+    Check that the PostgreSQL service is running. Go to **Services** in the sidebar and verify the status is **Running**. If it is stopped, click **Start**.
+  </Property>
+</Properties>
+
+---
+
+## Explore your data {{ anchor: true, id: 'explore-your-data' }}
+
+Temps includes a built-in data explorer that lets you query your databases directly from the dashboard without installing any tools.
+
+1. Open your project in the dashboard
+2. Click **Services** in the project sidebar
+3. Click on your linked PostgreSQL service
+4. Use the **Query** tab to run SQL
+
+```sql
+-- See all tables
+SELECT tablename FROM pg_tables WHERE schemaname = 'public';
+
+-- Check your data
+SELECT * FROM users LIMIT 10;
+
+-- Database size
+SELECT pg_size_pretty(pg_database_size(current_database()));
+```
+
+This is useful for quick debugging and data inspection. For ongoing database management, connect with your preferred client (pgAdmin, DBeaver, TablePlus) using the host port shown on the service details page:
+
+```bash
+# Connect from your local machine (requires SSH tunnel or direct access)
+psql "postgres://postgres:PASSWORD@your-server-ip:PORT/my_app_production"
+```
+
+<Note>
+**Security:** The PostgreSQL port is bound to `127.0.0.1` on the server, meaning it is not publicly accessible. To connect from your local machine, use an SSH tunnel: `ssh -L 5432:localhost:PORT user@your-server-ip`, then connect to `localhost:5432`.
+</Note>
+
+---
+
+## Add Redis for caching {{ anchor: true, id: 'add-redis-for-caching' }}
+
+The process for adding any managed service is the same. Here is how to add Redis:
+
+1. Go to **Services** in the sidebar
+2. Click **Create Service**
+3. Select **Redis**
+4. Give it a name, e.g. `my-app-cache`
+5. Click **Create** — Temps starts a Redis container (`gotempsh/redis-walg:8-bookworm`)
+
+Link it to your project:
+
+1. Open your project's **Services** page
+2. Click **Link Service**, select the Redis service
+3. Click **Link**
+
+On next deploy, these additional environment variables are injected:
+
+<Properties>
+  <Property name="REDIS_URL">
+    Full connection string: `redis://:PASSWORD@redis-my-app-cache:6379/DB_NUMBER`
+  </Property>
+  <Property name="REDIS_HOST">
+    Container hostname: `redis-my-app-cache`
+  </Property>
+  <Property name="REDIS_PORT">
+    Internal port: `6379`
+  </Property>
+  <Property name="REDIS_PASSWORD">
+    Auto-generated password.
+  </Property>
+  <Property name="REDIS_DATABASE">
+    A database number (0-15) assigned per project, derived from a hash of the project and environment slugs.
+  </Property>
+</Properties>
+
+Use Redis in your application:
+
+```typescript {{ title: 'lib/redis.ts' }}
+import { createClient } from 'redis';
+
+export const redis = createClient({
+  url: process.env.REDIS_URL,
+});
+
+redis.connect();
+```
+
+Push and deploy. Your application now has both a database and a cache, managed entirely by Temps.
+
+---
+
+## What you have accomplished {{ anchor: true, id: 'what-you-have-accomplished' }}
+
+You now have a complete data stack running on your server:
+
+| Service | Container | Purpose |
+|---------|-----------|---------|
+| PostgreSQL | `postgres-my-app-db` | Primary database with per-environment isolation |
+| Redis | `redis-my-app-cache` | Caching and session storage |
+
+Key concepts you learned:
+
+- **Services are shared:** One PostgreSQL instance can serve multiple projects, each getting its own database
+- **Environment isolation:** Temps creates `{project}_{environment}` databases automatically, so production and staging data never mix
+- **Automatic wiring:** Link a service to a project and Temps handles the environment variables, networking, and database creation
+- **Docker networking:** Containers communicate using Docker container names as hostnames over an internal network. The database port is only exposed to `127.0.0.1` on the host.
+
+### Available service types
+
+The same workflow applies to all managed services:
+
+| Service | Default Image | Environment Variables |
+|---------|--------------|----------------------|
+| PostgreSQL | `gotempsh/postgres-walg:18-bookworm` | `POSTGRES_URL`, `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DATABASE`, `POSTGRES_USER`, `POSTGRES_PASSWORD` |
+| Redis | `gotempsh/redis-walg:8-bookworm` | `REDIS_URL`, `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, `REDIS_DATABASE` |
+| MongoDB | `gotempsh/mongodb-walg:8.0` | `MONGODB_URL`, `MONGODB_HOST`, `MONGODB_PORT`, `MONGODB_DATABASE`, `MONGODB_USERNAME`, `MONGODB_PASSWORD` |
+| S3 Storage | `rustfs/rustfs:1.0.0-alpha.78` | `S3_BUCKET`, `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` |
+
+---
+
+## What to explore next
+
+<div className="not-prose">
+  <Button href="/docs/tutorials/set-up-backups-and-monitoring" variant="text" arrow="right">
+    Set up automated backups to protect your database
+  </Button>
+  <Button href="/docs/howto/manage-environment-variables" variant="text" arrow="right">
+    Manage environment variables across environments
+  </Button>
+  <Button href="/docs/howto/scale-for-traffic" variant="text" arrow="right">
+    Scale your application and database for more traffic
+  </Button>
+  <Button href="/docs/concepts/environments" variant="text" arrow="right">
+    Understand how environments isolate data and configuration
+  </Button>
+</div>

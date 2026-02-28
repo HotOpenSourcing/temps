@@ -162,7 +162,7 @@ export function RoutesManagement({
           </p>
         </div>
         <Button asChild>
-          <Link to="/load-balancer/add">
+          <Link to="/settings/load-balancer/add">
             <Plus className="mr-2 h-4 w-4" />
             Add Route
           </Link>
@@ -193,7 +193,7 @@ export function RoutesManagement({
           description="Get started by adding a new route to direct traffic to your backend services"
           action={
             <Button asChild>
-              <Link to="/load-balancer/add">
+              <Link to="/settings/load-balancer/add">
                 <Plus className="mr-2 h-4 w-4" />
                 Add Route
               </Link>

@@ -1,0 +1,629 @@
+export const metadata = {
+  title: 'Error Tracking',
+  description: 'Sentry-compatible error tracking built into Temps. Track, group, and resolve errors without third-party services.',
+  alternates: {
+    canonical: '/docs/features/error-tracking',
+  },
+}
+
+export const sections = [
+  { title: 'Overview', id: 'overview' },
+  { title: 'Sentry Compatibility', id: 'sentry-compatibility' },
+  { title: 'Setup & Integration', id: 'setup' },
+  { title: 'Error Grouping', id: 'error-grouping' },
+  { title: 'Error Details', id: 'error-details' },
+  { title: 'Error Resolution', id: 'resolution' },
+]
+
+# Error Tracking
+
+Temps includes Sentry-compatible error tracking built-in. Use your existing Sentry SDKs without code changes, and own your error data. {{ className: 'lead' }}
+
+---
+
+## Overview {{ anchor: true, id: 'overview' }}
+
+Track, debug, and resolve errors in production with enterprise-grade error tracking included in Temps.
+
+<Row>
+  <Col>
+    **What's Included**
+    - Sentry protocol compatibility
+    - Error grouping with fingerprinting
+    - Stack trace analysis
+    - Source map support
+    - Real-time error alerts
+    - Error context (user, request, environment)
+    - AI-powered error clustering
+    - Session correlation
+  </Col>
+  <Col>
+    **Why It Matters**
+    - No third-party services needed
+    - Use existing Sentry SDKs
+    - Complete data ownership
+    - Unlimited events (no pricing tiers)
+    - Integrated with analytics
+    - Correlate errors with sessions
+    - Lower latency (same infrastructure)
+  </Col>
+</Row>
+
+### Key Features
+
+<Properties>
+  <Property name="Drop-In Replacement">
+    Works with official Sentry SDKs (JavaScript, Python, Go, PHP, Ruby, etc.)
+  </Property>
+  <Property name="Smart Grouping">
+    AI-powered error clustering groups similar errors automatically
+  </Property>
+  <Property name="Rich Context">
+    Captures request details, user info, environment, custom metadata
+  </Property>
+  <Property name="Stack Traces">
+    Full stack traces with source map support for minified code
+  </Property>
+  <Property name="Real-Time Alerts">
+    Email, Slack, and webhook notifications for new errors
+  </Property>
+  <Property name="Session Correlation">
+    Link errors to session replays for visual debugging
+  </Property>
+</Properties>
+
+---
+
+## Sentry Compatibility {{ anchor: true, id: 'sentry-compatibility' }}
+
+Temps implements the complete Sentry protocol, allowing you to use official Sentry SDKs without modification.
+
+### Supported Features
+
+<Properties>
+  <Property name="Envelope Ingestion">
+    Full Sentry envelope protocol support (v7+)
+  </Property>
+  <Property name="Error Events">
+    Exception tracking with stack traces
+  </Property>
+  <Property name="Transaction Events">
+    Performance monitoring integration
+  </Property>
+  <Property name="Breadcrumbs">
+    Event trail leading up to errors
+  </Property>
+  <Property name="User Context">
+    User identification and metadata
+  </Property>
+  <Property name="Tags & Metadata">
+    Custom tagging and context
+  </Property>
+  <Property name="Releases">
+    Track errors by release version
+  </Property>
+</Properties>
+
+### Compatibility Matrix
+
+<Row>
+  <Col>
+    **Fully Supported SDKs**
+    - @sentry/browser (JavaScript)
+    - @sentry/react (React)
+    - @sentry/nextjs (Next.js)
+    - @sentry/node (Node.js)
+    - @sentry/python (Python)
+    - @sentry/go (Go)
+    - @sentry/php (PHP)
+    - @sentry/ruby (Ruby)
+    - @sentry/java (Java)
+    - @sentry/dotnet (.NET)
+  </Col>
+  <Col>
+    **Supported Platforms**
+    - Web browsers
+    - Node.js servers
+    - React Native
+    - Electron
+    - Mobile apps (iOS, Android)
+    - Desktop apps
+    - Serverless functions
+    - Docker containers
+  </Col>
+</Row>
+
+---
+
+## Setup & Integration {{ anchor: true, id: 'setup' }}
+
+Get started with error tracking in minutes using your existing Sentry SDK.
+
+### Step 1: Get Your DSN
+
+Each project gets a unique DSN (Data Source Name) for error reporting. The DSN format is:
+
+```
+https://<public_key>@<temps_app>/<project_id>
+```
+
+**Example DSN format:**
+```
+https://742ee692155dd1cb2cecd94838bb425d4b5a1184e5b57c0815e9d808a6f8d70d@your-temps-instance.com/1
+```
+
+### Get Your DSN
+
+Visit your project's error tracking setup page to view and copy your unique DSN:
+
+```
+https://<temps_app>/projects/<project_slug>/errors?tab=setup
+```
+
+**Example:**
+```
+https://app.temps.davidviejo.dev/projects/my-app/errors?tab=setup
+```
+
+On this page, you'll find:
+- **Your project's unique DSN** - Copy this to use in your Sentry SDK configuration
+- Setup instructions for different platforms
+- Environment-specific DSNs (if configured)
+- Rate limits and configuration options
+
+<Note>
+**Important:** Each project has a unique DSN. You must copy your actual DSN from the setup page—the DSN shown in examples above is just a format reference. Your DSN will have a different public key.
+
+**DSN Format:** The DSN consists of:
+- **Public Key**: A 64-character hexadecimal string (unique per project)
+- **Temps App URL**: Your Temps instance URL
+- **Project ID**: Numeric project identifier
+
+The DSN is automatically generated when you first visit the setup page.
+</Note>
+
+### Step 2: Install Sentry SDK
+
+Install the official Sentry SDK for your platform:
+
+<CodeGroup>
+```bash {{ title: 'JavaScript/React' }}
+npm install @sentry/react
+```
+
+```bash {{ title: 'Next.js' }}
+npm install @sentry/nextjs
+```
+
+```bash {{ title: 'Node.js' }}
+npm install @sentry/node
+```
+
+```bash {{ title: 'Python' }}
+pip install sentry-sdk
+```
+
+```bash {{ title: 'Go' }}
+go get github.com/getsentry/sentry-go
+```
+</CodeGroup>
+
+### Step 3: Configure SDK
+
+Point the Sentry SDK to your Temps instance:
+
+<CodeGroup title="Configure Sentry SDK">
+```typescript {{ title: 'React' }}
+import * as Sentry from '@sentry/react';
+
+Sentry.init({
+  // Copy your DSN from: https://<temps_app>/projects/<project_slug>/errors?tab=setup
+  dsn: process.env.NEXT_PUBLIC_SENTRY_DSN || 'YOUR_DSN_HERE',
+  environment: 'production',
+  release: 'my-app@1.0.0',
+
+  // Performance monitoring
+  tracesSampleRate: 1.0,
+
+  // Session replay integration
+  integrations: [new Sentry.BrowserTracing()],
+
+  beforeSend(event, hint) {
+    // Filter sensitive data
+    return event;
+  }
+});
+```
+
+```typescript {{ title: 'Next.js' }}
+// sentry.client.config.ts
+import * as Sentry from '@sentry/nextjs';
+
+Sentry.init({
+  dsn: process.env.NEXT_PUBLIC_SENTRY_DSN,
+  environment: process.env.NODE_ENV,
+  tracesSampleRate: 1.0,
+  replaysSessionSampleRate: 0.1,
+  replaysOnErrorSampleRate: 1.0,
+});
+```
+
+```python {{ title: 'Python' }}
+import sentry_sdk
+import os
+
+# Copy your DSN from: https://<temps_app>/projects/<project_slug>/errors?tab=setup
+sentry_sdk.init(
+    dsn=os.getenv("SENTRY_DSN", "YOUR_DSN_HERE"),
+    environment="production",
+    release="my-app@1.0.0",
+    traces_sample_rate=1.0,
+)
+```
+
+```go {{ title: 'Go' }}
+package main
+
+import (
+    "github.com/getsentry/sentry-go"
+    "os"
+)
+
+func main() {
+    // Copy your DSN from: https://<temps_app>/projects/<project_slug>/errors?tab=setup
+    dsn := os.Getenv("SENTRY_DSN")
+    if dsn == "" {
+        dsn = "YOUR_DSN_HERE"
+    }
+
+    err := sentry.Init(sentry.ClientOptions{
+        Dsn: dsn,
+        Environment: "production",
+        Release: "my-app@1.0.0",
+        TracesSampleRate: 1.0,
+    })
+    if err != nil {
+        log.Fatalf("sentry.Init: %s", err)
+    }
+    defer sentry.Flush(2 * time.Second)
+}
+```
+</CodeGroup>
+
+### Step 4: Test Error Tracking
+
+Trigger a test error to verify setup:
+
+<CodeGroup title="Test Error Tracking">
+```typescript {{ title: 'JavaScript' }}
+// Throw test error
+Sentry.captureException(new Error('Test error from Temps'));
+
+// Capture message
+Sentry.captureMessage('Test message', 'info');
+
+// Add breadcrumb
+Sentry.addBreadcrumb({
+  message: 'User clicked button',
+  level: 'info',
+  data: { button: 'signup' }
+});
+```
+
+```python {{ title: 'Python' }}
+from sentry_sdk import capture_exception, capture_message
+
+# Capture exception
+try:
+    1 / 0
+except Exception as e:
+    capture_exception(e)
+
+# Capture message
+capture_message('Test message from Temps', level='info')
+```
+
+```bash {{ title: 'CLI' }}
+# Send test error via CLI
+temps error-tracking test --project my-app
+```
+</CodeGroup>
+
+---
+
+## Error Grouping {{ anchor: true, id: 'error-grouping' }}
+
+Temps automatically groups similar errors together using smart fingerprinting and AI-powered clustering.
+
+### Grouping Strategies
+
+<Properties>
+  <Property name="Stack Trace Fingerprinting">
+    Groups errors with identical stack traces (default)
+  </Property>
+  <Property name="Exception Type">
+    Groups by exception class/type (TypeError, ReferenceError, etc.)
+  </Property>
+  <Property name="Error Message">
+    Groups by error message pattern (parameterized)
+  </Property>
+  <Property name="AI Clustering">
+    Uses OpenAI embeddings to find semantically similar errors
+  </Property>
+  <Property name="Custom Fingerprinting">
+    Define custom grouping rules via fingerprint tags
+  </Property>
+</Properties>
+
+### Custom Fingerprinting
+
+Override default grouping with custom fingerprints:
+
+<CodeGroup title="Custom Fingerprinting">
+```typescript {{ title: 'JavaScript' }}
+Sentry.captureException(error, {
+  fingerprint: ['database-error', 'connection-timeout'],
+});
+
+// Dynamic fingerprint
+Sentry.captureException(error, {
+  fingerprint: ['api-error', error.response?.status],
+});
+```
+
+```python {{ title: 'Python' }}
+with sentry_sdk.configure_scope() as scope:
+    scope.fingerprint = ['database-error', 'connection-timeout']
+    sentry_sdk.capture_exception(error)
+```
+</CodeGroup>
+
+### Merge & Split Groups
+
+<Row>
+  <Col>
+    **Merge Groups**
+
+    Combine multiple error groups that should be treated as one:
+
+    ```bash
+    temps error-tracking merge \
+      --groups error-1,error-2,error-3 \
+      --target error-1
+    ```
+  </Col>
+  <Col>
+    **Split Groups**
+
+    Separate errors that were incorrectly grouped:
+
+    ```bash
+    temps error-tracking split \
+      --group error-1 \
+      --event-ids evt-123,evt-456
+    ```
+  </Col>
+</Row>
+
+---
+
+## Error Details {{ anchor: true, id: 'error-details' }}
+
+Each error event captures comprehensive context for debugging.
+
+### Error Anatomy
+
+<Properties>
+  <Property name="Exception Info">
+    Type, message, stack trace with line numbers
+  </Property>
+  <Property name="Request Context">
+    URL, method, headers, query params, request body
+  </Property>
+  <Property name="User Context">
+    User ID, email, IP address, custom properties
+  </Property>
+  <Property name="Environment">
+    Browser/runtime version, OS, device type
+  </Property>
+  <Property name="Tags">
+    Custom tags (environment, version, feature flags)
+  </Property>
+  <Property name="Breadcrumbs">
+    Event trail leading to error (clicks, API calls, console logs)
+  </Property>
+  <Property name="Additional Data">
+    Custom metadata, local variables, state snapshots
+  </Property>
+</Properties>
+
+### Enrich Error Context
+
+Add custom context to errors:
+
+<CodeGroup title="Add Context">
+```typescript {{ title: 'User Context' }}
+Sentry.setUser({
+  id: 'user-123',
+  email: 'user@example.com',
+  username: 'johndoe',
+  subscription: 'pro'
+});
+```
+
+```typescript {{ title: 'Tags' }}
+Sentry.setTag('environment', 'production');
+Sentry.setTag('version', '1.2.3');
+Sentry.setTag('feature_flag', 'new_checkout');
+```
+
+```typescript {{ title: 'Extra Context' }}
+Sentry.setContext('order', {
+  orderId: '12345',
+  items: 3,
+  total: 99.99,
+  shippingMethod: 'express'
+});
+```
+
+```typescript {{ title: 'Breadcrumbs' }}
+Sentry.addBreadcrumb({
+  type: 'navigation',
+  category: 'navigation',
+  message: 'User navigated to checkout',
+  level: 'info',
+  data: { from: '/cart', to: '/checkout' }
+});
+```
+</CodeGroup>
+
+---
+
+<Note>
+  **Source Maps:** Source map upload and parsing is currently a work in progress (WIP). This feature will allow you to upload source maps to debug minified production code with readable stack traces.
+</Note>
+
+---
+
+
+## Error Resolution {{ anchor: true, id: 'resolution' }}
+
+Manage error lifecycle from discovery to resolution.
+
+### Error States
+
+<Properties>
+  <Property name="Unresolved">
+    New or ongoing errors (default state)
+  </Property>
+  <Property name="Resolved">
+    Marked as fixed (manually or automatically)
+  </Property>
+  <Property name="Ignored">
+    Known errors that should be suppressed
+  </Property>
+  <Property name="Regressed">
+    Error recurred after being resolved
+  </Property>
+</Properties>
+
+### Mark as Resolved
+
+<CodeGroup title="Resolve Errors">
+```bash {{ title: 'CLI' }}
+# Resolve error group
+temps error-tracking resolve --group error-123
+
+# Resolve in specific release
+temps error-tracking resolve --group error-123 --in-release 1.0.1
+
+# Resolve multiple groups
+temps error-tracking resolve --groups error-123,error-456,error-789
+```
+
+```typescript {{ title: 'Dashboard' }}
+// Resolve via dashboard
+// Navigate to: Error Details > Actions > Resolve
+
+// Options:
+// - Mark as resolved now
+// - Resolve in next release
+// - Resolve in specific release
+// - Set auto-resolve (if no new events in X days)
+```
+
+```typescript {{ title: 'API' }}
+// Resolve error group via API
+await fetch('/api/error-groups/error-123/resolve', {
+  method: 'POST',
+  headers: {
+    'Authorization': `Bearer ${API_KEY}`,
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify({
+    resolution: 'next_release',
+    comment: 'Fixed in PR #456'
+  })
+});
+```
+</CodeGroup>
+
+### Auto-Resolution
+
+Configure automatic resolution rules:
+
+```yaml
+# Auto-resolve errors
+auto_resolution:
+  # Resolve if no new events for X days
+  no_events_for: 30
+
+  # Resolve when new release is deployed
+  on_release: true
+
+  # Resolve when error rate drops below threshold
+  rate_threshold:
+    errors_per_hour: 1
+    duration: 24h
+```
+
+### Ignore Errors
+
+Suppress known errors you don't want to track:
+
+<CodeGroup title="Ignore Errors">
+```typescript {{ title: 'Client-Side' }}
+Sentry.init({
+  dsn: '...',
+  ignoreErrors: [
+    // Ignore specific error messages
+    'ResizeObserver loop limit exceeded',
+    'Non-Error promise rejection',
+
+    // Ignore error patterns
+    /^Loading chunk [\d]+ failed$/,
+  ],
+
+  // Ignore errors from specific URLs
+  denyUrls: [
+    /extensions\//i,
+    /^chrome:\/\//i,
+  ],
+
+  beforeSend(event, hint) {
+    // Custom ignore logic
+    if (event.exception) {
+      const error = hint.originalException;
+      if (error.message?.includes('Network error')) {
+        return null; // Don't send to Temps
+      }
+    }
+    return event;
+  }
+});
+```
+
+```bash {{ title: 'CLI' }}
+# Ignore error group
+temps error-tracking ignore --group error-123
+
+# Ignore with pattern
+temps error-tracking ignore --pattern "Loading chunk .* failed"
+```
+</CodeGroup>
+
+---
+
+## Additional Resources
+
+<div className="not-prose">
+  <Button href="/docs/features/analytics" variant="text" arrow="right">
+    Analytics & Session Replay
+  </Button>
+  <Button href="/docs/features/monitoring" variant="text" arrow="right">
+    Uptime Monitoring
+  </Button>
+  <Button href="/docs/reference/api" variant="text" arrow="right">
+    Error Tracking API
+  </Button>
+</div>

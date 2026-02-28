@@ -8,9 +8,6 @@ pub enum PluginSdkError {
     #[error("Failed to parse CLI arguments: {message}")]
     Args { message: String },
 
-    #[error("Database connection failed for plugin '{plugin_name}': {reason}")]
-    DatabaseConnection { plugin_name: String, reason: String },
-
     #[error("Failed to bind Unix socket at '{path}': {reason}")]
     SocketBind { path: String, reason: String },
 
@@ -29,6 +26,12 @@ pub enum PluginSdkError {
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 
-    #[error("Database error: {0}")]
-    Database(#[from] sea_orm::DbErr),
+    #[error("Platform channel closed unexpectedly")]
+    ChannelClosed,
+
+    #[error("Platform returned error ({code}): {message}")]
+    PlatformError { code: String, message: String },
+
+    #[error("Failed to deserialize platform response: {reason}")]
+    Deserialization { reason: String },
 }

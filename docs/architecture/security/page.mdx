@@ -1,0 +1,217 @@
+export const metadata = {
+  title: 'Security Features',
+  description: 'Learn about the security features available in Temps to protect your applications and data.',
+  alternates: {
+    canonical: '/docs/architecture/security',
+  },
+}
+
+# Security Features
+
+Temps provides multiple layers of security to protect your applications, data, and infrastructure. Here's what's available and how you can use it.
+
+## Transport Security
+
+### Automatic SSL/TLS
+- **Free SSL Certificates** - Automatic Let's Encrypt certificates
+- **Auto-Renewal** - Certificates renew automatically before expiration
+- **TLS 1.3** - Latest encryption standards
+- **Multiple Domains** - Support for unlimited domains
+- **HSTS** - Automatic security headers to enforce HTTPS
+
+### What You Need to Do
+- **Point Your Domain** - Point your domain to your Temps server
+- **That's It** - SSL is configured automatically
+
+## Access Control
+
+### IP Access Control
+Control who can access your applications:
+
+**Allow List (Whitelist)**
+- Only allow specific IP addresses or ranges
+- Perfect for internal tools or restricted access
+- Example: Only allow your office IP addresses
+
+**Block List (Blacklist)**
+- Block known bad IPs
+- Protect against attacks from specific sources
+- Example: Block IPs that have attacked you before
+
+### How to Use
+- Configure in the dashboard per project
+- Add IP addresses or CIDR ranges
+- Works immediately, no restart needed
+
+## Bot Protection
+
+### CAPTCHA Challenge
+Protect your applications from bots:
+
+- **Automatic Detection** - Triggers on suspicious traffic patterns
+- **Manual Trigger** - Enable for specific projects or domains
+- **User-Friendly** - Only shows when needed
+- **Session-Based** - Users only solve once per session
+
+### When It Triggers
+- High request rates from single IP
+- Suspicious traffic patterns
+- Manual configuration
+- Failed login attempts
+
+## Authentication
+
+### Multiple Login Methods
+Choose how you want to log in:
+
+**Email + Password**
+- Traditional login
+- Secure password hashing
+- Password strength requirements
+
+**Magic Links**
+- Passwordless login
+- Click link in email to log in
+- More secure than passwords
+
+**Two-Factor Authentication (2FA)**
+- Extra security layer
+- Works with authenticator apps (Google Authenticator, Authy)
+- Required for sensitive operations
+
+**API Keys**
+- For programmatic access
+- Scoped permissions
+- Can be revoked anytime
+
+### Account Security
+- **Secure Password Storage** - Passwords never stored, only hashes
+- **Session Management** - Secure session handling
+- **Token Expiration** - Tokens expire automatically
+- **Account Lockout** - Protection against brute force
+
+## Authorization
+
+### Role-Based Access Control
+Control who can do what:
+
+**Project Roles**
+- **Owner** - Full control, can delete project
+- **Admin** - Manage everything except deletion
+- **Member** - Can deploy and view analytics
+- **Viewer** - Read-only access
+
+**Permissions**
+- Fine-grained control per project
+- Different permissions for different environments
+- Team member management
+
+### API Key Scopes
+When using API keys, control what they can do:
+
+- **read:projects** - View projects
+- **write:projects** - Create/modify projects
+- **read:deployments** - View deployments
+- **write:deployments** - Create/manage deployments
+- **read:analytics** - View analytics data
+- **admin:project** - Full project access
+
+## Data Protection
+
+### Encryption
+- **Encrypted Storage** - Sensitive data encrypted at rest
+- **Encrypted Transit** - All data encrypted in transit (TLS)
+- **Encrypted Secrets** - Environment variables and secrets encrypted
+- **Secure Key Management** - Keys stored securely
+
+### What's Encrypted
+- Environment variable values (secrets)
+- TLS certificate private keys
+- API keys and tokens
+- User passwords (hashed, not encrypted)
+
+## Application Security
+
+### Automatic Protection
+Temps automatically protects your applications:
+
+- **Security Headers** - Added to all responses
+- **Input Validation** - All inputs validated
+- **SQL Injection Prevention** - Protected by design
+- **XSS Protection** - Cross-site scripting protection
+- **CSRF Protection** - Cross-site request forgery protection
+
+### Security Headers
+These headers are automatically added:
+
+- **X-Content-Type-Options: nosniff** - Prevent MIME type sniffing
+- **X-Frame-Options: DENY** - Prevent clickjacking
+- **X-XSS-Protection** - Enable XSS filter
+- **Strict-Transport-Security** - Force HTTPS
+
+## Monitoring & Alerts
+
+### Security Monitoring
+- **Failed Login Attempts** - Track and alert on suspicious activity
+- **Unauthorized Access** - Monitor access attempts
+- **Certificate Expiry** - Alerts before certificates expire
+- **Security Events** - Audit log of security-related actions
+
+### Audit Logging
+Track important security events:
+
+- User logins and logouts
+- Permission changes
+- API key creation/deletion
+- Security setting changes
+- Failed authentication attempts
+
+## Best Practices
+
+### For Your Account
+- **Use Strong Passwords** - Or use magic links
+- **Enable 2FA** - Extra security for your account
+- **Review API Keys** - Regularly review and revoke unused keys
+- **Monitor Audit Logs** - Check for suspicious activity
+
+### For Your Applications
+- **Use IP Allow Lists** - Restrict access when possible
+- **Enable CAPTCHA** - For public-facing apps under attack
+- **Use Secrets** - Don't put sensitive data in regular env vars
+- **Regular Updates** - Keep Temps updated
+- **Monitor Errors** - Watch for security-related errors
+
+### For Your Infrastructure
+- **Keep Temps Updated** - Security updates included
+- **Secure Database** - Use strong database passwords
+- **Network Security** - Use VPN for admin access
+- **Backup Regularly** - Have backups of your data
+
+## Compliance
+
+### Data Privacy
+- **Self-Hosted** - You control all data
+- **Data Location** - Data stays on your infrastructure
+- **Data Export** - Export your data anytime
+- **Data Deletion** - Delete data when needed
+
+### GDPR & Privacy
+- **Data Minimization** - Only collect what you need
+- **User Consent** - Integrate consent management
+- **Right to Access** - Export user data
+- **Right to Deletion** - Delete user data
+- **Data Portability** - Export data in standard formats
+
+## Reporting Security Issues
+
+If you find a security vulnerability:
+
+- **Report Privately** - Don't post publicly
+- **Responsible Disclosure** - Give time to fix
+- **Security Email** - Contact security@temps.sh
+
+## Next Steps
+
+- **[Overview](/docs/architecture/overview)** - System capabilities
+- **[Deployment Pipeline](/docs/architecture/deployment)** - How deployments work
+- **[Analytics & Data](/docs/architecture/data-flow)** - Analytics features

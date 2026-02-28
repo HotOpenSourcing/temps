@@ -11,16 +11,21 @@ pub struct Model {
     pub name: String,
     pub email: String,
     // Password authentication fields
+    #[serde(skip_serializing)]
     pub password_hash: Option<String>,
     pub email_verified: bool,
+    #[serde(skip_serializing)]
     pub email_verification_token: Option<String>,
     pub email_verification_expires: Option<DBDateTime>,
+    #[serde(skip_serializing)]
     pub password_reset_token: Option<String>,
     pub password_reset_expires: Option<DBDateTime>,
     // Common fields
     pub deleted_at: Option<DBDateTime>,
+    #[serde(skip_serializing)]
     pub mfa_secret: Option<String>,
     pub mfa_enabled: bool,
+    #[serde(skip_serializing)]
     pub mfa_recovery_codes: Option<String>,
     pub created_at: DBDateTime,
     pub updated_at: DBDateTime,

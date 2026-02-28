@@ -1,17 +1,17 @@
-//! Plugin runtime context providing access to shared services.
+//! Plugin runtime context providing access to platform services.
 
-use sea_orm::DatabaseConnection;
-use std::sync::Arc;
+use crate::client::TempsClient;
 
 /// Runtime context provided to external plugins.
 ///
 /// This is the plugin's window into the Temps ecosystem.
-/// It provides direct database access (trusted model) and
-/// configuration needed to operate within Temps.
+/// Platform data is accessed exclusively through the [`TempsClient`]
+/// returned by [`temps()`](Self::temps) — the plugin never has
+/// direct database access.
 #[derive(Clone)]
 pub struct PluginContext {
-    /// Database connection pool (shared with Temps)
-    db: Arc<DatabaseConnection>,
+    /// Typed client for querying the Temps platform
+    temps_client: TempsClient,
     /// The plugin's name (from manifest)
     plugin_name: String,
     /// Directory for plugin-specific data files
@@ -23,44 +23,37 @@ pub struct PluginContext {
 impl PluginContext {
     /// Create a new plugin context.
     pub fn new(
-        db: Arc<DatabaseConnection>,
+        temps_client: TempsClient,
         plugin_name: String,
         data_dir: std::path::PathBuf,
         auth_secret: String,
     ) -> Self {
         Self {
-            db,
+            temps_client,
             plugin_name,
             data_dir,
             auth_secret,
         }
     }
 
-    /// Get a reference to the database connection.
+    /// Get a client for querying the Temps platform.
     ///
-    /// This is the same Postgres database that Temps uses.
-    /// The plugin has full read/write access to all tables,
-    /// including `temps-entities` models.
+    /// The client provides typed, read-only access to projects,
+    /// environments, deployments, and other platform data.
     ///
     /// # Example
     /// ```rust,no_run
-    /// use temps_entities::projects;
-    /// use sea_orm::EntityTrait;
+    /// use temps_plugin_sdk::prelude::*;
     ///
     /// async fn list_projects(ctx: &PluginContext) {
-    ///     let projects = projects::Entity::find()
-    ///         .all(ctx.db())
-    ///         .await
-    ///         .unwrap();
+    ///     let projects = ctx.temps().list_projects().await.unwrap();
+    ///     for p in projects {
+    ///         println!("{}: {}", p.id, p.name);
+    ///     }
     /// }
     /// ```
-    pub fn db(&self) -> &DatabaseConnection {
-        &self.db
-    }
-
-    /// Get a shared Arc to the database connection.
-    pub fn db_arc(&self) -> Arc<DatabaseConnection> {
-        self.db.clone()
+    pub fn temps(&self) -> &TempsClient {
+        &self.temps_client
     }
 
     /// Get the plugin's name.

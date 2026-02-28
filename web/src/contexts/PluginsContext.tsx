@@ -22,31 +22,44 @@ const PluginsContext = createContext<PluginsContextType | undefined>(undefined)
 export function PluginsProvider({ children }: { children: ReactNode }) {
   const { data: plugins = [], isLoading } = usePlugins()
 
+  // Build nav entries with resolved paths: /plugins/{pluginName} for
+  // platform/settings sections so they match the <Route path="/plugins/:pluginName/*"> in App.tsx
+  const resolvedEntries = useMemo(
+    () =>
+      plugins.flatMap((p) =>
+        p.nav.map((entry) => ({
+          ...entry,
+          path:
+            entry.section === 'project'
+              ? entry.path // Project entries stay relative
+              : `/plugins/${p.name}`, // Platform/settings route through /plugins/:pluginName
+        }))
+      ),
+    [plugins]
+  )
+
   const platformNavEntries = useMemo(
     () =>
-      plugins
-        .flatMap((p) => p.nav)
+      resolvedEntries
         .filter((e) => e.section === 'platform')
         .sort((a, b) => a.order - b.order),
-    [plugins]
+    [resolvedEntries]
   )
 
   const settingsNavEntries = useMemo(
     () =>
-      plugins
-        .flatMap((p) => p.nav)
+      resolvedEntries
         .filter((e) => e.section === 'settings')
         .sort((a, b) => a.order - b.order),
-    [plugins]
+    [resolvedEntries]
   )
 
   const projectNavEntries = useMemo(
     () =>
-      plugins
-        .flatMap((p) => p.nav)
+      resolvedEntries
         .filter((e) => e.section === 'project')
         .sort((a, b) => a.order - b.order),
-    [plugins]
+    [resolvedEntries]
   )
 
   const getPlugin = (name: string) => plugins.find((p) => p.name === name)

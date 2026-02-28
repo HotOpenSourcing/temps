@@ -1,0 +1,395 @@
+export const metadata = {
+  title: 'Node SDK',
+  description:
+    'API reference for @temps-sdk/node-sdk. Typed API client with 24 namespaces and Sentry-compatible error tracking for Node.js.',
+  alternates: {
+    canonical: '/docs/reference/node-sdk',
+  },
+}
+
+export const sections = [
+  { title: 'Installation', id: 'installation' },
+  { title: 'API client', id: 'api-client' },
+  { title: 'Client namespaces', id: 'client-namespaces' },
+  { title: 'Error tracking', id: 'error-tracking' },
+  { title: 'ErrorTracking.init options', id: 'error-tracking-init-options' },
+  { title: 'Capturing errors', id: 'capturing-errors' },
+  { title: 'Context and scope', id: 'context-and-scope' },
+  { title: 'Breadcrumbs', id: 'breadcrumbs' },
+  { title: 'Performance monitoring', id: 'performance-monitoring' },
+  { title: 'User feedback', id: 'user-feedback' },
+  { title: 'Lifecycle', id: 'lifecycle' },
+]
+
+# Node SDK
+
+API reference for `@temps-sdk/node-sdk`. This package provides a typed API client for the entire Temps platform and a Sentry-compatible error tracking client for server-side Node.js applications. {{ className: 'lead' }}
+
+---
+
+## Installation {{ anchor: true, id: 'installation' }}
+
+<CodeGroup>
+
+```bash {{ title: 'npm' }}
+npm install @temps-sdk/node-sdk
+```
+
+```bash {{ title: 'bun' }}
+bun add @temps-sdk/node-sdk
+```
+
+```bash {{ title: 'pnpm' }}
+pnpm add @temps-sdk/node-sdk
+```
+
+</CodeGroup>
+
+**Requirements:** Node.js 18+ or Bun. TypeScript 5+ (peer dependency).
+
+---
+
+## API client {{ anchor: true, id: 'api-client' }}
+
+The API client provides typed access to every Temps API endpoint.
+
+```typescript
+import { TempsClient } from '@temps-sdk/node-sdk';
+
+const temps = new TempsClient({
+  baseUrl: 'https://your-instance.temps.dev',
+  apiKey: 'your-api-key',
+});
+
+// List projects
+const { data: projects } = await temps.projects.list();
+
+// Trigger a deployment
+await temps.deployments.deploy({
+  path: { project_id: 1 },
+  body: { branch: 'main' },
+});
+
+// Rollback
+await temps.deployments.rollback({
+  path: { project_id: 1, deployment_id: 5 },
+});
+```
+
+### Constructor options
+
+<Properties>
+  <Property name="baseUrl" type="string">
+    Your Temps instance URL (e.g. `https://your-instance.temps.dev`). Required.
+  </Property>
+  <Property name="apiKey" type="string">
+    API key for authentication. Required.
+  </Property>
+</Properties>
+
+### Raw client access
+
+For advanced use cases or endpoints not covered by namespaces:
+
+```typescript
+const client = temps.rawClient;
+```
+
+---
+
+## Client namespaces {{ anchor: true, id: 'client-namespaces' }}
+
+The client organizes all platform operations into 24 typed namespaces:
+
+| Namespace | Description |
+|-----------|-------------|
+| `temps.apiKeys` | API key CRUD, activate/deactivate |
+| `temps.analytics` | Visitors, sessions, events, enrichment, stats |
+| `temps.auditLogs` | Audit log retrieval |
+| `temps.authentication` | Login, logout, magic links, MFA, password reset |
+| `temps.backups` | Backup schedules, S3 sources, run/restore |
+| `temps.crons` | Cron jobs and execution history |
+| `temps.deployments` | Deploy, cancel, pause, resume, rollback, teardown, logs |
+| `temps.dns` | DNS providers, managed domains, zone listing |
+| `temps.domains` | SSL/TLS domains, ACME provisioning |
+| `temps.email` | Email providers, domains, send, stats |
+| `temps.externalServices` | PostgreSQL, Redis, S3 lifecycle, env vars |
+| `temps.files` | File retrieval by ID |
+| `temps.funnels` | Funnel CRUD, metrics, previews |
+| `temps.git` | GitHub/GitLab providers, repo connections, sync |
+| `temps.loadBalancer` | Route management |
+| `temps.monitoring` | Monitors, incidents, uptime, status buckets |
+| `temps.notifications` | Preferences, providers (email, Slack, webhook) |
+| `temps.performance` | Web Vitals metrics |
+| `temps.platform` | Instance info, IPs, geolocation, presets |
+| `temps.projects` | Full project lifecycle: environments, domains, env vars, containers, analytics, errors, session replay, webhooks |
+| `temps.proxyLogs` | Proxy log queries |
+| `temps.repositories` | Synced repos, branches, tags, presets |
+| `temps.sessionReplay` | Session init, events, deletion |
+| `temps.settings` | Platform settings |
+| `temps.users` | User CRUD, MFA, roles |
+
+All request/response types are auto-generated from the OpenAPI spec:
+
+```typescript
+import type {
+  ProjectResponse,
+  DeploymentResponse,
+  CreateProjectRequest,
+} from '@temps-sdk/node-sdk';
+```
+
+---
+
+## Error tracking {{ anchor: true, id: 'error-tracking' }}
+
+A Sentry-compatible error tracking client. Initialize it once at application startup.
+
+```typescript
+import { ErrorTracking } from '@temps-sdk/node-sdk';
+
+ErrorTracking.init({
+  dsn: 'https://public-key@your-instance.temps.dev/1',
+  environment: 'production',
+  release: '1.0.0',
+});
+```
+
+The DSN follows the Sentry format: `https://<public-key>@<host>/<project-id>`. Find it in your project's **Error Tracking > DSN & Setup** tab.
+
+---
+
+## ErrorTracking.init options {{ anchor: true, id: 'error-tracking-init-options' }}
+
+<Properties>
+  <Property name="dsn" type="string">
+    The Data Source Name. Required.
+  </Property>
+  <Property name="environment" type="string" defaultValue="production">
+    Environment name (e.g. `production`, `staging`).
+  </Property>
+  <Property name="release" type="string">
+    Your application version.
+  </Property>
+  <Property name="serverName" type="string">
+    Server identifier for distinguishing instances.
+  </Property>
+  <Property name="sampleRate" type="number" defaultValue="1.0">
+    Error sampling rate (0.0 to 1.0).
+  </Property>
+  <Property name="tracesSampleRate" type="number">
+    Performance trace sampling rate (0.0 to 1.0).
+  </Property>
+  <Property name="ignoreErrors" type="(string | RegExp)[]">
+    Errors matching these patterns are silently dropped.
+  </Property>
+  <Property name="beforeSend" type="(event) => event | null">
+    Modify or drop events before sending. Return `null` to drop.
+  </Property>
+  <Property name="maxBreadcrumbs" type="number" defaultValue="100">
+    Maximum breadcrumbs to retain.
+  </Property>
+  <Property name="attachStacktrace" type="boolean" defaultValue="true">
+    Attach stack traces to message events.
+  </Property>
+  <Property name="debug" type="boolean" defaultValue="false">
+    Log events to console instead of sending. Useful for development.
+  </Property>
+  <Property name="integrations" type="Integration[]">
+    Custom integrations (each must implement `setupOnce()`).
+  </Property>
+</Properties>
+
+---
+
+## Capturing errors {{ anchor: true, id: 'capturing-errors' }}
+
+```typescript
+// Capture an exception
+try {
+  riskyOperation();
+} catch (error) {
+  const eventId = ErrorTracking.captureException(error);
+}
+
+// Capture with extra context
+ErrorTracking.captureException(error, {
+  tags: { subsystem: 'payments' },
+  extra: { orderId: '12345', amount: 99.99 },
+  level: 'fatal',
+});
+
+// Capture a message
+ErrorTracking.captureMessage('Disk usage above 90%', 'warning');
+
+// Capture a raw event
+ErrorTracking.captureEvent({
+  message: 'Custom event',
+  level: 'info',
+  tags: { source: 'cron' },
+});
+```
+
+### Global handlers
+
+The SDK automatically captures unhandled errors:
+
+| Handler | Level | Behavior |
+|---------|-------|----------|
+| `process.on('uncaughtException')` | `fatal` | Captured, then `process.exit(1)` |
+| `process.on('unhandledRejection')` | `error` | Captured, process continues |
+
+Both are tagged with `handled: false`.
+
+---
+
+## Context and scope {{ anchor: true, id: 'context-and-scope' }}
+
+Enrich error reports with user information, tags, and structured data.
+
+```typescript
+// Set the current user (attached to all subsequent events)
+ErrorTracking.setUser({
+  id: '123',
+  email: 'alice@example.com',
+  username: 'alice',
+  ip_address: '{{auto}}',
+});
+
+// Set global tags
+ErrorTracking.setTag('region', 'eu-west-1');
+ErrorTracking.setTags({ service: 'api', version: '2.0' });
+
+// Set extra data
+ErrorTracking.setExtra('requestId', 'abc-123');
+ErrorTracking.setExtras({ query: 'SELECT ...', duration: 150 });
+
+// Set structured context
+ErrorTracking.setContext('order', {
+  id: 'order-456',
+  total: 99.99,
+  items: 3,
+});
+
+// Clear user on logout
+ErrorTracking.setUser(null);
+```
+
+### Scoped context
+
+```typescript
+// Permanent scope modification
+ErrorTracking.configureScope((scope) => {
+  scope.setTag('transaction', 'checkout');
+  scope.setUser({ id: '123' });
+});
+
+// Temporary scope (discarded after callback)
+ErrorTracking.withScope((scope) => {
+  scope.setTag('component', 'payment-form');
+  ErrorTracking.captureMessage('Payment processed');
+});
+```
+
+---
+
+## Breadcrumbs {{ anchor: true, id: 'breadcrumbs' }}
+
+Leave a trail of events leading up to an error.
+
+```typescript
+ErrorTracking.addBreadcrumb({
+  category: 'auth',
+  message: 'User logged in',
+  level: 'info',
+  data: { method: 'oauth' },
+});
+
+ErrorTracking.addBreadcrumb({
+  category: 'http',
+  message: 'GET /api/users',
+  level: 'info',
+  type: 'http',
+  data: { status: 200, duration: 45 },
+});
+
+// Clear all breadcrumbs
+ErrorTracking.clearBreadcrumbs();
+```
+
+### Breadcrumb properties
+
+<Properties>
+  <Property name="category" type="string">
+    Grouping category (e.g. `auth`, `http`, `db`).
+  </Property>
+  <Property name="message" type="string">
+    Human-readable description.
+  </Property>
+  <Property name="type" type="string">
+    One of: `default`, `http`, `navigation`, `console`.
+  </Property>
+  <Property name="level" type="string">
+    One of: `debug`, `info`, `warning`, `error`, `critical`.
+  </Property>
+  <Property name="data" type="Record<string, any>">
+    Arbitrary structured data.
+  </Property>
+</Properties>
+
+---
+
+## Performance monitoring {{ anchor: true, id: 'performance-monitoring' }}
+
+Track transactions and spans to measure latency.
+
+```typescript
+const transaction = ErrorTracking.startTransaction({
+  name: 'POST /api/checkout',
+  op: 'http.server',
+});
+
+const dbSpan = transaction.startChild({
+  op: 'db.query',
+  description: 'SELECT * FROM orders WHERE id = ?',
+});
+// ... query ...
+dbSpan.finish();
+
+transaction.setMeasurement('order_total', 99.99, 'usd');
+transaction.setStatus('ok');
+transaction.finish();
+```
+
+Spans capture `startTimestamp`, `endTimestamp`, `op`, `description`, `status`, `tags`, and `data`. Spans can be nested.
+
+---
+
+## User feedback {{ anchor: true, id: 'user-feedback' }}
+
+Collect feedback after an error:
+
+```typescript
+const eventId = ErrorTracking.captureException(error);
+
+ErrorTracking.captureUserFeedback({
+  event_id: eventId,
+  name: 'Alice',
+  email: 'alice@example.com',
+  comments: 'The checkout button did nothing.',
+});
+```
+
+---
+
+## Lifecycle {{ anchor: true, id: 'lifecycle' }}
+
+```typescript
+// Flush pending events (waits up to 2s by default)
+await ErrorTracking.flush(2000);
+
+// Close the client (disables further capturing + flushes)
+await ErrorTracking.close(2000);
+```
+
+Call `flush()` or `close()` before process exit to ensure all events are sent.

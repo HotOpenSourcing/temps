@@ -12,8 +12,9 @@
 //! Temps (main process)
 //!   │
 //!   ├── Scans ~/.temps/plugins/ for binaries
-//!   ├── Spawns each binary with --socket-path and --database-url
+//!   ├── Spawns each binary with --socket-path and --auth-secret
 //!   ├── Reads JSON manifest from stdout handshake
+//!   ├── Opens WebSocket to plugin's /_temps/channel (bidirectional data channel)
 //!   ├── Proxies /api/x/{plugin_name}/* → Unix socket
 //!   ├── Extracts + serves UI assets at /x/{plugin_name}/*
 //!   └── Registers nav entries in the shell
@@ -51,28 +52,32 @@
 //! temps_plugin_sdk::main!(MyPlugin);
 //! ```
 
+pub mod client;
 pub mod context;
 pub mod error;
 pub mod manifest;
 pub mod protocol;
 pub mod runtime;
 
+pub use client::TempsClient;
 pub use context::PluginContext;
 pub use error::PluginSdkError;
-pub use manifest::{NavEntry, NavSection, PluginManifest, PluginManifestBuilder, UiManifest};
+pub use manifest::{
+    NavEntry, NavSection, PluginEvent, PluginManifest, PluginManifestBuilder, UiManifest,
+    PLUGIN_EVENTS_PATH,
+};
 
 /// Re-export commonly used types
 pub mod prelude {
+    pub use crate::client::TempsClient;
     pub use crate::context::PluginContext;
     pub use crate::error::PluginSdkError;
-    pub use crate::manifest::{NavEntry, NavSection, PluginManifest, UiManifest};
+    pub use crate::manifest::{NavEntry, NavSection, PluginEvent, PluginManifest, UiManifest};
     pub use crate::ExternalPlugin;
 
-    // Re-export axum for convenience
+    // Re-export common dependencies for convenience
     pub use axum;
-    pub use sea_orm;
     pub use temps_core;
-    pub use temps_entities;
 }
 
 /// The trait that external plugin binaries implement.
@@ -93,7 +98,7 @@ pub trait ExternalPlugin: Send + Sync + 'static {
     /// Returns the axum Router for this plugin's API endpoints.
     ///
     /// Routes are relative — Temps mounts them under `/api/x/{plugin_name}/`.
-    /// The `PluginContext` provides access to the database connection,
+    /// The `PluginContext` provides access to the platform client,
     /// auth validation, and other shared services.
     fn router(&self, ctx: PluginContext) -> axum::Router;
 
@@ -118,7 +123,7 @@ pub trait ExternalPlugin: Send + Sync + 'static {
     }
 
     /// Called once after the plugin is initialized but before it starts serving.
-    /// Use this for one-time setup like running migrations.
+    /// Use this for one-time setup.
     fn on_start(&self, _ctx: &PluginContext) -> Result<(), PluginSdkError> {
         Ok(())
     }
@@ -126,16 +131,27 @@ pub trait ExternalPlugin: Send + Sync + 'static {
     /// Called when the plugin is shutting down.
     /// Use this for cleanup (closing connections, flushing buffers).
     fn on_shutdown(&self) {}
+
+    /// Called when Temps delivers a platform event the plugin subscribed to.
+    ///
+    /// Events are declared in the manifest via `.event("deployment.succeeded")`.
+    /// Events are delivered over the platform channel (WebSocket).
+    ///
+    /// The default implementation does nothing. Override this to react to
+    /// platform events (e.g., run an audit after a deployment succeeds).
+    fn on_event(&self, _ctx: &PluginContext, _event: temps_core::external_plugin::PluginEvent) {
+        // Default: no-op
+    }
 }
 
 /// Macro that generates the `main()` function for a plugin binary.
 ///
 /// This handles:
-/// - Parsing CLI arguments (--socket-path, --database-url, --auth-secret)
+/// - Parsing CLI arguments (--socket-path, --auth-secret, --data-dir)
 /// - Setting up tracing/logging
-/// - Connecting to the database
 /// - Writing the manifest to stdout (handshake)
 /// - Starting the axum server on the Unix socket
+/// - Accepting the platform channel (WebSocket) for data access
 /// - Graceful shutdown on SIGTERM
 ///
 /// # Usage

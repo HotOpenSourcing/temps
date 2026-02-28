@@ -1,0 +1,188 @@
+export const metadata = {
+  title: 'Deployments',
+  description:
+    'Understand the deployment pipeline: what happens from Git push to live application, and how Temps builds, deploys, and routes traffic.',
+  alternates: {
+    canonical: '/docs/concepts/deployments',
+  },
+}
+
+export const sections = [
+  { title: 'What is a deployment', id: 'what-is-a-deployment' },
+  { title: 'The deployment pipeline', id: 'the-deployment-pipeline' },
+  { title: 'Deployment states', id: 'deployment-states' },
+  { title: 'Jobs and stages', id: 'jobs-and-stages' },
+  { title: 'Build detection', id: 'build-detection' },
+  { title: 'Zero-downtime deploys', id: 'zero-downtime-deploys' },
+  { title: 'Deployment types', id: 'deployment-types' },
+]
+
+# Deployments
+
+A deployment is a single build-and-deploy cycle that takes your code from a Git commit (or a Docker image, or a static bundle) to a running application serving traffic. Each deployment is immutable — once created, it represents a specific version of your application at a specific point in time. {{ className: 'lead' }}
+
+---
+
+## What is a deployment {{ anchor: true, id: 'what-is-a-deployment' }}
+
+A deployment record tracks:
+
+- The **source** — which commit, branch, image, or bundle was deployed
+- The **environment** — which environment (production, staging, preview) received the deployment
+- The **status** — whether the deployment succeeded, failed, or is still running
+- The **timeline** — when each stage started and finished
+- The **logs** — full build and deploy output for every job in the pipeline
+- The **container** — the Docker image and running container(s) created by this deployment
+
+Deployments are immutable. You cannot modify a completed deployment. To change what is running, you create a new deployment (by pushing code, triggering a pipeline, or rolling back).
+
+---
+
+## The deployment pipeline {{ anchor: true, id: 'the-deployment-pipeline' }}
+
+When a deployment is triggered, it flows through a series of jobs:
+
+<Mermaid chart={`
+graph LR
+    A[Clone Repository] --> B[Build Image]
+    B --> C[Deploy Container]
+    C --> D[Health Check]
+    D --> E[Route Traffic]
+    E --> F[Mark Complete]
+    F --> G[Post-deploy tasks]
+`} />
+
+### 1. Clone repository
+
+Temps clones your Git repository at the specified commit. For monorepos, only the configured app directory is relevant to the build.
+
+### 2. Build image
+
+Temps detects your framework and builds a Docker image. The build method depends on your project:
+
+- **Nixpacks** (default for most frameworks) — Automatically detects language, dependencies, build command, and start command. No Dockerfile needed.
+- **Dockerfile** — If a `Dockerfile` exists in the repo root (or app directory), Temps uses it directly.
+- **Static preset** — For static sites, Temps builds the files and serves them with a lightweight web server.
+
+### 3. Deploy container
+
+The built image is started as a Docker container with:
+
+- The environment's resource limits (CPU, memory)
+- All environment variables (user-defined + auto-injected + service credentials)
+- Network connectivity to linked managed services
+- The configured replica count
+
+### 4. Health check
+
+Temps sends HTTP requests to the container to verify it started successfully. The container must respond with a 2xx status code. Health checks retry with exponential backoff to handle slow startup times.
+
+### 5. Route traffic
+
+Once the health check passes, the reverse proxy (Pingora) is updated to route incoming requests to the new container. The old container continues serving requests until the switch is complete.
+
+### 6. Mark complete
+
+The deployment status changes to `completed`. Post-deploy tasks run in the background:
+
+- Screenshot capture (for the deployment preview in the dashboard)
+- Vulnerability scanning
+- Source map upload (for error tracking stack traces)
+- Cron job configuration
+
+---
+
+## Deployment states {{ anchor: true, id: 'deployment-states' }}
+
+| State | Meaning |
+|-------|---------|
+| `pending` | Deployment is queued, waiting for a worker |
+| `running` | Build or deploy step is actively executing |
+| `deploying` | Container is starting and waiting for health checks |
+| `ready` | Container is healthy and receiving traffic |
+| `completed` / `deployed` | Fully deployed and serving traffic |
+| `failed` | A job in the pipeline failed. Check logs for details. |
+| `cancelled` | Manually cancelled by a user before completion |
+| `paused` | Temporarily paused (can be resumed) |
+| `stopped` | Container was stopped after being deployed |
+
+A deployment can only be cancelled while in `pending` or `running` state. Once a deployment reaches `completed`, it stays in that state until a new deployment replaces it.
+
+---
+
+## Jobs and stages {{ anchor: true, id: 'jobs-and-stages' }}
+
+Each deployment is composed of **jobs** — discrete units of work that execute in a defined order with dependency tracking.
+
+| Job type | What it does |
+|----------|-------------|
+| `DownloadRepoJob` | Clones the Git repository at the target commit |
+| `BuildImageJob` | Builds the Docker image using Nixpacks or Dockerfile |
+| `DeployImageJob` | Starts the container, runs health checks, routes traffic |
+| `DeployStaticJob` | Deploys pre-built static files |
+| `DeployStaticBundleJob` | Deploys an uploaded static bundle |
+| `PullExternalImageJob` | Pulls a Docker image from a registry |
+| `VerifyLocalImageJob` | Verifies a Docker image exists locally (for rollbacks) |
+| `MarkDeploymentCompleteJob` | Final status update and cleanup |
+| `ConfigureCronsJob` | Sets up scheduled tasks |
+| `TakeScreenshotJob` | Captures a visual preview of the deployed site |
+| `ScanVulnerabilitiesJob` | Runs security scanning on the container |
+| `CaptureSourceMapsJob` | Uploads source maps for error tracking |
+
+Each job has:
+
+- A **status** (Pending, Running, Success, Failure, Cancelled)
+- An **execution order** and **dependencies** (jobs that must complete first)
+- A **log stream** with timestamped output
+- An **error message** if it failed
+
+If a job fails, all dependent jobs are automatically cancelled.
+
+---
+
+## Build detection {{ anchor: true, id: 'build-detection' }}
+
+Temps auto-detects your framework based on files in the repository:
+
+| Detection signal | Framework | Build behavior |
+|-----------------|-----------|---------------|
+| `next.config.js` or `next.config.ts` | Next.js | Nixpacks with Next.js preset |
+| `vite.config.ts` | Vite (React, Vue, Svelte) | Nixpacks, output served as static |
+| `Dockerfile` | Docker | Direct Docker build |
+| `package.json` with `start` script | Node.js | Nixpacks with Node.js preset |
+| `requirements.txt` or `pyproject.toml` | Python | Nixpacks with Python preset |
+| `go.mod` | Go | Nixpacks with Go preset |
+| `Cargo.toml` | Rust | Nixpacks with Rust preset |
+| `index.html` (no framework files) | Static | Served directly |
+
+You can override the auto-detected preset in project settings if the detection is wrong.
+
+---
+
+## Zero-downtime deploys {{ anchor: true, id: 'zero-downtime-deploys' }}
+
+Temps uses a blue-green deployment strategy:
+
+1. The **new container** starts alongside the existing one
+2. Health checks verify the new container is ready
+3. The reverse proxy switches traffic to the new container
+4. The **old container** is stopped and removed
+
+During the transition, both containers are running. Requests in flight to the old container complete normally. New requests go to the new container. There is no downtime visible to users.
+
+If the new container fails its health check, the old container continues serving traffic and the deployment is marked as failed.
+
+---
+
+## Deployment types {{ anchor: true, id: 'deployment-types' }}
+
+| Type | Triggered by | Build step |
+|------|-------------|------------|
+| **Git push** | Webhook from GitHub/GitLab when you push to a tracked branch | Full build from source |
+| **Manual trigger** | Dashboard "Redeploy" button or `trigger-pipeline` API | Full build from source |
+| **Docker image** | `deploy/image` API endpoint | No build — pulls and deploys the image |
+| **Image upload** | `deploy/image-upload` API endpoint | No build — loads the uploaded tarball |
+| **Static bundle** | `deploy/static` API endpoint | No build — serves the uploaded files |
+| **Rollback** | Dashboard rollback action or `rollback` API endpoint | No build — reuses the Docker image from a previous deployment |
+
+Rollbacks are the fastest because they skip both the clone and build steps. They reuse the existing Docker image from a previous deployment, so they complete in seconds rather than minutes.

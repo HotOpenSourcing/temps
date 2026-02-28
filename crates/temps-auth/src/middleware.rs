@@ -372,17 +372,15 @@ async fn check_demo_mode(
         // User has selected a specific user to view as in demo mode
         match user_service.get_user_by_id(user_id).await {
             Ok(user) => {
-                // Determine the role of the selected user
-                let role = determine_user_role(&user, user_service)
-                    .await
-                    .unwrap_or(Role::User);
+                // SECURITY: Always use Role::Demo for demo sessions regardless of the
+                // selected user's actual role. This prevents privilege escalation where
+                // a demo visitor could select an admin user and gain admin permissions.
                 tracing::info!(
-                    "Demo mode: authenticated as selected user (id={}, email={}, role={:?})",
+                    "Demo mode: viewing as selected user (id={}, email={}) with Demo role",
                     user.id,
                     user.email,
-                    role
                 );
-                return Some(AuthContext::new_demo_session(user, role));
+                return Some(AuthContext::new_demo_session(user, Role::Demo));
             }
             Err(e) => {
                 tracing::warn!(

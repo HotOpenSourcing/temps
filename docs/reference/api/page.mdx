@@ -1,0 +1,351 @@
+export const metadata = {
+  title: 'REST API Reference',
+  description:
+    'Complete REST API reference for Temps. Authentication, project management, deployments, analytics, and all available endpoints.',
+  alternates: {
+    canonical: '/docs/reference/api',
+  },
+}
+
+export const sections = [
+  { title: 'Authentication', id: 'authentication' },
+  { title: 'Base URL', id: 'base-url' },
+  { title: 'Response format', id: 'response-format' },
+  { title: 'Projects', id: 'projects' },
+  { title: 'Deployments', id: 'deployments' },
+  { title: 'Environments', id: 'environments' },
+  { title: 'Environment variables', id: 'environment-variables' },
+  { title: 'Domains', id: 'domains' },
+  { title: 'External services', id: 'external-services' },
+  { title: 'Monitoring', id: 'monitoring' },
+  { title: 'Backups', id: 'backups' },
+  { title: 'Notifications', id: 'notifications' },
+  { title: 'Webhooks', id: 'webhooks' },
+  { title: 'Users and API keys', id: 'users-and-api-keys' },
+]
+
+# REST API Reference
+
+The Temps REST API provides programmatic access to every feature available in the dashboard. All endpoints return JSON and use standard HTTP methods. {{ className: 'lead' }}
+
+---
+
+## Authentication {{ anchor: true, id: 'authentication' }}
+
+All API requests require authentication via a Bearer token in the `Authorization` header:
+
+```bash
+curl -H "Authorization: Bearer YOUR_API_TOKEN" \
+  "https://your-temps-instance/api/projects"
+```
+
+Obtain a token from **Settings > API Keys** in the dashboard. Tokens can be scoped to specific permissions.
+
+Deployed applications receive a per-environment token automatically as the `TEMPS_API_TOKEN` environment variable.
+
+---
+
+## Base URL {{ anchor: true, id: 'base-url' }}
+
+All endpoints are relative to your Temps instance URL:
+
+```
+https://your-temps-instance/api/
+```
+
+---
+
+## Response format {{ anchor: true, id: 'response-format' }}
+
+**Success responses** return JSON with the resource data directly:
+
+```json
+{
+  "id": 1,
+  "name": "my-project",
+  "slug": "my-project",
+  "created_at": "2026-01-15T12:00:00Z"
+}
+```
+
+**Error responses** use RFC 7807 Problem Details:
+
+```json
+{
+  "type": "about:blank",
+  "title": "Not Found",
+  "status": 404,
+  "detail": "Project 42 not found"
+}
+```
+
+**Paginated responses** include items and a total count:
+
+```json
+{
+  "items": [...],
+  "total": 42
+}
+```
+
+Default pagination: 20 items per page, max 100. Use `?page=2&per_page=50` query parameters.
+
+---
+
+## Projects {{ anchor: true, id: 'projects' }}
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/projects` | List all projects |
+| `POST` | `/projects` | Create a project |
+| `GET` | `/projects/{project_id}` | Get a project |
+| `PUT` | `/projects/{project_id}` | Update a project |
+| `DELETE` | `/projects/{project_id}` | Delete a project |
+| `POST` | `/projects/{project_id}/trigger-pipeline` | Trigger a deployment from Git |
+
+### Trigger pipeline
+
+```bash
+curl -X POST "https://your-instance/api/projects/{project_id}/trigger-pipeline" \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"branch": "main", "environment_id": 1}'
+```
+
+---
+
+## Deployments {{ anchor: true, id: 'deployments' }}
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/projects/{project_id}/deployments` | List deployments |
+| `GET` | `/projects/{project_id}/deployments/{deployment_id}` | Get deployment details |
+| `POST` | `/projects/{project_id}/deployments/{deployment_id}/rollback` | Rollback to this deployment |
+| `POST` | `/projects/{project_id}/deployments/{deployment_id}/cancel` | Cancel a running deployment |
+| `POST` | `/projects/{project_id}/deployments/{deployment_id}/pause` | Pause a deployment |
+| `POST` | `/projects/{project_id}/deployments/{deployment_id}/resume` | Resume a paused deployment |
+| `POST` | `/projects/{project_id}/deployments/{deployment_id}/teardown` | Stop and remove containers |
+
+### Remote deployment endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/projects/{id}/environments/{id}/deploy/image` | Deploy from a registry image |
+| `POST` | `/projects/{id}/environments/{id}/deploy/image-upload` | Upload and deploy a Docker tarball (max 1 GB) |
+| `POST` | `/projects/{id}/environments/{id}/deploy/static` | Deploy from a static file bundle |
+| `POST` | `/projects/{id}/upload/static` | Upload a static bundle (max 500 MB) |
+
+### Deployment jobs and logs
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `.../deployments/{id}/jobs` | List all jobs for a deployment |
+| `GET` | `.../deployments/{id}/jobs/{job_id}/logs` | Get logs for a specific job |
+
+### Container management
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `.../environments/{id}/containers` | List containers in an environment |
+| `GET` | `.../containers/{id}/metrics` | Get real-time resource metrics |
+| `POST` | `.../containers/{id}/start` | Start a container |
+| `POST` | `.../containers/{id}/stop` | Stop a container |
+| `POST` | `.../containers/{id}/restart` | Restart a container |
+
+---
+
+## Environments {{ anchor: true, id: 'environments' }}
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/projects/{project_id}/environments` | List environments |
+| `POST` | `/projects/{project_id}/environments` | Create an environment |
+| `GET` | `/projects/{project_id}/environments/{env_id}` | Get environment details |
+| `PUT` | `/projects/{project_id}/environments/{env_id}/settings` | Update environment settings |
+| `DELETE` | `/projects/{project_id}/environments/{env_id}` | Delete an environment |
+
+### Update settings
+
+```bash
+curl -X PUT "https://your-instance/api/projects/{id}/environments/{id}/settings" \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "cpu_limit": 2000,
+    "memory_limit": 1024,
+    "replicas": 3,
+    "exposed_port": 8080
+  }'
+```
+
+---
+
+## Environment variables {{ anchor: true, id: 'environment-variables' }}
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/projects/{id}/env-vars` | List variables (filter with `?environment_id=X`) |
+| `POST` | `/projects/{id}/env-vars` | Create a variable |
+| `PUT` | `/projects/{id}/env-vars/{var_id}` | Update a variable |
+| `DELETE` | `/projects/{id}/env-vars/{var_id}` | Delete a variable |
+| `GET` | `/projects/{id}/env-vars/{key}/value` | Get a single variable value |
+
+### Create a variable
+
+```bash
+curl -X POST "https://your-instance/api/projects/{id}/env-vars" \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "key": "API_KEY",
+    "value": "secret-value",
+    "environment_ids": [1, 2],
+    "include_in_preview": false
+  }'
+```
+
+---
+
+## Domains {{ anchor: true, id: 'domains' }}
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/projects/{id}/environments/{id}/domains` | List domains for an environment |
+| `POST` | `/projects/{id}/environments/{id}/domains` | Add a domain |
+| `DELETE` | `/projects/{id}/environments/{id}/domains/{domain_id}` | Remove a domain |
+
+---
+
+## External services {{ anchor: true, id: 'external-services' }}
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/external-services` | List all services |
+| `POST` | `/external-services` | Create a service |
+| `GET` | `/external-services/{id}` | Get service details |
+| `PUT` | `/external-services/{id}` | Update a service |
+| `DELETE` | `/external-services/{id}` | Delete a service |
+| `GET` | `/external-services/{id}/health` | Health check |
+| `POST` | `/external-services/{id}/start` | Start a service |
+| `POST` | `/external-services/{id}/stop` | Stop a service |
+| `POST` | `/external-services/{id}/upgrade` | Upgrade Docker image |
+| `POST` | `/external-services/{id}/projects` | Link to a project |
+| `DELETE` | `/external-services/{id}/projects/{project_id}` | Unlink from a project |
+| `GET` | `/external-services/{id}/projects` | List linked projects |
+| `GET` | `/external-services/{id}/projects/{id}/environment` | Get env vars for service+project |
+| `GET` | `/external-services/types` | List available service types |
+| `GET` | `/external-services/available-containers` | List importable Docker containers |
+| `POST` | `/external-services/import` | Import an existing container |
+
+---
+
+## Monitoring {{ anchor: true, id: 'monitoring' }}
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/projects/{id}/status` | Overall status (monitors + incidents) |
+| `POST` | `/projects/{id}/monitors` | Create a monitor |
+| `GET` | `/projects/{id}/monitors` | List monitors |
+| `GET` | `/monitors/{id}` | Get monitor details |
+| `DELETE` | `/monitors/{id}` | Delete a monitor |
+| `GET` | `/monitors/{id}/current-status` | Current status with custom timeframe |
+| `GET` | `/monitors/{id}/uptime` | Uptime history |
+| `GET` | `/monitors/{id}/bucketed` | Time-bucketed status data |
+| `POST` | `/projects/{id}/incidents` | Create an incident |
+| `GET` | `/projects/{id}/incidents` | List incidents |
+| `GET` | `/incidents/{id}` | Get incident details |
+| `PATCH` | `/incidents/{id}/status` | Update incident status |
+| `GET` | `/incidents/{id}/updates` | Get incident updates |
+
+---
+
+## Backups {{ anchor: true, id: 'backups' }}
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/backups/s3-sources` | List S3 sources |
+| `POST` | `/backups/s3-sources` | Create an S3 source |
+| `GET` | `/backups/s3-sources/{id}` | Get S3 source |
+| `PATCH` | `/backups/s3-sources/{id}` | Update S3 source |
+| `DELETE` | `/backups/s3-sources/{id}` | Delete S3 source |
+| `POST` | `/backups/s3-sources/{id}/run` | Trigger a manual backup |
+| `GET` | `/backups/s3-sources/{id}/backups` | List backups in this source |
+| `GET` | `/backups/schedules` | List backup schedules |
+| `POST` | `/backups/schedules` | Create a schedule |
+| `GET` | `/backups/schedules/{id}` | Get schedule |
+| `DELETE` | `/backups/schedules/{id}` | Delete schedule |
+| `PATCH` | `/backups/schedules/{id}/enable` | Enable schedule |
+| `PATCH` | `/backups/schedules/{id}/disable` | Disable schedule |
+| `GET` | `/backups/{id}` | Get backup details |
+
+---
+
+## Notifications {{ anchor: true, id: 'notifications' }}
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/notification-providers` | List providers |
+| `POST` | `/notification-providers/email` | Create email provider |
+| `POST` | `/notification-providers/slack` | Create Slack provider |
+| `POST` | `/notification-providers/webhook` | Create webhook provider |
+| `PUT` | `/notification-providers/email/{id}` | Update email provider |
+| `PUT` | `/notification-providers/slack/{id}` | Update Slack provider |
+| `PUT` | `/notification-providers/webhook/{id}` | Update webhook provider |
+| `DELETE` | `/notification-providers/{id}` | Delete provider |
+| `POST` | `/notification-providers/{id}/test` | Test provider |
+| `GET` | `/notification-preferences` | Get preferences |
+| `PUT` | `/notification-preferences` | Update preferences |
+
+---
+
+## Webhooks {{ anchor: true, id: 'webhooks' }}
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/projects/{id}/webhooks` | List webhooks |
+| `POST` | `/projects/{id}/webhooks` | Create a webhook |
+| `GET` | `/projects/{id}/webhooks/{id}` | Get webhook |
+| `PUT` | `/projects/{id}/webhooks/{id}` | Update webhook |
+| `DELETE` | `/projects/{id}/webhooks/{id}` | Delete webhook |
+| `GET` | `/projects/{id}/webhooks/{id}/deliveries` | List delivery history |
+| `POST` | `.../deliveries/{id}/retry` | Retry a failed delivery |
+
+---
+
+## Users and API keys {{ anchor: true, id: 'users-and-api-keys' }}
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/users` | List users |
+| `POST` | `/users` | Create a user |
+| `GET` | `/users/{id}` | Get user |
+| `PUT` | `/users/{id}` | Update user |
+| `DELETE` | `/users/{id}` | Delete user |
+| `GET` | `/api-keys` | List API keys |
+| `POST` | `/api-keys` | Create an API key |
+| `DELETE` | `/api-keys/{id}` | Delete an API key |
+
+<Note>
+For the complete, auto-generated OpenAPI specification with all request/response schemas, access `/api/docs` on your Temps instance. The Node SDK (`@temps-sdk/node-sdk`) provides a fully typed client with 24 namespaces generated from this spec.
+</Note>
+
+---
+
+## Using the Node SDK
+
+Instead of making raw HTTP requests, use the official Node SDK for a typed client:
+
+```typescript
+import { TempsClient } from '@temps-sdk/node-sdk';
+
+const temps = new TempsClient({
+  baseUrl: 'https://your-instance.temps.dev',
+  apiKey: 'your-api-key',
+});
+
+// All endpoints are available as typed methods
+const { data: projects } = await temps.projects.list();
+const { data: deployments } = await temps.deployments.list({ path: { project_id: 1 } });
+```
+
+See the [Node SDK Reference](/docs/reference/node-sdk) for the full API.

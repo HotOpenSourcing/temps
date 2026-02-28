@@ -384,10 +384,22 @@ fn create_swagger_router(plugin_manager: &PluginManager) -> anyhow::Result<Route
 
 /// Static file handler for embedded website
 async fn serve_static_file(req: Request) -> Response {
-    let path = req.uri().path();
+    let raw_path = req.uri().path();
+
+    // Never serve the SPA for /api/ paths — those should 404 if unmatched
+    // by any API router (including external plugin proxies).
+    if raw_path.starts_with("/api/") {
+        return Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"status":404,"title":"Not Found","detail":"No API route matched"}"#,
+            ))
+            .unwrap();
+    }
 
     // Remove leading slash
-    let path = path.strip_prefix('/').unwrap_or(path);
+    let path = raw_path.strip_prefix('/').unwrap_or(raw_path);
 
     // Default to index.html for directory requests or root
     let path = if path.is_empty() || path.ends_with('/') {
@@ -983,8 +995,9 @@ pub async fn start_console_api(
     let app = plugin_manager
         .build_application()
         .map_err(|e| anyhow::anyhow!("Failed to build application: {}", e))?
-        .merge(create_swagger_router(&plugin_manager)?)
-        .fallback(serve_static_file);
+        .merge(create_swagger_router(&plugin_manager)?);
+
+    let app = app.fallback(serve_static_file);
 
     info!("Plugin system initialized successfully with static file serving");
 

@@ -10,6 +10,7 @@ pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
     pub name: String,
+    #[serde(skip_serializing)]
     pub key_hash: String,
     pub key_prefix: String, // First 8 characters for identification
     pub user_id: i32,

@@ -1,0 +1,270 @@
+export const metadata = {
+  title: 'Backups',
+  description: 'Automatically backup your applications, databases, and data with configurable schedules.',
+  alternates: {
+    canonical: '/docs/features/backups',
+  },
+}
+
+# Backups
+
+Protect your applications and data with automated backups. Configure backup schedules, store backups securely, and restore quickly when needed.
+
+<Mermaid chart={`
+sequenceDiagram
+    participant Schedule
+    participant Temps
+    participant App
+    participant Storage
+
+    Schedule->>Temps: Backup Triggered
+    Temps->>App: Capture Snapshot
+    App-->>Temps: Application Data
+    Temps->>Storage: Store Backup
+    Storage-->>Temps: Backup Complete
+
+    Note over Temps: Restore Process
+    Temps->>Storage: Retrieve Backup
+    Storage-->>Temps: Backup Data
+    Temps->>App: Restore Data
+    App-->>Temps: Restore Complete
+`} />
+
+## Quick Start
+
+### Enable Automatic Backups
+
+1. **Go to Project Settings** - Navigate to your project
+2. **Open Backups Tab** - Click on "Backups" in settings
+3. **Create Backup Schedule** - Set frequency and retention
+4. **Done** - Backups run automatically
+
+### Create Backup Now
+
+```bash
+# Create immediate backup
+temps backups create --project my-app
+
+# Create backup with label
+temps backups create --project my-app --label "pre-migration"
+```
+
+## What Gets Backed Up
+
+### Application Data
+
+- **Container volumes** - Persistent data in containers
+- **File uploads** - User-uploaded files
+- **Application state** - Runtime data
+- **Configuration files** - App-specific configs
+
+### Database Backups
+
+If you're using managed databases:
+
+- **PostgreSQL** - Full database dumps
+- **Redis** - RDB snapshots
+- **MySQL** - Database exports
+- **MongoDB** - Database dumps
+
+### Configuration
+
+- **Environment variables** - Encrypted backup
+- **Deployment settings** - Resource limits, ports
+- **Domain configurations** - SSL certificates, routing
+- **Team settings** - Permissions, access
+
+## Backup Schedules
+
+### Create Schedule
+
+```bash
+# Daily backup at 2 AM
+temps backups schedule create \
+  --project my-app \
+  --frequency daily \
+  --time "02:00" \
+  --retention 30
+
+# Weekly backup on Sundays
+temps backups schedule create \
+  --project my-app \
+  --frequency weekly \
+  --day sunday \
+  --time "03:00" \
+  --retention 90
+
+# Custom schedule (every 6 hours)
+temps backups schedule create \
+  --project my-app \
+  --frequency custom \
+  --interval 6h \
+  --retention 7
+```
+
+### Schedule Options
+
+**Frequency:**
+- **Hourly** - Every X hours
+- **Daily** - Once per day at specific time
+- **Weekly** - Once per week on specific day
+- **Monthly** - Once per month on specific date
+
+**Retention:**
+- Keep backups for X days
+- Automatic cleanup of old backups
+- Configurable per schedule
+
+## Backup Storage
+
+### Storage Options
+
+**Local Storage (Default)**
+- Stored on Temps server
+- Fast access
+- Included in Temps hosting
+
+**S3-Compatible Storage**
+- AWS S3, MinIO, DigitalOcean Spaces
+- Off-site backup
+- Configurable regions
+
+**External Storage**
+- Custom S3-compatible endpoints
+- Your own storage infrastructure
+
+### Configure Storage
+
+```bash
+# Set S3 backup storage
+temps backups storage configure \
+  --type s3 \
+  --bucket my-backups \
+  --region us-east-1 \
+  --access-key-id YOUR_KEY \
+  --secret-access-key YOUR_SECRET
+```
+
+## Restore from Backup
+
+### List Backups
+
+```bash
+# List all backups
+temps backups list --project my-app
+
+# Output:
+# ID       Created              Size    Label
+# backup1  2024-01-15 02:00    2.3GB   automatic
+# backup2  2024-01-14 02:00    2.2GB   automatic
+# backup3  2024-01-13 02:00    2.1GB   pre-migration
+```
+
+### Restore Backup
+
+```bash
+# Restore latest backup
+temps backups restore --project my-app --latest
+
+# Restore specific backup
+temps backups restore --project my-app --backup-id backup3
+
+# Restore to different project
+temps backups restore \
+  --project my-app \
+  --backup-id backup3 \
+  --target-project staging-app
+```
+
+### What Gets Restored
+
+- **Application data** - All volumes and files
+- **Database data** - If using managed databases
+- **Configuration** - Environment variables and settings
+
+### What Doesn't Get Restored
+
+- **Deployment history** - Previous deployments stay
+- **Analytics data** - Historical analytics preserved
+- **Team members** - User access unchanged
+
+## Backup Best Practices
+
+### Regular Backups
+
+- **Daily for production** - Critical applications
+- **Weekly for staging** - Less critical environments
+- **Before major changes** - Manual backup before migrations
+- **After deployments** - Backup after successful deployments
+
+### Test Restores
+
+Regularly test your restore process:
+
+```bash
+# Test restore to staging
+temps backups restore \
+  --project production-app \
+  --backup-id latest \
+  --target-project staging-app
+
+# Verify data integrity
+# Test application functionality
+# Delete test restore
+```
+
+### Backup Verification
+
+- **Automatic verification** - Backups verified after creation
+- **Integrity checks** - Checksums verified
+- **Restore testing** - Periodic restore tests
+- **Alert on failure** - Notified if backup fails
+
+## Disaster Recovery
+
+### Recovery Plan
+
+1. **Identify the issue** - What data was lost?
+2. **Find the backup** - Locate the right backup
+3. **Restore backup** - Restore to staging first
+4. **Verify data** - Check data integrity
+5. **Restore to production** - Restore when verified
+6. **Monitor closely** - Watch for issues
+
+### Recovery Time
+
+- **Backup retrieval** - Seconds to minutes
+- **Data restoration** - Minutes to hours (depends on size)
+- **Application restart** - Minutes
+- **Total recovery** - Usually under 1 hour
+
+## Backup Management
+
+### Delete Old Backups
+
+```bash
+# Delete specific backup
+temps backups delete --project my-app --backup-id backup1
+
+# Delete backups older than X days
+temps backups cleanup --project my-app --older-than 90
+```
+
+### Export Backups
+
+```bash
+# Download backup
+temps backups download --project my-app --backup-id backup1 --output ./backup.tar.gz
+
+# Export to external storage
+temps backups export \
+  --project my-app \
+  --backup-id backup1 \
+  --destination s3://my-external-backups/
+```
+
+## Next Steps
+
+- **[Rollbacks](/docs/features/rollbacks)** - Quick recovery from bad deployments
+- **[Monitoring](/docs/features/monitoring)** - Monitor backup success
+- **[Managed Services](/docs/features/managed-services)** - Database backup options

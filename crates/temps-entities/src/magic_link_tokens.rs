@@ -10,6 +10,7 @@ pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
     pub email: String,
+    #[serde(skip_serializing)]
     pub token: String,
     pub expires_at: DBDateTime,
     pub used: bool,

@@ -103,42 +103,9 @@ const mainNavItems: NavigationItem[] = [
     icon: Mail,
     keywords: ['email', 'mail', 'smtp', 'transactional', 'send'],
   },
-]
-
-const settingsNavItems: NavigationItem[] = [
-  {
-    title: 'Settings',
-    url: '/settings',
-    icon: Settings,
-    keywords: ['preferences', 'configuration', 'config'],
-  },
-  {
-    title: 'External Connectivity',
-    url: '/setup/connectivity',
-    icon: Network,
-    keywords: ['connections', 'integrations', 'external'],
-  },
-  {
-    title: 'API Keys',
-    url: '/keys',
-    icon: Key,
-    keywords: ['tokens', 'auth', 'authentication', 'api'],
-  },
-  {
-    title: 'Users',
-    url: '/users',
-    icon: Users,
-    keywords: ['team', 'members', 'people', 'accounts'],
-  },
-  {
-    title: 'Load Balancer',
-    url: '/load-balancer',
-    icon: Server,
-    keywords: ['lb', 'balancing', 'proxy'],
-  },
   {
     title: 'Git Providers',
-    url: '/git-sources',
+    url: '/git-providers',
     icon: GitBranch,
     keywords: ['github', 'gitlab', 'version control', 'repositories'],
   },
@@ -171,9 +138,24 @@ const settingsNavItems: NavigationItem[] = [
       'digitalocean',
     ],
   },
+]
+
+const settingsNavItems: NavigationItem[] = [
+  {
+    title: 'Settings',
+    url: '/settings',
+    icon: Settings,
+    keywords: ['preferences', 'configuration', 'config'],
+  },
+  {
+    title: 'External Connectivity',
+    url: '/setup/connectivity',
+    icon: Network,
+    keywords: ['connections', 'integrations', 'external'],
+  },
   {
     title: 'Notifications',
-    url: '/notifications',
+    url: '/settings/notifications',
     icon: Bell,
     keywords: ['alerts', 'notifications', 'messages'],
   },
@@ -192,11 +174,56 @@ const settingsNavItems: NavigationItem[] = [
     ],
   },
   {
+    title: 'Users',
+    url: '/settings/users',
+    icon: Users,
+    keywords: ['team', 'members', 'people', 'accounts'],
+  },
+  {
+    title: 'API Keys',
+    url: '/settings/keys',
+    icon: Key,
+    keywords: ['tokens', 'auth', 'authentication', 'api'],
+  },
+  {
+    title: 'Load Balancer',
+    url: '/settings/load-balancer',
+    icon: Server,
+    keywords: ['lb', 'balancing', 'proxy'],
+  },
+  {
+    title: 'Docker Registry',
+    url: '/settings/docker-registry',
+    icon: Boxes,
+    keywords: ['docker', 'registry', 'container', 'image'],
+  },
+  {
     title: 'Backups',
-    url: '/backups',
+    url: '/settings/backups',
     icon: DatabaseBackup,
     keywords: ['restore', 'backup', 'recovery'],
   },
+  {
+    title: 'Security Headers',
+    url: '/settings/security',
+    icon: Shield,
+    keywords: ['security', 'headers', 'csp', 'cors', 'protection'],
+  },
+  {
+    title: 'Rate Limiting',
+    url: '/settings/rate-limiting',
+    icon: Monitor,
+    keywords: ['rate', 'limit', 'throttle', 'ip', 'access'],
+  },
+  {
+    title: 'Disk Monitoring',
+    url: '/settings/disk-monitoring',
+    icon: HardDrive,
+    keywords: ['disk', 'space', 'storage', 'alerts', 'monitoring'],
+  },
+]
+
+const observeNavItems: NavigationItem[] = [
   {
     title: 'Proxy Logs',
     url: '/proxy-logs',
@@ -205,7 +232,7 @@ const settingsNavItems: NavigationItem[] = [
   },
   {
     title: 'Audit Logs',
-    url: '/settings/audit-logs',
+    url: '/audit-logs',
     icon: ScrollText,
     keywords: ['logs', 'audit', 'history', 'activity'],
   },
@@ -455,6 +482,7 @@ export function CommandPalette() {
     const allNavItems = [
       ...mainNavItems.map((item) => ({ ...item, category: 'Navigation' })),
       ...settingsNavItems.map((item) => ({ ...item, category: 'Settings' })),
+      ...observeNavItems.map((item) => ({ ...item, category: 'Observe' })),
       ...accountNavItems.map((item) => ({ ...item, category: 'Account' })),
       ...pluginNavItems.map((item) => ({ ...item, category: 'Plugins' })),
     ]
@@ -511,6 +539,7 @@ export function CommandPalette() {
       return {
         navigation: mainNavItems,
         settings: settingsNavItems,
+        observe: observeNavItems,
         account: accountNavItems,
         plugins: pluginNavItems,
         projectNav: projectNavigation,
@@ -524,6 +553,7 @@ export function CommandPalette() {
     const groupedNavResults = {
       navigation: [] as NavigationItem[],
       settings: [] as NavigationItem[],
+      observe: [] as NavigationItem[],
       account: [] as NavigationItem[],
       plugins: [] as NavigationItem[],
       projectNav: [] as NavigationItem[],
@@ -542,6 +572,8 @@ export function CommandPalette() {
         groupedNavResults.navigation.push(baseItem)
       } else if (item.category === 'Settings') {
         groupedNavResults.settings.push(baseItem)
+      } else if (item.category === 'Observe') {
+        groupedNavResults.observe.push(baseItem)
       } else if (item.category === 'Account') {
         groupedNavResults.account.push(baseItem)
       } else if (item.category === 'Plugins') {
@@ -566,6 +598,7 @@ export function CommandPalette() {
     return {
       navigation: groupedNavResults.navigation,
       settings: groupedNavResults.settings,
+      observe: groupedNavResults.observe,
       account: groupedNavResults.account,
       plugins: groupedNavResults.plugins,
       projectNav: groupedNavResults.projectNav,
@@ -636,6 +669,25 @@ export function CommandPalette() {
             <>
               <CommandGroup heading="Settings">
                 {searchResults.settings.map((item) => (
+                  <CommandItem
+                    key={item.url}
+                    onSelect={() => runCommand(() => navigate(item.url))}
+                    className="flex items-center gap-2"
+                  >
+                    <item.icon className="h-4 w-4" />
+                    <span>{item.title}</span>
+                  </CommandItem>
+                ))}
+              </CommandGroup>
+              <CommandSeparator />
+            </>
+          )}
+
+          {/* Observe Navigation */}
+          {searchResults.observe.length > 0 && (
+            <>
+              <CommandGroup heading="Observe">
+                {searchResults.observe.map((item) => (
                   <CommandItem
                     key={item.url}
                     onSelect={() => runCommand(() => navigate(item.url))}

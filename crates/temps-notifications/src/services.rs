@@ -458,12 +458,10 @@ impl NotificationProvider for SlackProvider {
 #[async_trait]
 impl NotificationProvider for WebhookProvider {
     async fn initialize(&mut self, _db: Arc<DatabaseConnection>) -> Result<()> {
-        // Validate webhook URL format
-        if !self.url.starts_with("http://") && !self.url.starts_with("https://") {
-            return Err(anyhow::anyhow!(
-                "Invalid webhook URL: must start with http:// or https://"
-            ));
-        }
+        // Validate webhook URL with full SSRF protection (blocks private IPs,
+        // loopback, cloud metadata, link-local, etc.)
+        temps_core::url_validation::validate_external_url(&self.url)
+            .map_err(|e| anyhow::anyhow!("Invalid webhook URL '{}': {}", self.url, e))?;
 
         // Validate HTTP method
         let method = self.method.to_uppercase();
@@ -1205,6 +1203,7 @@ impl NotificationPreferencesService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sea_orm::MockDatabase;
 
     fn create_test_notification() -> Notification {
         Notification {
@@ -1775,5 +1774,107 @@ mod tests {
             .cleanup_all_tables()
             .await
             .expect("Failed to cleanup");
+    }
+
+    // ── SSRF Prevention Tests for WebhookProvider ────────────────────
+
+    fn create_webhook(url: &str) -> WebhookProvider {
+        WebhookProvider {
+            url: url.to_string(),
+            method: "POST".to_string(),
+            headers: std::collections::HashMap::new(),
+            timeout_secs: 30,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_webhook_ssrf_blocks_private_ip_192_168() {
+        let mut webhook = create_webhook("http://192.168.1.1/callback");
+        let db = Arc::new(MockDatabase::new(sea_orm::DatabaseBackend::Postgres).into_connection());
+        let result = webhook.initialize(db).await;
+        assert!(
+            result.is_err(),
+            "Must block RFC 1918 private IP 192.168.x.x"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_webhook_ssrf_blocks_private_ip_10() {
+        let mut webhook = create_webhook("http://10.0.0.1:8080/hook");
+        let db = Arc::new(MockDatabase::new(sea_orm::DatabaseBackend::Postgres).into_connection());
+        let result = webhook.initialize(db).await;
+        assert!(result.is_err(), "Must block RFC 1918 private IP 10.x.x.x");
+    }
+
+    #[tokio::test]
+    async fn test_webhook_ssrf_blocks_private_ip_172() {
+        let mut webhook = create_webhook("http://172.16.0.1/hook");
+        let db = Arc::new(MockDatabase::new(sea_orm::DatabaseBackend::Postgres).into_connection());
+        let result = webhook.initialize(db).await;
+        assert!(result.is_err(), "Must block RFC 1918 private IP 172.16.x.x");
+    }
+
+    #[tokio::test]
+    async fn test_webhook_ssrf_blocks_localhost() {
+        let mut webhook = create_webhook("http://localhost:6379/");
+        let db = Arc::new(MockDatabase::new(sea_orm::DatabaseBackend::Postgres).into_connection());
+        let result = webhook.initialize(db).await;
+        assert!(result.is_err(), "Must block localhost");
+    }
+
+    #[tokio::test]
+    async fn test_webhook_ssrf_blocks_loopback_ip() {
+        let mut webhook = create_webhook("http://127.0.0.1:6379/");
+        let db = Arc::new(MockDatabase::new(sea_orm::DatabaseBackend::Postgres).into_connection());
+        let result = webhook.initialize(db).await;
+        assert!(result.is_err(), "Must block loopback 127.0.0.1");
+    }
+
+    #[tokio::test]
+    async fn test_webhook_ssrf_blocks_cloud_metadata() {
+        let mut webhook = create_webhook("http://169.254.169.254/latest/meta-data/");
+        let db = Arc::new(MockDatabase::new(sea_orm::DatabaseBackend::Postgres).into_connection());
+        let result = webhook.initialize(db).await;
+        assert!(
+            result.is_err(),
+            "Must block AWS metadata endpoint 169.254.169.254"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_webhook_ssrf_blocks_link_local() {
+        let mut webhook = create_webhook("http://169.254.1.1/hook");
+        let db = Arc::new(MockDatabase::new(sea_orm::DatabaseBackend::Postgres).into_connection());
+        let result = webhook.initialize(db).await;
+        assert!(result.is_err(), "Must block link-local 169.254.x.x");
+    }
+
+    #[tokio::test]
+    async fn test_webhook_ssrf_blocks_non_http_scheme() {
+        let mut webhook = create_webhook("ftp://evil.com/payload");
+        let db = Arc::new(MockDatabase::new(sea_orm::DatabaseBackend::Postgres).into_connection());
+        let result = webhook.initialize(db).await;
+        assert!(result.is_err(), "Must block non-HTTP/HTTPS schemes");
+    }
+
+    #[tokio::test]
+    async fn test_webhook_ssrf_allows_public_https() {
+        let mut webhook = create_webhook("https://hooks.example.com/webhook");
+        let db = Arc::new(MockDatabase::new(sea_orm::DatabaseBackend::Postgres).into_connection());
+        let result = webhook.initialize(db).await;
+        assert!(result.is_ok(), "Must allow public HTTPS URLs");
+    }
+
+    #[tokio::test]
+    async fn test_webhook_invalid_method_rejected() {
+        let mut webhook = WebhookProvider {
+            url: "https://hooks.example.com/webhook".to_string(),
+            method: "DELETE".to_string(),
+            headers: std::collections::HashMap::new(),
+            timeout_secs: 30,
+        };
+        let db = Arc::new(MockDatabase::new(sea_orm::DatabaseBackend::Postgres).into_connection());
+        let result = webhook.initialize(db).await;
+        assert!(result.is_err(), "Must reject DELETE method");
     }
 }

@@ -339,7 +339,7 @@ impl RedisService {
             port_bindings: Some(HashMap::from([(
                 "6379/tcp".to_string(),
                 Some(vec![bollard::models::PortBinding {
-                    host_ip: Some("0.0.0.0".to_string()),
+                    host_ip: Some("127.0.0.1".to_string()),
                     host_port: Some(config.port.to_string()),
                 }]),
             )])),
@@ -350,6 +350,9 @@ impl RedisService {
                 ..Default::default()
             }]),
             log_config: Some(crate::utils::default_service_log_config()),
+            // Security hardening for service containers
+            security_opt: Some(vec!["no-new-privileges:true".to_string()]),
+            pids_limit: Some(512),
             ..Default::default()
         };
         ensure_network_exists(docker)

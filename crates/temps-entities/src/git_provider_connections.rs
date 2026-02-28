@@ -13,7 +13,9 @@ pub struct Model {
     pub user_id: Option<i32>,
     pub account_name: String,
     pub account_type: String, // User, Organization
+    #[serde(skip_serializing)]
     pub access_token: Option<String>,
+    #[serde(skip_serializing)]
     pub refresh_token: Option<String>,
     pub token_expires_at: Option<DBDateTime>,
     pub refresh_token_expires_at: Option<DBDateTime>,

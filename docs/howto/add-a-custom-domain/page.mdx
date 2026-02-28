@@ -1,0 +1,150 @@
+export const metadata = {
+  title: 'Add a Custom Domain',
+  description:
+    'Point your own domain at a Temps application and get automatic HTTPS with Let\'s Encrypt certificates.',
+  alternates: {
+    canonical: '/docs/howto/add-a-custom-domain',
+  },
+}
+
+export const sections = [
+  { title: 'Create a DNS record', id: 'create-a-dns-record' },
+  { title: 'Add the domain in Temps', id: 'add-the-domain-in-temps' },
+  { title: 'Choose an SSL challenge type', id: 'choose-an-ssl-challenge-type' },
+  { title: 'Set up a wildcard domain', id: 'set-up-a-wildcard-domain' },
+  { title: 'Troubleshooting', id: 'troubleshooting' },
+]
+
+# Add a Custom Domain
+
+Replace the auto-assigned subdomain with your own domain. Temps provisions SSL certificates automatically via Let's Encrypt and renews them before they expire. {{ className: 'lead' }}
+
+---
+
+## Create a DNS record {{ anchor: true, id: 'create-a-dns-record' }}
+
+Before adding a domain in Temps, point it to your server. In your DNS provider (Cloudflare, Namecheap, Route 53, etc.), create an A record:
+
+| Type | Name | Value |
+|------|------|-------|
+| **A** | `app` (for `app.yourdomain.com`) | Your server's IP address |
+
+Or for the root domain:
+
+| Type | Name | Value |
+|------|------|-------|
+| **A** | `@` (for `yourdomain.com`) | Your server's IP address |
+
+Wait for DNS propagation. This usually takes a few minutes, but can take up to 48 hours in rare cases.
+
+<Note>
+**Cloudflare users:** If you use Cloudflare's proxy (orange cloud), SSL will work but certificate provisioning uses Cloudflare's certificates instead of Let's Encrypt. To use Temps' built-in Let's Encrypt provisioning, set the DNS record to **DNS only** (grey cloud) during initial setup. You can re-enable the proxy afterward.
+</Note>
+
+---
+
+## Add the domain in Temps {{ anchor: true, id: 'add-the-domain-in-temps' }}
+
+1. Open your project in the dashboard
+2. Click **Domains** in the project sidebar
+3. Click **Add Domain**
+4. Enter your domain name (e.g. `app.yourdomain.com`)
+5. Select the environment this domain should route to (usually production)
+6. Choose the SSL challenge type (see below)
+7. Click **Add**
+
+Temps verifies the domain ownership, provisions an SSL certificate, and starts routing traffic. The certificate renews automatically before it expires. You receive a notification 30 days before expiration as an extra safeguard.
+
+---
+
+## Choose an SSL challenge type {{ anchor: true, id: 'choose-an-ssl-challenge-type' }}
+
+Let's Encrypt needs to verify you control the domain before issuing a certificate. Temps supports two verification methods:
+
+<Row>
+  <Col>
+    ### HTTP-01 (Default)
+
+    Let's Encrypt makes an HTTP request to your domain on port 80. Temps handles this automatically.
+
+    **Requirements:**
+    - Port 80 must be open and reachable from the internet
+    - The DNS record must point to your server
+
+    **Use for:** Standard domains like `app.yourdomain.com`
+  </Col>
+  <Col>
+    ### DNS-01
+
+    Let's Encrypt verifies a TXT record in your domain's DNS. Temps creates and removes this record automatically if you have a DNS provider configured.
+
+    **Requirements:**
+    - A DNS provider connected in **Settings > DNS Providers** (Cloudflare, Route 53, DigitalOcean, Azure DNS, or Google Cloud DNS)
+
+    **Use for:** Wildcard domains (`*.yourdomain.com`) — HTTP-01 does not support wildcards
+  </Col>
+</Row>
+
+---
+
+## Set up a wildcard domain {{ anchor: true, id: 'set-up-a-wildcard-domain' }}
+
+A wildcard domain routes all subdomains to Temps, so each project or environment can get its own subdomain automatically (e.g. `my-app.yourdomain.com`, `staging.yourdomain.com`).
+
+### Step 1: Add a wildcard DNS record
+
+```
+*.yourdomain.com  →  A  →  YOUR_SERVER_IP
+```
+
+### Step 2: Connect a DNS provider
+
+Wildcard certificates require DNS-01 validation, which means Temps needs API access to your DNS provider.
+
+1. Go to **Settings > DNS Providers**
+2. Click **Add DNS Provider**
+3. Choose your provider and enter the API credentials:
+   - **Cloudflare** — API token with Zone:DNS:Edit permission
+   - **Route 53** — AWS access key with Route 53 permissions
+   - **DigitalOcean** — API token
+   - **Azure DNS** — Service principal credentials
+   - **Google Cloud DNS** — Service account key
+
+### Step 3: Add the wildcard domain
+
+1. Go to **Domains** in your project (or in global settings for the platform-wide preview domain)
+2. Add `*.yourdomain.com`
+3. Select **DNS-01** as the challenge type
+4. Select your DNS provider
+5. Click **Add**
+
+Temps creates the required TXT record, waits for verification, and issues a wildcard certificate. All subdomains under `yourdomain.com` are now covered.
+
+---
+
+## Troubleshooting {{ anchor: true, id: 'troubleshooting' }}
+
+<Properties>
+  <Property name="Certificate provisioning fails">
+    **Check DNS propagation:** Run `dig app.yourdomain.com` (or use an online DNS checker) and verify the A record points to your server's IP.
+
+    **Check port 80:** For HTTP-01 challenges, port 80 must be open. Test with: `curl -v http://app.yourdomain.com/.well-known/acme-challenge/test`
+
+    **Check firewall:** Ensure your server's firewall allows inbound connections on ports 80 and 443.
+  </Property>
+  <Property name="Domain shows as pending">
+    Certificate provisioning usually completes in under a minute. If the domain stays in a pending state:
+    - Verify the DNS record exists and has propagated
+    - Check that no other service (nginx, Apache) is competing for port 80
+    - Try removing and re-adding the domain
+  </Property>
+  <Property name="SSL certificate expired">
+    Temps renews certificates automatically. If a certificate expires:
+    - Check that port 80 is still open (for HTTP-01)
+    - Check that the DNS provider credentials are still valid (for DNS-01)
+    - Temps sends a notification 30 days before expiration — check your notification channels
+  </Property>
+  <Property name="Mixed content warnings">
+    If your application loads resources over HTTP while the page is served over HTTPS, browsers will block or warn about mixed content. Ensure all internal URLs use `https://` or protocol-relative paths (`//`).
+  </Property>
+</Properties>

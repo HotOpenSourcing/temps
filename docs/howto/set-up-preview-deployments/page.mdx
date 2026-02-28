@@ -1,0 +1,137 @@
+export const metadata = {
+  title: 'Set Up Preview Deployments',
+  description:
+    'Configure automatic preview deployments for every branch and pull request so you can review changes before they reach production.',
+  alternates: {
+    canonical: '/docs/howto/set-up-preview-deployments',
+  },
+}
+
+export const sections = [
+  { title: 'Enable preview environments', id: 'enable-preview-environments' },
+  { title: 'How preview branches work', id: 'how-preview-branches-work' },
+  { title: 'Control which variables are included', id: 'control-which-variables-are-included' },
+  { title: 'Access preview URLs', id: 'access-preview-urls' },
+  { title: 'Clean up stale previews', id: 'clean-up-stale-previews' },
+]
+
+# Set Up Preview Deployments
+
+Preview deployments create a temporary environment for every non-production branch, giving you a live URL to review changes before merging. {{ className: 'lead' }}
+
+---
+
+## Enable preview environments {{ anchor: true, id: 'enable-preview-environments' }}
+
+Preview deployments are controlled at the project level.
+
+1. Open your project in the dashboard
+2. Go to **Settings**
+3. Find **Preview Environments** and toggle it **on**
+4. Click **Save**
+
+Once enabled, any push to a branch that is not the project's main branch (usually `main` or `master`) will automatically create a preview environment and deploy to it.
+
+<Note>
+The main branch is configured in your project settings under **Git > Branch**. Pushes to this branch deploy to the default (production) environment. All other branches create preview environments.
+</Note>
+
+---
+
+## How preview branches work {{ anchor: true, id: 'how-preview-branches-work' }}
+
+When a push arrives on a non-main branch:
+
+1. Temps checks if a preview environment already exists for that branch
+2. If not, it creates one — the environment is named after the branch (e.g. `feature/login` becomes the `feature-login` environment)
+3. The application is built and deployed to that environment
+4. A unique URL is generated for the preview
+
+If the branch is pushed again, Temps redeploys to the same preview environment rather than creating a new one. If a previously deleted branch is pushed again, Temps restores the soft-deleted environment.
+
+### Preview URLs
+
+Preview deployments get URLs in the format:
+
+```
+https://{project-slug}-{environment-slug}.{preview-domain}
+```
+
+For example, if your project is `my-app` and the branch is `feature/login`, the preview URL would be:
+
+```
+https://my-app-feature-login.yourdomain.com
+```
+
+Each individual deployment within the preview also gets its own URL:
+
+```
+https://{deployment-slug}.{preview-domain}
+```
+
+These per-deployment URLs let you compare different versions of the same branch.
+
+---
+
+## Control which variables are included {{ anchor: true, id: 'control-which-variables-are-included' }}
+
+Not all environment variables should be available in preview deployments. For example, you might want to keep production API keys or payment processor credentials out of previews.
+
+Each environment variable has an **Include in Preview** toggle:
+
+1. Go to your project's **Environment Variables** page
+2. For each variable, check or uncheck **Include in Preview**
+3. Variables with this toggle off will not be injected into preview environments
+
+When creating a new environment variable via the API, set `include_in_preview: false` to exclude it:
+
+```bash
+curl -X POST "https://your-temps-instance/api/projects/{project_id}/env-vars" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "key": "STRIPE_SECRET_KEY",
+    "value": "sk_live_...",
+    "environment_ids": [1],
+    "include_in_preview": false
+  }'
+```
+
+<Note>
+**Managed service variables** (like `POSTGRES_URL` and `REDIS_URL`) are always injected into all environments, including previews. Each preview environment gets its own isolated database within the shared service.
+</Note>
+
+---
+
+## Access preview URLs {{ anchor: true, id: 'access-preview-urls' }}
+
+Find the URL for any preview deployment:
+
+1. Open your project in the dashboard
+2. Click **Environments** in the sidebar
+3. You will see all environments listed — preview environments are marked with a **Preview** badge
+4. Click on a preview environment to see its URL and deployment history
+
+Alternatively, on the **Deployments** page, each deployment entry shows its environment name and a direct link to the live URL.
+
+---
+
+## Clean up stale previews {{ anchor: true, id: 'clean-up-stale-previews' }}
+
+Preview environments accumulate over time as branches are created. To clean them up:
+
+1. Go to **Environments** in your project
+2. Find the preview environment you want to remove
+3. Click the **Delete** button (or use the actions menu)
+
+Deleting a preview environment:
+
+- Stops and removes the running containers
+- Soft-deletes the environment record (it can be restored if the same branch is pushed again)
+- Does **not** delete the Git branch
+
+<Note>
+**Production protection:** The production environment cannot be deleted. This is enforced at the system level regardless of user permissions.
+</Note>
+
+You can also tear down individual deployments without deleting the entire environment. On the **Deployments** page, use the **Teardown** action on any deployment to stop its container and free resources while keeping the environment available for future pushes.

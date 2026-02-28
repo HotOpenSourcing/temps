@@ -1,0 +1,202 @@
+export const metadata = {
+  title: 'Set Up Preview Deployments',
+  description: 'Tutorial: Configure preview deployments for pull requests and branches.',
+  alternates: {
+    canonical: '/docs/tutorials/preview-deployments',
+  },
+}
+
+# Set Up Preview Deployments
+
+## Page Goal
+Enable users to set up preview deployments for every PR/branch, allowing them to test changes before merging. Show the power of Temps for team collaboration.
+
+## Target Persona
+**Team Lead Tina** - A developer or manager who:
+- Works with a team
+- Needs to review changes before merging
+- Wants to test features in isolation
+- Dealing with complex features / multiple PRs
+- Values: Team collaboration, safe deployments, testing
+- Pain point: "I want to see it working before we merge"
+- Timeline: Setting up team workflow
+
+## Key Content to Include
+
+**1. What You'll Achieve**
+- Automatic deployment for every PR
+- Unique URL for each preview
+- Share with team/stakeholders
+- Test before merge
+- Automatic cleanup after merge
+- Time: 10 minutes setup
+
+**2. Understanding Preview Deployments**
+- What they are
+- How they work
+- Use cases:
+  - Feature testing
+  - Stakeholder review
+  - QA testing
+  - Client previews
+  - Design review
+
+**3. Enabling Preview Deployments**
+
+**Step 1: Navigate to Settings** (2 min)
+- Go to app settings
+- Preview deployments section
+- Enable toggle
+- Screenshot
+
+**Step 2: Configure Branch Pattern** (2 min)
+- Which branches get previews
+- All branches vs specific pattern
+- PR-only vs all branches
+- Examples:
+  - All PRs (recommended)
+  - `feature/*` branches
+  - `dev` and `staging` branches
+
+**Step 3: Configure Preview Settings** (2 min)
+- Subdomain pattern: `pr-123.app.temps.dev`
+- Environment variables (same as prod or different?)
+- Auto-delete after merge
+- Retention time
+
+**4. Using Preview Deployments**
+
+**Creating a Preview:**
+1. Create feature branch
+2. Push to GitHub
+3. Open pull request
+4. Temps automatically deploys preview
+5. Preview URL appears in PR comment (if configured)
+
+**Accessing Previews:**
+- From Temps dashboard
+- From GitHub PR
+- Direct URL pattern
+- Sharing with team
+
+**5. PR Integration**
+
+**GitHub Integration:**
+- Status checks on PRs
+- Comment with preview URL
+- Build status
+- Deployment status
+
+**GitLab Integration:**
+- Similar PR integration
+- Environment URLs
+- Pipeline status
+
+**6. Preview Environment Configuration**
+
+**Environment Variables:**
+- Use production values?
+- Use different database?
+- Feature flags for previews
+- API keys for testing
+
+**Database Strategy:**
+- Shared staging database
+- Per-preview database (if supported)
+- Seeded test data
+
+**7. Team Workflow**
+
+**Developer Workflow:**
+1. Create feature branch
+2. Make changes
+3. Push and open PR
+4. Share preview URL with team
+5. Gather feedback
+6. Make adjustments
+7. Merge when approved
+
+**Review Workflow:**
+- Review code on GitHub
+- Test functionality on preview
+- Check responsive design
+- Verify integrations
+- Approve PR
+
+**8. Best Practices**
+
+**✅ DO:**
+- Test on preview before merging
+- Share previews with stakeholders
+- Use meaningful branch names (reflects in URL)
+- Set up auto-cleanup
+- Use preview-specific config when needed
+
+**❌ DON'T:**
+- Merge without testing preview
+- Use production database in previews
+- Leave previews running forever
+- Share sensitive previews publicly
+
+**9. Advanced Configuration**
+
+**Custom Preview Domains:**
+- feature-abc.preview.yourapp.com
+- Custom subdomain patterns
+
+**Preview Webhooks:**
+- Notify Slack when preview ready
+- Post to Discord
+- Email stakeholders
+
+**Preview Authentication:**
+- Basic auth for previews
+- Protect previews from public access
+
+**10. Troubleshooting**
+
+**Preview not deploying:**
+- Check branch pattern
+- Verify permissions
+- Review build logs
+
+**Preview showing old code:**
+- Force rebuild
+- Clear cache
+- Check branch is updated
+
+**Preview URL not working:**
+- DNS propagation
+- Check deployment status
+- Verify branch exists
+
+**11. Example Scenarios**
+
+**Scenario 1: Feature Testing**
+- Developer builds login feature
+- Opens PR
+- Preview deployed automatically
+- Team tests login on preview
+- Finds bug, fixes, pushes update
+- Preview rebuilds
+- Approve and merge
+
+**Scenario 2: Design Review**
+- Designer wants to see new UI
+- Developer shares preview URL
+- Designer reviews on real device
+- Provides feedback
+- Changes made and instantly visible
+
+**Scenario 3: Client Demo**
+- Client wants to see new feature
+- Share preview URL (with auth)
+- Client tests and approves
+- Merge to production
+
+## Success Metrics
+- Team uses previews for every PR
+- Fewer bugs reach production
+- Faster feedback loop
+- Stakeholders can review easily
+- Confident merging

@@ -1,0 +1,367 @@
+export const metadata = {
+  title: "Logs & Debugging",
+  description:
+    "Access real-time application logs, filter by severity, search across deployments, and debug issues with built-in log aggregation in Temps.",
+  alternates: {
+    canonical: "/docs/features/logs",
+  },
+};
+
+# Logs & Debugging
+
+Access real-time application logs, build logs, and deployment logs to debug issues quickly. Search, filter, and stream logs directly from the dashboard or via API. {{ className: 'lead' }}
+
+---
+
+## Types of Logs
+
+Temps provides several types of logs to help you understand what's happening with your application:
+
+<Row>
+  <Col>
+    **Application Logs** - Runtime logs from your running containers - Standard
+    output (stdout) and error output (stderr) - Real-time streaming available -
+    Searchable and filterable **Build Logs** - Output from build processes -
+    Docker build logs - Dependency installation logs - Build errors and warnings
+  </Col>
+  <Col>
+    **Deployment Logs** - Deployment workflow execution - Step-by-step
+    deployment progress - Configuration and setup logs - Success/failure
+    messages **Audit Logs** - System events and user actions - Security-relevant
+    operations - Configuration changes - Access attempts
+  </Col>
+</Row>
+
+---
+
+## Accessing Logs
+
+### Via Dashboard
+
+**Application Logs:**
+
+1. Navigate to **Projects** → Select your project
+2. Choose an **Environment**
+3. Click on a **Container**
+4. Open the **Logs** tab
+5. View real-time logs or search historical logs
+
+**Build Logs:**
+
+1. Go to **Projects** → Select your project
+2. Open **Deployments**
+3. Click on a deployment
+4. View build logs in the deployment details
+
+**Deployment Logs:**
+
+1. Navigate to **Deployments**
+2. Select a deployment
+3. View step-by-step deployment logs
+4. See which steps succeeded or failed
+
+### Via CLI
+
+```bash
+# View application logs
+temps logs my-project --environment production --tail 100
+
+# Follow logs in real-time
+temps logs my-project --environment production --follow
+
+# View build logs for a deployment
+temps deployment logs my-project --deployment 123
+
+# Filter logs by level
+temps logs my-project --level error
+```
+
+### Via API
+
+```bash
+# Get container logs
+curl -H "Authorization: Bearer YOUR_TOKEN" \
+  "https://your-temps-instance.com/api/projects/{project_id}/environments/{environment_id}/containers/{container_id}/logs?tail=100"
+
+# Stream logs (Server-Sent Events)
+curl -H "Authorization: Bearer YOUR_TOKEN" \
+  "https://your-temps-instance.com/api/projects/{project_id}/environments/{environment_id}/containers/{container_id}/logs/stream"
+
+# Get deployment logs
+curl -H "Authorization: Bearer YOUR_TOKEN" \
+  "https://your-temps-instance.com/api/projects/{project_id}/deployments/{deployment_id}/logs"
+```
+
+---
+
+## Log Levels
+
+Temps supports structured logging with different log levels:
+
+<Properties>
+  <Property name="Success">
+    Successful operations, completions, and positive outcomes. Look for ✅ emoji
+    indicators.
+  </Property>
+
+  <Property name="Info">
+    General informational messages about application flow and state.
+  </Property>
+
+  <Property name="Warning">
+    Warnings about potential issues that don't prevent operation.
+  </Property>
+
+  <Property name="Error">
+    Error messages indicating failures or problems. Look for ❌ emoji
+    indicators.
+  </Property>
+</Properties>
+
+---
+
+## Searching and Filtering Logs
+
+### Search by Text
+
+Use the search box in the logs viewer to find specific messages:
+
+- **Exact match:** `"error connecting to database"`
+- **Case-insensitive:** `ERROR` matches `error`, `Error`, `ERROR`
+- **Partial match:** `database` finds all lines containing "database"
+
+### Filter by Log Level
+
+Filter logs to show only specific levels:
+
+1. Click the **Filter** button in the logs viewer
+2. Select log levels (Success, Info, Warning, Error)
+3. View filtered results
+
+### Filter by Time Range
+
+View logs from specific time periods:
+
+1. Use the **Time Range** selector
+2. Choose:
+   - Last hour
+   - Last 24 hours
+   - Last 7 days
+   - Custom range
+3. Logs update to show only the selected period
+
+### Filter by Deployment
+
+View logs for a specific deployment:
+
+1. Go to **Deployments**
+2. Select a deployment
+3. View logs specific to that deployment
+4. Compare logs across different deployments
+
+---
+
+## Real-Time Log Streaming
+
+Stream logs in real-time to see events as they happen:
+
+### In Dashboard
+
+1. Open the **Logs** tab for a container
+2. Click **Follow** or **Stream** button
+3. Logs update automatically as new entries arrive
+4. Scroll to bottom to see latest logs
+
+### Via API
+
+```javascript
+// JavaScript example - Server-Sent Events
+const eventSource = new EventSource(
+  `/api/projects/${projectId}/environments/${environmentId}/containers/${containerId}/logs/stream`,
+  {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  },
+);
+
+eventSource.onmessage = (event) => {
+  const logEntry = JSON.parse(event.data);
+  console.log(logEntry.message);
+};
+```
+
+---
+
+## Structured Logging Best Practices
+
+To get the most out of Temps logging, use structured logging in your application:
+
+### JSON Logging
+
+```javascript
+// Node.js example
+console.log(
+  JSON.stringify({
+    level: "info",
+    message: "User logged in",
+    userId: 123,
+    timestamp: new Date().toISOString(),
+  }),
+);
+```
+
+```python
+# Python example
+import json
+import logging
+
+logging.info(json.dumps({
+    'level': 'info',
+    'message': 'User logged in',
+    'user_id': 123,
+    'timestamp': datetime.now().isoformat()
+}))
+```
+
+### Log Levels
+
+Use appropriate log levels:
+
+```javascript
+// Debug - detailed information for debugging
+console.debug("Processing request", { requestId, userId });
+
+// Info - general informational messages
+console.info("User logged in", { userId });
+
+// Warning - potential issues
+console.warn("Rate limit approaching", { userId, requests: 95 });
+
+// Error - errors that need attention
+console.error("Database connection failed", { error: err.message });
+```
+
+### Include Context
+
+Always include relevant context in logs:
+
+```javascript
+// Good: Includes context
+console.log(
+  JSON.stringify({
+    level: "error",
+    message: "Payment processing failed",
+    userId: 123,
+    orderId: 456,
+    amount: 99.99,
+    error: error.message,
+    timestamp: new Date().toISOString(),
+  }),
+);
+
+// Bad: Missing context
+console.error("Payment failed");
+```
+
+---
+
+## Log Retention
+
+<Properties>
+  <Property name="Application Logs">
+    - **Retention:** 7 days by default - **Configurable:** Up to 90 days -
+    **Storage:** Compressed and stored efficiently - **Access:** Available via
+    dashboard and API
+  </Property>
+
+  <Property name="Build Logs">
+    - **Retention:** 30 days - **Storage:** Associated with deployments -
+    **Access:** Available for successful and failed builds
+  </Property>
+
+  <Property name="Deployment Logs">
+    - **Retention:** 90 days - **Storage:** Full deployment history -
+    **Access:** Available for all deployment attempts
+  </Property>
+
+  <Property name="Audit Logs">
+    - **Retention:** 1 year (configurable) - **Storage:** Securely stored for
+    compliance - **Access:** Admin access only
+  </Property>
+</Properties>
+
+---
+
+## Downloading Logs
+
+Download logs for offline analysis or archival:
+
+### Via Dashboard
+
+1. Open the **Logs** tab
+2. Apply any filters you need
+3. Click **Download** button
+4. Choose format (text or JSON)
+5. Save to your computer
+
+### Via API
+
+```bash
+# Download container logs
+curl -H "Authorization: Bearer YOUR_TOKEN" \
+  "https://your-temps-instance.com/api/projects/{project_id}/environments/{environment_id}/containers/{container_id}/logs/download" \
+  -o logs.txt
+
+# Download deployment logs
+curl -H "Authorization: Bearer YOUR_TOKEN" \
+  "https://your-temps-instance.com/api/projects/{project_id}/deployments/{deployment_id}/logs/download" \
+  -o deployment-logs.txt
+```
+
+---
+
+## Troubleshooting with Logs
+
+<Properties>
+  <Property name="Application Crashes">
+    **Symptoms:** Container restarts, 502 errors **What to check:** 1. Look for
+    error logs before restart 2. Check for out-of-memory errors 3. Review
+    exception stack traces 4. Check for unhandled promise rejections (Node.js)
+    **Example log pattern:** ``` ERROR: Unhandled exception TypeError: Cannot
+    read property 'id' of undefined at /app/src/routes/users.js:45:12 ```
+  </Property>
+
+  <Property name="Slow Performance">
+    **Symptoms:** High response times, timeouts **What to check:** 1. Search for
+    "slow" or "timeout" in logs 2. Look for database query logs 3. Check for
+    external API call delays 4. Review request processing times **Example log
+    pattern:** ``` WARN: Database query took 5.2s INFO: External API call
+    completed in 3.1s ```
+  </Property>
+
+  <Property name="Deployment Failures">
+    **Symptoms:** Deployments failing to complete **What to check:** 1. Review
+    build logs for compilation errors 2. Check for missing dependencies 3. Look
+    for configuration errors 4. Review deployment step logs **Example log
+    pattern:** ``` ERROR: Build failed npm ERR! code ELIFECYCLE npm ERR! errno 1
+    npm ERR! build: `next build` ```
+  </Property>
+
+  <Property name="Connection Issues">
+    **Symptoms:** Database or external service connection errors **What to
+    check:** 1. Search for "connection" or "connect" errors 2. Look for timeout
+    messages 3. Check for authentication failures 4. Review network-related
+    errors **Example log pattern:** ``` ERROR: Failed to connect to database
+    Error: connect ECONNREFUSED 127.0.0.1:5432 ```
+  </Property>
+</Properties>
+
+---
+
+## Next Steps
+
+- [Monitor Application Metrics](/docs/features/monitoring) to correlate logs with performance
+- [Set Up Error Tracking](/docs/features/error-tracking) to automatically capture errors
+- [Configure Log Retention](/docs/features/logs#log-retention) to customize how long logs are kept
+- [Integrate with External Tools](/docs/features/logs) to send logs to external log management services

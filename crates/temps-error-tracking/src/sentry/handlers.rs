@@ -254,8 +254,14 @@ async fn ingest_sentry_envelope(
     StatusCode::OK.into_response()
 }
 
+/// Maximum decompressed size to prevent decompression bombs (10 MB)
+const MAX_DECOMPRESSED_SIZE: usize = 10 * 1024 * 1024;
+
 /// Decompress the request body if it's gzip-compressed
 /// Sentry SDKs can send gzip-compressed envelopes with Content-Encoding: gzip header
+///
+/// SECURITY: Uses a size-limited reader to prevent decompression bomb attacks where
+/// a small compressed payload expands to consume all available memory.
 fn decompress_if_needed(headers: &HeaderMap, body: &Bytes) -> Result<Bytes, String> {
     // Check Content-Encoding header
     let is_gzip = headers
@@ -269,13 +275,21 @@ fn decompress_if_needed(headers: &HeaderMap, body: &Bytes) -> Result<Bytes, Stri
         return Ok(body.clone());
     }
 
-    // Decompress gzip data
-    let mut decoder = GzDecoder::new(&body[..]);
+    // Decompress gzip data with size limit to prevent decompression bombs
+    let decoder = GzDecoder::new(&body[..]);
+    let mut limited_reader = decoder.take(MAX_DECOMPRESSED_SIZE as u64 + 1);
     let mut decompressed = Vec::new();
 
-    decoder
+    limited_reader
         .read_to_end(&mut decompressed)
         .map_err(|e| format!("Failed to decompress gzip data: {}", e))?;
+
+    if decompressed.len() > MAX_DECOMPRESSED_SIZE {
+        return Err(format!(
+            "Decompressed data exceeds maximum allowed size of {} bytes",
+            MAX_DECOMPRESSED_SIZE
+        ));
+    }
 
     tracing::debug!(
         "Decompressed envelope: {} bytes -> {} bytes",
@@ -741,5 +755,90 @@ mod tests {
             response.status_code(),
             response.text()
         );
+    }
+
+    // === Decompression bomb protection tests ===
+
+    #[test]
+    fn test_decompress_normal_gzip() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        let data = b"Hello, World!";
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(data).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert("content-encoding", "gzip".parse().unwrap());
+        let body = Bytes::from(compressed);
+
+        let result = decompress_if_needed(&headers, &body);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().as_ref(), data);
+    }
+
+    #[test]
+    fn test_decompress_no_encoding_passthrough() {
+        let headers = HeaderMap::new();
+        let body = Bytes::from_static(b"raw data");
+        let result = decompress_if_needed(&headers, &body);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().as_ref(), b"raw data");
+    }
+
+    #[test]
+    fn test_decompress_bomb_rejected() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        // Create a gzip bomb: highly compressible data that expands beyond MAX_DECOMPRESSED_SIZE
+        // A sequence of zeros compresses extremely well
+        let large_data = vec![0u8; MAX_DECOMPRESSED_SIZE + 1024];
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+        encoder.write_all(&large_data).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        // The compressed data should be much smaller than the expanded data
+        assert!(
+            compressed.len() < MAX_DECOMPRESSED_SIZE,
+            "Compressed size {} should be much smaller than limit {}",
+            compressed.len(),
+            MAX_DECOMPRESSED_SIZE
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert("content-encoding", "gzip".parse().unwrap());
+        let body = Bytes::from(compressed);
+
+        let result = decompress_if_needed(&headers, &body);
+        assert!(result.is_err(), "Decompression bomb should be rejected");
+        assert!(
+            result.unwrap_err().contains("exceeds maximum"),
+            "Error should mention size limit"
+        );
+    }
+
+    #[test]
+    fn test_decompress_at_exact_limit_allowed() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        // Data exactly at the limit should be allowed
+        let data = vec![b'A'; MAX_DECOMPRESSED_SIZE];
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&data).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert("content-encoding", "gzip".parse().unwrap());
+        let body = Bytes::from(compressed);
+
+        let result = decompress_if_needed(&headers, &body);
+        assert!(result.is_ok(), "Data at exact limit should be allowed");
+        assert_eq!(result.unwrap().len(), MAX_DECOMPRESSED_SIZE);
     }
 }

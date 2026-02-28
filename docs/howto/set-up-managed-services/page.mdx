@@ -1,0 +1,267 @@
+export const metadata = {
+  title: 'Set Up Managed Services',
+  description:
+    'Provision PostgreSQL, Redis, MongoDB, and S3 storage as Docker containers managed by Temps. Link them to projects for automatic credential injection.',
+  alternates: {
+    canonical: '/docs/howto/set-up-managed-services',
+  },
+}
+
+export const sections = [
+  { title: 'Available service types', id: 'available-service-types' },
+  { title: 'Create a service', id: 'create-a-service' },
+  { title: 'Link a service to a project', id: 'link-a-service-to-a-project' },
+  { title: 'Import an existing container', id: 'import-an-existing-container' },
+  { title: 'Manage service lifecycle', id: 'manage-service-lifecycle' },
+  { title: 'Upgrade a service', id: 'upgrade-a-service' },
+]
+
+# Set Up Managed Services
+
+Managed services are databases and storage systems that Temps provisions as Docker containers on your server. You create them once, link them to projects, and Temps handles credential generation, networking, environment variable injection, and backups. {{ className: 'lead' }}
+
+---
+
+## Available service types {{ anchor: true, id: 'available-service-types' }}
+
+| Service | Default Image | Use case |
+|---------|--------------|----------|
+| **PostgreSQL** | `gotempsh/postgres-walg:18-bookworm` | Primary database with WAL-G streaming backups |
+| **Redis** | `gotempsh/redis-walg:8-bookworm` | Caching, sessions, pub/sub, and queues |
+| **MongoDB** | `gotempsh/mongodb-walg:8.0` | Document database |
+| **S3 Storage** | `rustfs/rustfs:1.0.0-alpha.78` | S3-compatible object storage (powered by RustFS) |
+
+Temps also provides higher-level abstractions built on these services:
+
+| Service | Backed by | Purpose |
+|---------|-----------|---------|
+| **KV** | Redis | Key-value storage accessible via the Temps SDK |
+| **Blob** | RustFS | File/blob storage accessible via the Temps SDK |
+
+---
+
+## Create a service {{ anchor: true, id: 'create-a-service' }}
+
+### From the dashboard
+
+1. In the sidebar, click **Services**
+2. Click **Create Service**
+3. Select the service type
+4. Enter a name and adjust parameters if needed
+5. Click **Create**
+
+### From the API
+
+```bash
+curl -X POST "https://your-temps-instance/api/external-services" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "my-postgres",
+    "service_type": "postgres",
+    "parameters": {
+      "port": "5432",
+      "max_connections": "200"
+    }
+  }'
+```
+
+### Configuration by service type
+
+**PostgreSQL:**
+
+| Parameter | Default | Editable after creation |
+|-----------|---------|----------------------|
+| `port` | Auto-assigned from 5432 | Yes |
+| `docker_image` | `gotempsh/postgres-walg:18-bookworm` | Yes |
+| `max_connections` | `100` | Yes |
+| `ssl_mode` | `disable` | Yes |
+| `database` | `postgres` | No (read-only) |
+| `username` | `postgres` | No (read-only) |
+| `password` | Auto-generated (16 chars) | No (read-only) |
+
+**Redis:**
+
+| Parameter | Default | Editable after creation |
+|-----------|---------|----------------------|
+| `port` | Auto-assigned from 6379 | Yes |
+| `docker_image` | `gotempsh/redis-walg:8-bookworm` | Yes |
+| `password` | Auto-generated | No (read-only) |
+
+**MongoDB:**
+
+| Parameter | Default | Editable after creation |
+|-----------|---------|----------------------|
+| `port` | Auto-assigned from 27017 | Yes |
+| `docker_image` | `gotempsh/mongodb-walg:8.0` | Yes |
+| `database` | `admin` | No (read-only) |
+| `username` | `admin` | No (read-only) |
+| `password` | Auto-generated | No (read-only) |
+
+**S3 / RustFS:**
+
+| Parameter | Default | Editable after creation |
+|-----------|---------|----------------------|
+| `port` | Auto-assigned from 9000 | Yes |
+| `console_port` | Auto-assigned from 9001 | Yes |
+| `docker_image` | `rustfs/rustfs:1.0.0-alpha.78` | Yes |
+| `access_key` | Auto-generated | No (read-only) |
+| `secret_key` | Auto-generated | No (read-only) |
+
+<Note>
+All ports are bound to `127.0.0.1` only — they are not publicly accessible from outside the server. Application containers communicate with services over the Docker network using container names as hostnames.
+</Note>
+
+---
+
+## Link a service to a project {{ anchor: true, id: 'link-a-service-to-a-project' }}
+
+Linking injects the service's connection credentials as environment variables into your project's containers at deploy time.
+
+### From the dashboard
+
+1. Open your project
+2. Click **Services** in the project sidebar
+3. Click **Link Service**
+4. Select the service
+5. Click **Link**
+
+### From the API
+
+```bash
+curl -X POST "https://your-temps-instance/api/external-services/{service_id}/projects" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "project_id": 1
+  }'
+```
+
+### What happens when you link
+
+1. **Per-project isolation** — For PostgreSQL, a dedicated database is created named `{project_slug}_{environment_slug}`. For Redis, a database number (0-15) is assigned. For S3, a dedicated bucket is created.
+2. **Environment variables** — Connection credentials are generated using the Docker container name as the hostname (for internal networking) and injected on the next deploy.
+3. **One per type** — Only one service of each type can be linked to a project. To switch PostgreSQL instances, unlink the current one first.
+
+### Preview environment variables
+
+To see what variables will be injected without deploying:
+
+```bash
+# Preview variable names
+curl "https://your-temps-instance/api/external-services/{service_id}/preview-environment-names" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+
+# Preview with masked values
+curl "https://your-temps-instance/api/external-services/{service_id}/preview-environment-masked" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+
+# Get actual values for a project
+curl "https://your-temps-instance/api/external-services/{service_id}/projects/{project_id}/environment" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+### Unlink a service
+
+```bash
+curl -X DELETE "https://your-temps-instance/api/external-services/{service_id}/projects/{project_id}" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+Unlinking does not delete the database or data inside the service — it only stops injecting environment variables. You can re-link later.
+
+---
+
+## Import an existing container {{ anchor: true, id: 'import-an-existing-container' }}
+
+If you already have a PostgreSQL or Redis container running on your server, you can import it into Temps instead of creating a new one.
+
+1. Go to **Services**
+2. Click **Import Container**
+3. Temps scans for running Docker containers that match known service types
+4. Select the container to import
+5. Provide the connection credentials (Temps cannot read them from the container)
+
+From the API:
+
+```bash
+# List importable containers
+curl "https://your-temps-instance/api/external-services/available-containers" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+
+# Import one
+curl -X POST "https://your-temps-instance/api/external-services/import" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "container_id": "abc123...",
+    "name": "existing-postgres",
+    "service_type": "postgres",
+    "parameters": {
+      "host": "localhost",
+      "port": "5432",
+      "database": "postgres",
+      "username": "postgres",
+      "password": "your-existing-password"
+    }
+  }'
+```
+
+---
+
+## Manage service lifecycle {{ anchor: true, id: 'manage-service-lifecycle' }}
+
+### Start and stop
+
+Services can be started and stopped independently:
+
+```bash
+# Stop a service (keeps data)
+curl -X POST "https://your-temps-instance/api/external-services/{id}/stop" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+
+# Start it again
+curl -X POST "https://your-temps-instance/api/external-services/{id}/start" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+Stopping a service does not delete any data — the Docker volume persists. Applications linked to a stopped service will fail to connect until the service is started again.
+
+### Health check
+
+```bash
+curl "https://your-temps-instance/api/external-services/{id}/health" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+### Delete a service
+
+```bash
+curl -X DELETE "https://your-temps-instance/api/external-services/{id}" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+<Note>
+**Warning:** Deleting a service removes the Docker container. Data in the Docker volume may be preserved depending on your Docker configuration, but this should not be relied upon. Always back up important data before deleting a service.
+</Note>
+
+---
+
+## Upgrade a service {{ anchor: true, id: 'upgrade-a-service' }}
+
+To update the Docker image (e.g. from PostgreSQL 17 to 18):
+
+```bash
+curl -X POST "https://your-temps-instance/api/external-services/{id}/upgrade" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "docker_image": "gotempsh/postgres-walg:18-bookworm"
+  }'
+```
+
+Or from the dashboard, go to the service details page and click **Upgrade**.
+
+<Note>
+**Major version upgrades** (e.g. PostgreSQL 16 to 17) may require data migration. Always back up the service before upgrading. For PostgreSQL, major version upgrades typically require a dump and restore — the Docker image swap alone may not be sufficient.
+</Note>

@@ -1,0 +1,146 @@
+export const metadata = {
+  title: 'Set Up Custom Domain',
+  description: 'Tutorial: Configure custom domains with automatic SSL on Temps.',
+  alternates: {
+    canonical: '/docs/tutorials/custom-domain',
+  },
+}
+
+# Set Up Custom Domain
+
+## Page Goal
+Walk users through adding a custom domain with zero anxiety. Make DNS configuration crystal clear with provider-specific examples.
+
+## Target Persona
+**Domain Diana** - A developer who:
+- Has a custom domain to connect
+- May not be DNS expert
+- Wants working HTTPS immediately
+- Worried about breaking things
+- Needs clear, visual instructions
+- Values: Clarity, confidence, working HTTPS
+- Common question: "Did I do this right?"
+- Timeline: Wants it working within the hour
+
+## Key Content to Include
+
+**1. What You'll Achieve**
+- yourapp.yourdomain.com pointing to Temps
+- Automatic SSL certificate
+- All HTTP → HTTPS redirects
+- Time: 10-15 minutes (+DNS propagation)
+
+**2. Prerequisites**
+- Domain name you own
+- Access to DNS settings
+- Deployed application on Temps
+
+**3. Step-by-Step Tutorial**
+
+**Step 1: Add Domain in Temps** (2 min)
+- Navigate to app settings
+- Click "Add Domain"
+- Enter your domain
+- Copy DNS records shown
+- Screenshots with arrows
+
+**Step 2: Configure DNS** (5 min)
+Provider-specific tabs with screenshots:
+
+**For Cloudflare:**
+- Login to Cloudflare
+- Select your domain
+- Go to DNS settings
+- Add A record / CNAME
+- Proxy status (yellow cloud)
+- Screenshot with annotations
+
+**For Namecheap:**
+- Login to Namecheap
+- Domain list → Manage
+- Advanced DNS tab
+- Add records
+- Screenshot
+
+**For GoDaddy:**
+- Similar step-by-step
+- Screenshots
+
+**For Other Providers:**
+- General DNS configuration
+- A record vs CNAME explanation
+
+**Step 3: Verify Configuration** (1 min)
+- Back to Temps dashboard
+- Click "Verify DNS"
+- Status indicator
+- What "Pending" vs "Active" means
+
+**Step 4: Wait for Propagation** (0-48h)
+- What is DNS propagation
+- Typical wait time: 5-30 minutes
+- How to check status
+- Using `dig` or online tools
+
+**Step 5: SSL Certificate** (automatic)
+- Certificate generated automatically
+- How to verify SSL is working
+- Troubleshooting SSL errors
+
+**4. Common Scenarios**
+
+**Adding www subdomain:**
+- Add both example.com and www.example.com
+- Or redirect one to the other
+
+**Using subdomain:**
+- api.example.com
+- app.example.com
+
+**Apex domain:**
+- Using A record
+- Provider-specific notes
+
+**5. Troubleshooting**
+
+**DNS not propagating:**
+- Check configuration
+- DNS checker tools
+- Typical wait times
+
+**SSL certificate error:**
+- Wait for DNS to propagate first
+- Certificate generation time
+- When to retry
+
+**Domain shows wrong app:**
+- Configuration check
+- Cache clearing
+
+**6. Verification Methods**
+- Browser check
+- `dig` command
+- `nslookup` command
+- Online DNS checkers
+- SSL checker tools
+
+**7. Advanced Configuration**
+- Multiple domains for one app
+- Domain redirects
+- Setting primary domain
+
+**8. Example Checklist**
+- [ ] Domain added in Temps
+- [ ] DNS records configured
+- [ ] DNS verification passed
+- [ ] SSL certificate active
+- [ ] HTTPS working
+- [ ] Redirects working
+
+## Success Metrics
+- User successfully adds custom domain
+- Zero ambiguity in DNS configuration
+- User knows how to verify each step
+- Working HTTPS achieved
+- User feels confident throughout process
+- Provider-specific guidance reduces errors

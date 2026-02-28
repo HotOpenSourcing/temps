@@ -148,20 +148,23 @@ impl ServeCommand {
             }
         });
 
-        // Create a channel to pass error information back from console API task
-        let (error_tx, mut error_rx) = tokio::sync::mpsc::channel::<String>(1);
+        // Start console API server in background (non-blocking).
+        // The proxy does NOT wait for the console to be ready. This ensures that
+        // deployed applications remain reachable even if console initialization
+        // fails (e.g. Docker check, GeoIP validation, plugin init). Console API
+        // requests will get connection-refused until the console finishes starting,
+        // but that is far better than all proxied traffic being down.
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
 
-        // Start console API server in background with error handling
         let db_clone = db.clone();
         let serve_config_clone = serve_config.clone();
         let cookie_crypto_clone = cookie_crypto.clone();
         let encryption_service_clone = encryption_service.clone();
         let route_table_clone = route_table.clone();
-
         let additional_templates = self.additional_templates.clone();
+
         rt.spawn(async move {
-            if let Err(e) = start_console_api(
+            match start_console_api(
                 db_clone,
                 serve_config_clone,
                 cookie_crypto_clone,
@@ -172,64 +175,43 @@ impl ServeCommand {
             )
             .await
             {
-                let error_msg = format!("{}", e);
-                let error_details = format!("{:?}", e);
-
-                tracing::error!("❌ Failed to start console API server");
-                tracing::error!("Error: {}", error_msg);
-                tracing::error!("Error details: {}", error_details);
-                tracing::error!("Console API server will not be available");
-                tracing::error!(
-                    "Check the logs above for more details about what failed during initialization"
-                );
-
-                // Send error information back to main thread
-                let _ = error_tx.send(error_msg).await;
+                Ok(()) => {
+                    info!("Console API server exited normally");
+                }
+                Err(e) => {
+                    tracing::error!("❌ Console API failed to start: {}", e);
+                    tracing::error!("Error details: {:?}", e);
+                    tracing::error!(
+                        "The console management UI will not be available. \
+                         Proxied traffic to deployed applications is NOT affected."
+                    );
+                }
             }
         });
 
-        // Wait for console API to be ready before starting proxy
-        info!("Waiting for console API to be ready...");
-        if let Err(recv_err) = rt.block_on(ready_rx) {
-            tracing::error!("❌ Console API failed to start");
-            tracing::error!("Ready signal channel error: {:?}", recv_err);
-            tracing::error!("This means the console API task exited or panicked before sending the ready signal.");
-
-            // Try to get error details from the error channel
-            let error_detail = std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().ok()?;
-                rt.block_on(async {
-                    match tokio::time::timeout(
-                        std::time::Duration::from_millis(100),
-                        error_rx.recv(),
-                    )
-                    .await
-                    {
-                        Ok(Some(msg)) => Some(msg),
-                        _ => None,
-                    }
-                })
-            })
-            .join()
-            .ok()
-            .flatten();
-
-            if let Some(error_detail) = error_detail {
-                tracing::error!("The console API task exited with error: {}", error_detail);
-                return Err(anyhow::anyhow!(
-                    "Console API failed to start: {}",
-                    error_detail
-                ));
-            } else {
-                tracing::error!("The console API task exited without signaling readiness.");
-                tracing::error!("This usually happens when plugin initialization fails.");
-                tracing::error!("Check the error messages above (starting with '❌ Failed to start console API') for details.");
-                return Err(anyhow::anyhow!(
-                    "Console API failed to start - check logs above for the specific error"
-                ));
+        // Monitor console readiness in a background thread so we can log it,
+        // but do NOT block proxy startup on it.
+        std::thread::spawn(move || {
+            let rt = match tokio::runtime::Runtime::new() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    tracing::error!("Failed to create runtime for console monitor: {}", e);
+                    return;
+                }
+            };
+            match rt.block_on(ready_rx) {
+                Ok(()) => {
+                    info!("✅ Console API is ready");
+                }
+                Err(_) => {
+                    tracing::error!(
+                        "❌ Console API failed to become ready — check error logs above"
+                    );
+                }
             }
-        }
-        info!("✅ Console API is ready, starting proxy server...");
+        });
+
+        info!("Starting proxy server (console API initializing in background)...");
 
         // Start proxy server (this will block until shutdown)
         start_proxy_server(

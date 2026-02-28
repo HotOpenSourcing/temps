@@ -1,0 +1,78 @@
+export const metadata = {
+  title: 'Deploy Serverless Functions',
+  description: 'Deploy serverless functions and edge functions on Temps.',
+  alternates: {
+    canonical: '/docs/deploy/serverless',
+  },
+}
+
+# Deploy Serverless Functions
+
+## Page Goal
+Explain serverless/edge function deployment capabilities in Temps. Help users understand when to use serverless vs traditional deployments.
+
+## Target Persona
+**Serverless Sam** - A developer who:
+- Building APIs or webhooks
+- Wants low-cost, auto-scaling solutions
+- Familiar with Lambda, Vercel Functions, etc.
+- Needs event-driven architecture
+- Values: Cost efficiency, auto-scaling, simplicity
+- Questions: "Can I deploy just functions?", "How do cold starts work?"
+- Timeline: 10-15 minutes to deploy first function
+
+## Key Content to Include
+
+**1. Serverless in Temps**
+- What serverless functions are
+- Use cases for serverless
+- How Temps handles serverless
+- Pricing model
+
+**2. Supported Runtimes**
+- Node.js functions
+- Python functions
+- Go functions
+- Deno/Bun support
+
+**3. Function Structure**
+- File-based routing
+- API routes (Next.js style)
+- Function signatures
+- Request/response handling
+
+**4. Deployment**
+- Creating function project
+- Directory structure
+- Configuration
+- Deploy
+
+**5. Configuration**
+- Environment variables
+- Timeouts
+- Memory limits
+- Concurrency
+
+**6. API Routes Pattern**
+- Next.js API routes
+- Remix actions
+- SvelteKit endpoints
+- Framework-specific patterns
+
+**7. Limitations & Considerations**
+- Execution time limits
+- Cold starts
+- Stateless nature
+- When NOT to use serverless
+
+**8. Advanced Topics**
+- Background jobs
+- Cron functions
+- Webhooks
+- Queue integration
+
+## Success Metrics
+- User understands serverless vs traditional deployment
+- User can deploy and test functions
+- User knows limitations
+- User can choose appropriate deployment type

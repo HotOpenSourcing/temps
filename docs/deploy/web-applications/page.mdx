@@ -1,0 +1,77 @@
+export const metadata = {
+  title: 'Deploy Web Applications',
+  description: 'Deploy Node.js, Python, Go, PHP, and other web applications on Temps.',
+  alternates: {
+    canonical: '/docs/deploy/web-applications',
+  },
+}
+
+# Deploy Web Applications
+
+## Page Goal
+Provide framework-agnostic guidance for deploying traditional web applications (APIs, full-stack apps) on Temps. Cover multiple languages and frameworks to show Temps' versatility.
+
+## Target Persona
+**Backend Ben** - A developer who:
+- Building APIs or full-stack applications
+- Uses Node.js, Python, Go, PHP, Ruby, or similar
+- May use frameworks like Express, FastAPI, Django, Laravel
+- Needs database connections (external DB)
+- Values: Framework flexibility, easy configuration
+- Questions: "Will my stack work?", "How do I configure the build?"
+- Timeline: 10-15 minutes to deploy first app
+
+## Key Content to Include
+
+**1. Supported Languages & Frameworks**
+- Node.js (Express, Fastify, NestJS, etc.)
+- Python (FastAPI, Django, Flask)
+- Go (Gin, Echo, Chi)
+- PHP (Laravel, Symfony)
+- Ruby (Rails, Sinatra)
+- And more...
+
+**2. Deployment Requirements**
+- Git repository
+- Framework detection
+- Port configuration (must listen on PORT env var)
+- Start command
+
+**3. Step-by-Step Deployment**
+- Connect repository
+- Auto-detection vs manual configuration
+- Setting start command
+- Environment variables
+- Deploy
+
+**4. Framework-Specific Guides**
+- Node.js/Express example
+- Python/FastAPI example
+- Go API example
+- PHP/Laravel example
+- Each with example code
+
+**5. Configuration**
+- Build commands
+- Start commands
+- Environment variables
+- Port binding
+- Health check endpoints
+
+**6. Database Connections**
+- Using external databases
+- Connection string configuration
+- Environment variable patterns
+- Connection pooling
+
+**7. Common Issues**
+- Port binding errors
+- Build failures
+- Runtime errors
+- Performance tuning
+
+## Success Metrics
+- User can deploy their web application
+- User understands how to configure their specific framework
+- User can connect to external services
+- Clear examples for popular frameworks

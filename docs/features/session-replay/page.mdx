@@ -1,0 +1,160 @@
+export const metadata = {
+  title: 'Session Replay',
+  description: 'Record and replay user sessions to understand how users interact with your application.',
+  alternates: {
+    canonical: '/docs/features/session-replay',
+  },
+}
+
+# Session Replay
+
+Record and replay user sessions to understand how users interact with your application. Debug issues faster by watching exactly what users experienced. {{ className: 'lead' }}
+
+---
+
+## Overview
+
+Session replay captures user interactions with your application, allowing you to replay sessions to understand user behavior and debug issues. Unlike external services, Temps session replay is fully self-hosted with complete data ownership.
+
+<Row>
+  <Col>
+    **Key Features**
+    - DOM recording with mutations
+    - Event timeline visualization
+    - Console log capture
+    - Network activity recording
+    - Error correlation
+    - Privacy controls
+  </Col>
+  <Col>
+    **Benefits**
+    - Debug issues faster
+    - Understand user behavior
+    - Complete data ownership
+    - No external dependencies
+    - GDPR compliant
+    - Unlimited recordings
+  </Col>
+</Row>
+
+---
+
+## Features
+
+<Properties>
+  <Property name="DOM Recording">
+    Captures DOM snapshots and mutations, CSS styles, input events (with privacy controls)
+  </Property>
+  <Property name="Event Timeline">
+    Visual timeline of all interactions (clicks, scrolls, navigation, errors)
+  </Property>
+  <Property name="Console Logs">
+    Captures browser console output during session
+  </Property>
+  <Property name="Network Activity">
+    Records API requests and responses (optional)
+  </Property>
+  <Property name="Performance Metrics">
+    FPS, memory usage, page load times
+  </Property>
+  <Property name="Error Correlation">
+    Links sessions to error events for debugging
+  </Property>
+</Properties>
+
+---
+
+## Privacy Controls
+
+Session replay includes comprehensive privacy controls to protect user data.
+
+<Row>
+  <Col>
+    **Automatic Redaction**
+    - Password inputs (always masked)
+    - Credit card fields (always masked)
+    - Email addresses (configurable)
+    - Phone numbers (configurable)
+    - Custom selectors
+  </Col>
+  <Col>
+    **User Consent**
+    - Opt-in mode (user consent required)
+    - Opt-out mode (user can disable)
+    - Geo-based rules (GDPR compliance)
+    - Sampling rate (record % of sessions)
+  </Col>
+</Row>
+
+---
+
+## Setup
+
+<CodeGroup title="Configure Session Replay">
+```typescript {{ title: 'React Setup' }}
+import { TempsAnalyticsProvider } from '@temps-sdk/react-analytics';
+
+function App() {
+  return (
+    <TempsAnalyticsProvider
+      enableSessionRecording={true}
+      sessionRecordingConfig={{
+        sessionSampleRate: 0.1, // Record 10% of sessions
+        maskAllInputs: false,
+        blockClass: 'sensitive-data',
+        maskTextSelector: 'input[type="password"], input[type="email"]'
+      }}
+    >
+      <YourApp />
+    </TempsAnalyticsProvider>
+  );
+}
+```
+
+```javascript {{ title: 'Vanilla JS' }}
+// Initialize session replay
+temps.init({
+  projectId: 'my-app',
+  sessionReplay: {
+    enabled: true,
+    sampling: 0.1,
+    privacy: {
+      maskAllInputs: false,
+      blockClass: 'no-record',
+      maskClass: 'mask-content'
+    }
+  }
+});
+```
+</CodeGroup>
+
+---
+
+## Replay Player
+
+The replay player provides a full-featured interface for watching session recordings.
+
+**Player Features:**
+- Playback controls (play, pause, speed adjustment)
+- Timeline scrubber
+- Event markers (clicks, navigation, errors)
+- Console panel
+- Network panel
+- Device viewport emulation
+
+<Note>
+  **Storage Optimization:** Session recordings are compressed using efficient algorithms. Average session (~5 minutes) uses ~500KB storage.
+</Note>
+
+---
+
+## Additional Resources
+
+<div className="not-prose">
+  <Button href="/docs/features/analytics" variant="text" arrow="right">
+    Analytics Overview
+  </Button>
+  <Button href="/docs/features/error-tracking" variant="text" arrow="right">
+    Error Tracking
+  </Button>
+</div>

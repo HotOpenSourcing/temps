@@ -1,0 +1,266 @@
+export const metadata = {
+  title: 'Scale Your Application',
+  description: 'Tutorial: Scale your application on Temps for high traffic.',
+  alternates: {
+    canonical: '/docs/tutorials/scaling',
+  },
+}
+
+# Scale Your Application
+
+## Page Goal
+Help users understand how to scale their applications on Temps, from vertical to horizontal scaling. Show that Temps can handle production traffic.
+
+## Target Persona
+**Growth Greg** - A developer whose:
+- Application is getting traction
+- Experiencing performance issues or anticipating growth
+- Needs to handle more traffic
+- Worried about downtime
+- Values: Performance, reliability, cost-effective scaling
+- Questions: "Can Temps handle my traffic?", "How do I scale?"
+- Timeline: Proactive planning or reactive to current issues
+
+## Key Content to Include
+
+**1. What You'll Learn**
+- Vertical scaling (bigger server)
+- Horizontal scaling (more instances)
+- Performance optimization
+- Cost vs performance tradeoffs
+- Time: 15-20 minutes
+
+**2. Understanding Scale**
+
+**When to Scale:**
+- Response times increasing
+- CPU/memory at capacity
+- Traffic patterns and spikes
+- Growth projections
+
+**Metrics to Monitor:**
+- Response time
+- CPU usage
+- Memory usage
+- Request rate
+- Error rate
+
+**3. Vertical Scaling (Scale Up)**
+
+**What it is:**
+- Increase VPS resources
+- More CPU
+- More RAM
+- More disk
+
+**When to use:**
+- Simple apps
+- Database-heavy apps
+- Memory-intensive processes
+- Quick fix needed
+
+**How to Scale Vertically:**
+
+**Step 1: Monitor Current Usage**
+- Check resource utilization
+- Identify bottleneck
+- Determine new requirements
+
+**Step 2: Upgrade VPS**
+- With your VPS provider
+- Choose new tier
+- Plan migration timing
+- Usually requires brief downtime
+
+**Step 3: Migrate Temps**
+- Backup configuration
+- Install on new VPS
+- Restore applications
+- Update DNS if needed
+
+**Limits:**
+- Vertical scaling has ceiling
+- Cost increases quickly
+- Eventually need horizontal scaling
+
+**4. Horizontal Scaling (Scale Out)**
+
+**What it is:**
+- Multiple application instances
+- Load balancer distributes traffic
+- Redundancy and high availability
+
+**When to use:**
+- High traffic applications
+- Need zero-downtime deployments
+- Geographic distribution
+- Cost-effective scaling
+
+**Architecture:**
+```
+        [Load Balancer]
+              |
+    +---------+---------+
+    |         |         |
+[Instance 1][Instance 2][Instance 3]
+```
+
+**How to Scale Horizontally:**
+
+**Step 1: Multiple Temps Instances**
+- Set up additional VPS servers
+- Install Temps on each
+- Deploy same application to each
+
+**Step 2: Load Balancer Configuration**
+- Use Nginx, HAProxy, or cloud LB
+- Configure backend servers
+- Health checks
+- Session persistence (if needed)
+
+**Step 3: Shared Resources**
+- External database (required for multiple instances)
+- Shared file storage (if needed)
+- Redis for sessions/cache
+- Centralized logging
+
+**5. Optimization Before Scaling**
+
+**Often cheaper than scaling:**
+
+**Application Optimization:**
+- Database query optimization
+- N+1 query problems
+- Caching strategies
+- Code profiling
+- Bundle size reduction (frontend)
+
+**Caching:**
+- Redis for application cache
+- CDN for static assets
+- HTTP caching headers
+- Database query caching
+
+**Database Optimization:**
+- Indexes
+- Query optimization
+- Connection pooling
+- Read replicas
+
+**Asset Optimization:**
+- Image optimization
+- Code splitting
+- Lazy loading
+- Compression
+
+**6. Auto-Scaling Strategies**
+
+**Scheduled Scaling:**
+- Known traffic patterns
+- Business hours vs off-hours
+- Seasonal traffic
+
+**Dynamic Scaling:**
+- Monitor metrics
+- Scale based on thresholds
+- Automation scripts
+- Cloud provider auto-scaling
+
+**7. Cost Considerations**
+
+**Vertical Scaling Costs:**
+- Linear to exponential cost increase
+- \$5 VPS → \$10 → \$20 → \$40+
+
+**Horizontal Scaling Costs:**
+- More linear cost scaling
+- 3x \$5 VPS = \$15 for 3x capacity
+- Load balancer cost
+- Complexity overhead
+
+**Optimization Costs:**
+- Zero to minimal cost
+- Time investment
+- Often best ROI
+
+**8. Database Scaling**
+
+**Since Temps doesn't host databases:**
+
+**External Database Services:**
+- Managed PostgreSQL (Digital Ocean, AWS RDS)
+- Managed MongoDB (Atlas)
+- Managed Redis (Upstash, Redis Cloud)
+
+**Database Scaling Strategies:**
+- Vertical scaling (bigger DB instance)
+- Read replicas
+- Connection pooling
+- Caching layer
+
+**9. Real-World Scenarios**
+
+**Scenario 1: Small App Growing**
+- Start: \$5 VPS
+- Problem: CPU at 80%
+- Solution: Upgrade to \$10 VPS
+- Result: Handles 3x traffic
+
+**Scenario 2: High-Traffic App**
+- Start: \$10 VPS, 10k daily users
+- Problem: Peak hour slowdowns
+- Solution: 3x \$10 VPS + load balancer
+- Result: Handles 50k daily users smoothly
+
+**Scenario 3: Optimization First**
+- Start: Slow responses
+- Problem: 2s average response time
+- Solution: Add caching, optimize queries
+- Result: 200ms response time, no scaling needed
+- Cost: \$0
+
+**10. Monitoring & Alerting**
+
+**Set Up Monitoring:**
+- Server metrics (CPU, RAM, disk)
+- Application metrics (response time, errors)
+- Traffic metrics
+- Alert thresholds
+
+**Tools:**
+- Grafana + Prometheus
+- Uptime monitoring
+- Log aggregation
+- APM tools
+
+**11. Zero-Downtime Deployments**
+
+**Blue-Green Deployments:**
+- Two identical environments
+- Switch traffic between them
+- Instant rollback
+
+**Rolling Deployments:**
+- Update instances one at a time
+- Always some instances serving traffic
+- Gradual rollout
+
+**12. Troubleshooting**
+
+**Performance Issues:**
+- Identify bottleneck first
+- Don't scale blindly
+- Monitor after changes
+
+**Scaling Doesn't Help:**
+- Application-level issue
+- Database bottleneck
+- External API limits
+- Need optimization, not scaling
+
+## Success Metrics
+- User understands scaling options
+- User can make cost-effective decisions
+- User tries optimization before scaling
+- Clear path from small to large scale
+- Confidence in Temps for production

@@ -10,15 +10,24 @@ homepage.workspace = true
 [dependencies]
 temps-core = { path = "../temps-core" }
 temps-config = { path = "../temps-config" }
+temps-entities = { path = "../temps-entities" }
+sea-orm = { workspace = true }
 axum = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { version = "0.1", features = ["tokio", "client-legacy"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+tokio-tungstenite = "0.28"
+tower = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 utoipa = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

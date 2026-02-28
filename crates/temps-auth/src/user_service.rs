@@ -393,6 +393,9 @@ impl UserService {
 
         // Hash password if provided using Argon2 (same as auth_service for consistency)
         let password_hash = if let Some(pwd) = password {
+            // Validate password complexity
+            crate::auth_service::validate_password_complexity(&pwd)
+                .map_err(|e| UserServiceError::Validation(e.to_string()))?;
             debug!("Hashing password with Argon2 for user: {}", username);
             use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
 

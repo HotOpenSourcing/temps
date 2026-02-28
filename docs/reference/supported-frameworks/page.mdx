@@ -1,0 +1,210 @@
+export const metadata = {
+  title: 'Supported Frameworks',
+  description:
+    'Complete list of languages and frameworks that Temps auto-detects and deploys, including detection signals and build behavior.',
+  alternates: {
+    canonical: '/docs/reference/supported-frameworks',
+  },
+}
+
+export const sections = [
+  { title: 'How framework detection works', id: 'how-framework-detection-works' },
+  { title: 'JavaScript and TypeScript', id: 'javascript-and-typescript' },
+  { title: 'Python', id: 'python' },
+  { title: 'Go', id: 'go' },
+  { title: 'Rust', id: 'rust' },
+  { title: 'PHP', id: 'php' },
+  { title: 'Ruby', id: 'ruby' },
+  { title: 'Docker', id: 'docker' },
+  { title: 'Static sites', id: 'static-sites' },
+  { title: 'Override detection', id: 'override-detection' },
+]
+
+# Supported Frameworks
+
+Temps auto-detects your framework by inspecting files in your repository and applies the appropriate build configuration. This page lists every supported framework with its detection signals and build behavior. {{ className: 'lead' }}
+
+---
+
+## How framework detection works {{ anchor: true, id: 'how-framework-detection-works' }}
+
+When you create a project or push code, Temps scans the repository root (or the configured app directory) for known files. The first matching pattern determines the framework preset.
+
+Detection priority:
+
+1. **Dockerfile** — If a `Dockerfile` exists, Temps uses a direct Docker build (highest priority)
+2. **Framework-specific config files** — `next.config.js`, `vite.config.ts`, `nuxt.config.ts`, etc.
+3. **Language-specific files** — `package.json`, `requirements.txt`, `go.mod`, `Cargo.toml`, etc.
+4. **Static fallback** — If only `index.html` is present, Temps serves it as a static site
+
+All non-Dockerfile builds use [Nixpacks](https://nixpacks.com/) — a build system that generates a Docker image from your source code without requiring a Dockerfile.
+
+---
+
+## JavaScript and TypeScript {{ anchor: true, id: 'javascript-and-typescript' }}
+
+| Framework | Detection signal | Build command | Default port |
+|-----------|-----------------|--------------|-------------|
+| **Next.js** | `next.config.js`, `next.config.ts`, or `next.config.mjs` | `npm run build` | 3000 |
+| **Vite** (React, Vue, Svelte) | `vite.config.ts` or `vite.config.js` | `npm run build` | Static |
+| **Remix** | `remix.config.js` or `remix.config.ts` | `npm run build` | 3000 |
+| **Astro** | `astro.config.mjs` or `astro.config.ts` | `npm run build` | Static or 4321 |
+| **SvelteKit** | `svelte.config.js` | `npm run build` | 3000 |
+| **Nuxt** | `nuxt.config.ts` or `nuxt.config.js` | `npm run build` | 3000 |
+| **Express** | `package.json` with `express` dependency | `npm start` | 3000 |
+| **Fastify** | `package.json` with `fastify` dependency | `npm start` | 3000 |
+| **Hono** | `package.json` with `hono` dependency | `npm start` | 3000 |
+| **Node.js (generic)** | `package.json` with `start` script | `npm start` | 3000 |
+| **Create React App** | `package.json` with `react-scripts` | `npm run build` | Static |
+
+### Package manager detection
+
+Nixpacks detects your package manager from lockfiles:
+
+| Lockfile | Package manager |
+|----------|----------------|
+| `bun.lockb` or `bun.lock` | Bun |
+| `pnpm-lock.yaml` | pnpm |
+| `yarn.lock` | Yarn |
+| `package-lock.json` | npm |
+
+### Node.js version
+
+Nixpacks reads the Node.js version from (in order):
+
+1. `.node-version` file
+2. `engines.node` in `package.json`
+3. Default: latest LTS
+
+---
+
+## Python {{ anchor: true, id: 'python' }}
+
+| Framework | Detection signal | Start command | Default port |
+|-----------|-----------------|--------------|-------------|
+| **Django** | `manage.py` + `django` in requirements | `gunicorn` | 8000 |
+| **Flask** | `flask` in requirements | `gunicorn` | 5000 |
+| **FastAPI** | `fastapi` in requirements | `uvicorn` | 8000 |
+| **Generic Python** | `requirements.txt` or `pyproject.toml` | `python main.py` | 8000 |
+
+### Python version
+
+Detected from (in order):
+
+1. `.python-version` file
+2. `[tool.poetry.dependencies]` in `pyproject.toml`
+3. Default: latest stable
+
+### Dependency files
+
+| File | Tool |
+|------|------|
+| `requirements.txt` | pip |
+| `Pipfile` | Pipenv |
+| `pyproject.toml` | Poetry or pip |
+| `setup.py` | pip |
+
+---
+
+## Go {{ anchor: true, id: 'go' }}
+
+| Detection signal | Build command | Default port |
+|-----------------|--------------|-------------|
+| `go.mod` | `go build -o app` | 8080 |
+
+Go version is read from `go.mod`. Nixpacks compiles to a static binary and runs it.
+
+---
+
+## Rust {{ anchor: true, id: 'rust' }}
+
+| Detection signal | Build command | Default port |
+|-----------------|--------------|-------------|
+| `Cargo.toml` | `cargo build --release` | 8080 |
+
+Rust toolchain version is read from `rust-toolchain.toml` or `rust-toolchain`. Nixpacks uses a multi-stage build to keep the final image small.
+
+---
+
+## PHP {{ anchor: true, id: 'php' }}
+
+| Framework | Detection signal | Default port |
+|-----------|-----------------|-------------|
+| **Laravel** | `artisan` file + `laravel/framework` in `composer.json` | 8000 |
+| **Generic PHP** | `composer.json` or `index.php` | 8080 |
+
+PHP version is read from `composer.json` `require.php` field.
+
+---
+
+## Ruby {{ anchor: true, id: 'ruby' }}
+
+| Framework | Detection signal | Default port |
+|-----------|-----------------|-------------|
+| **Rails** | `Gemfile` with `rails` gem | 3000 |
+| **Sinatra** | `Gemfile` with `sinatra` gem | 4567 |
+| **Generic Ruby** | `Gemfile` | 3000 |
+
+Ruby version is read from `.ruby-version` or `Gemfile`.
+
+---
+
+## Docker {{ anchor: true, id: 'docker' }}
+
+If a `Dockerfile` is present in the repository root (or the configured app directory), Temps uses it directly instead of Nixpacks.
+
+```dockerfile
+FROM node:20-alpine
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --production
+COPY . .
+EXPOSE 3000
+CMD ["node", "server.js"]
+```
+
+The `EXPOSE` directive determines the port Temps routes traffic to. If not specified, Temps uses the environment or project `exposed_port` setting (default: 3000).
+
+### Multi-stage builds
+
+Multi-stage Dockerfiles work as expected:
+
+```dockerfile
+FROM node:20 AS builder
+WORKDIR /app
+COPY . .
+RUN npm ci && npm run build
+
+FROM node:20-alpine
+WORKDIR /app
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/node_modules ./node_modules
+EXPOSE 3000
+CMD ["node", "dist/server.js"]
+```
+
+---
+
+## Static sites {{ anchor: true, id: 'static-sites' }}
+
+If your repository contains only static files (HTML, CSS, JavaScript) with no framework configuration:
+
+| Detection signal | Behavior |
+|-----------------|----------|
+| `index.html` in root, no `package.json` | Served directly by Temps |
+| `package.json` with build output (`dist/`, `build/`, `out/`) | Built with Nixpacks, output served as static |
+
+Static sites are served by Temps' built-in web server. No Docker container is needed.
+
+---
+
+## Override detection {{ anchor: true, id: 'override-detection' }}
+
+If Temps detects the wrong framework, override it in project settings:
+
+1. Open your project in the dashboard
+2. Go to **Settings**
+3. Change the **Framework Preset** to the correct one
+4. Optionally set a custom **Build Command** and **Start Command**
+
+You can also set a custom install command, build command, or app directory for monorepos.

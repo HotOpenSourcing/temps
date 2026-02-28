@@ -51,9 +51,10 @@ pub struct PluginArgs {
     #[arg(long)]
     pub socket_path: String,
 
-    /// PostgreSQL database URL
+    /// Database URL (optional, passed by Temps for plugins that need direct DB access).
+    /// Most plugins should use the WebSocket channel instead of direct database access.
     #[arg(long)]
-    pub database_url: String,
+    pub database_url: Option<String>,
 
     /// HMAC secret for authenticating requests from Temps
     #[arg(long)]

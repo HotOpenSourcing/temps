@@ -1,0 +1,78 @@
+export const metadata = {
+  title: 'Deploy Monorepos',
+  description: 'Deploy applications from monorepo repositories on Temps.',
+  alternates: {
+    canonical: '/docs/deploy/monorepos',
+  },
+}
+
+# Deploy Monorepos
+
+## Page Goal
+Help users deploy applications from monorepo setups (Turborepo, Nx, Lerna, pnpm workspaces). Address the specific challenges of monorepo deployments.
+
+## Target Persona
+**Monorepo Mike** - A developer who:
+- Working with monorepo architecture
+- Uses Turborepo, Nx, or pnpm workspaces
+- Needs to deploy multiple apps from one repo
+- Deals with shared dependencies
+- Values: Efficient builds, proper isolation
+- Pain points: Build optimization, workspace configuration
+- Timeline: 20-30 minutes for complex setup
+
+## Key Content to Include
+
+**1. Monorepo Support**
+- What is a monorepo
+- Supported monorepo tools
+- Root directory configuration
+- Build context
+
+**2. Configuration**
+- Setting the app directory
+- Root vs app package.json
+- Shared dependencies
+- Build command configuration
+
+**3. Turborepo**
+- Turborepo detection
+- Build pipeline configuration
+- Caching strategies
+- Remote caching
+
+**4. Nx Monorepos**
+- Nx workspace deployment
+- Affected app detection
+- Build optimization
+- Project configuration
+
+**5. pnpm Workspaces**
+- Workspace configuration
+- Dependency hoisting
+- Build commands
+- Filtering
+
+**6. Multiple Apps**
+- Deploying multiple apps from one repo
+- Separate deployments per app
+- Shared configuration
+- Branch strategies
+
+**7. Build Optimization**
+- Incremental builds
+- Build caching
+- Dependency pruning
+- Build time optimization
+
+**8. Common Issues**
+- Dependency resolution
+- Build context problems
+- Path issues
+- Lock file management
+
+## Success Metrics
+- User can deploy from monorepo
+- User understands how to configure their specific monorepo tool
+- Builds are optimized and fast
+- Multiple apps can be deployed independently

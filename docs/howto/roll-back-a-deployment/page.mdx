@@ -1,0 +1,104 @@
+export const metadata = {
+  title: 'Roll Back a Deployment',
+  description:
+    'Instantly revert to a previous deployment when something goes wrong, without rebuilding from source.',
+  alternates: {
+    canonical: '/docs/howto/roll-back-a-deployment',
+  },
+}
+
+export const sections = [
+  { title: 'When to roll back', id: 'when-to-roll-back' },
+  { title: 'Roll back from the dashboard', id: 'roll-back-from-the-dashboard' },
+  { title: 'Roll back from the API', id: 'roll-back-from-the-api' },
+  { title: 'What happens during a rollback', id: 'what-happens-during-a-rollback' },
+  { title: 'Limitations', id: 'limitations' },
+]
+
+# Roll Back a Deployment
+
+A rollback redeploys a previous version of your application without rebuilding from source. It uses the Docker image from a past deployment, making it significantly faster than a full redeploy. {{ className: 'lead' }}
+
+---
+
+## When to roll back {{ anchor: true, id: 'when-to-roll-back' }}
+
+Roll back when:
+
+- A new deployment introduces a bug that you need to fix immediately
+- Performance degrades after a deploy
+- A dependency update breaks your application
+- You need to buy time while investigating an issue
+
+Do **not** roll back when:
+
+- The issue is in a database migration (rollback does not undo schema changes)
+- The previous version had the same issue
+- The Docker image from the target deployment has been pruned from the server
+
+---
+
+## Roll back from the dashboard {{ anchor: true, id: 'roll-back-from-the-dashboard' }}
+
+1. Open your project in the dashboard
+2. Click **Deployments** in the sidebar
+3. Find the deployment you want to revert to — this should be a previously successful deployment marked as **Completed** or **Deployed**
+4. Click the actions menu (three dots) on that deployment
+5. Click **Rollback to this deployment**
+6. Confirm the rollback
+
+Temps creates a new deployment record, stops the current containers, and starts the old image. The deployment list will show the rollback entry with a **Rollback** label.
+
+---
+
+## Roll back from the API {{ anchor: true, id: 'roll-back-from-the-api' }}
+
+```bash
+curl -X POST "https://your-temps-instance/api/projects/{project_id}/deployments/{deployment_id}/rollback" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+Replace `{deployment_id}` with the ID of the deployment you want to revert **to** (not the current one). The deployment must have a status of `deployed` or `completed`.
+
+The API returns the newly created rollback deployment record.
+
+---
+
+## What happens during a rollback {{ anchor: true, id: 'what-happens-during-a-rollback' }}
+
+A rollback is faster than a normal deployment because it skips the build phase:
+
+1. **Validation** — Temps checks that the target deployment exists, is in a deployed/completed state, and that its Docker image is still available on the server.
+2. **New deployment record** — A new deployment is created with `is_rollback: true` and a reference to the deployment being rolled back from (`rolled_back_from_id`).
+3. **Stop current containers** — The containers running the current version are stopped.
+4. **Start old image** — The Docker image from the target deployment is started in new containers.
+5. **Health check** — Temps waits for the health check to pass.
+6. **Route traffic** — Once healthy, traffic is routed to the rolled-back version.
+
+### What is preserved
+
+- The deployment history — both the failed deployment and the rollback are recorded
+- Environment variables at the time of rollback (current values, not historical ones)
+- Database state — rollback does not touch the database
+
+### What is not reverted
+
+- **Database migrations** — If the failed deployment ran schema changes, those stay in place. You need to handle migration rollbacks in your application code.
+- **Environment variable changes** — If you changed env vars between deployments, the rollback uses current values.
+- **External state** — Anything written to external services (S3, APIs, etc.) is not reverted.
+
+---
+
+## Limitations {{ anchor: true, id: 'limitations' }}
+
+<Properties>
+  <Property name="Image must exist locally">
+    Rollback uses the Docker image from the target deployment. If Docker has pruned old images (due to disk space), the rollback will fail with an error suggesting you redeploy from source instead. To prevent this, ensure you have enough disk space or configure Docker's image retention.
+  </Property>
+  <Property name="Static presets">
+    For projects using static file presets (not Docker containers), rollback works differently — it simply updates the environment's `current_deployment_id` pointer without any container operations.
+  </Property>
+  <Property name="Requires deployment permission">
+    Rollbacks require the `DeploymentsCreate` permission. Users with the `Reader` role cannot initiate rollbacks.
+  </Property>
+</Properties>

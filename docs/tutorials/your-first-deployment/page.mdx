@@ -1,0 +1,414 @@
+export const metadata = {
+  title: 'Your First Deployment',
+  description:
+    'Deploy your first application on Temps from scratch. Go from an empty server to a live app with HTTPS in under 15 minutes.',
+  alternates: {
+    canonical: '/docs/tutorials/your-first-deployment',
+  },
+}
+
+export const sections = [
+  { title: 'What you will build', id: 'what-you-will-build' },
+  { title: 'Prerequisites', id: 'prerequisites' },
+  { title: 'Install Temps', id: 'install-temps' },
+  { title: 'Log in to the dashboard', id: 'log-in-to-the-dashboard' },
+  { title: 'Connect GitHub', id: 'connect-github' },
+  { title: 'Create your first project', id: 'create-your-first-project' },
+  { title: 'Watch it deploy', id: 'watch-it-deploy' },
+  { title: 'Visit your live app', id: 'visit-your-live-app' },
+  { title: 'Add a custom domain', id: 'add-a-custom-domain' },
+  { title: 'What to explore next', id: 'what-to-explore-next' },
+]
+
+# Your First Deployment
+
+This tutorial walks you through deploying your first application on Temps from start to finish. No prior experience with Temps is required. By the end, you will have a live application with automatic HTTPS, accessible at your own domain. {{ className: 'lead' }}
+
+---
+
+## What you will build {{ anchor: true, id: 'what-you-will-build' }}
+
+By the end of this tutorial, you will have:
+
+- A running Temps instance on your server
+- A Git repository connected to Temps
+- A live application deployed from that repository
+- Automatic HTTPS via Let's Encrypt
+- A custom domain pointing to your app (optional)
+
+**Time required:** approximately 15 minutes.
+
+**What this tutorial covers and does not cover:**
+
+| Covered | Not covered |
+|---------|-------------|
+| Installing Temps | Analytics and session replay ([next tutorial](/docs/tutorials/add-observability)) |
+| Connecting a Git provider | Environment variables in depth ([how-to guide](/docs/howto/manage-environment-variables)) |
+| Creating a project and deploying | CI/CD pipelines ([how-to guide](/docs/howto/set-up-ci-cd-pipeline)) |
+| Adding a custom domain | Scaling and resource management ([how-to guide](/docs/howto/scale-for-traffic)) |
+
+---
+
+## Prerequisites {{ anchor: true, id: 'prerequisites' }}
+
+Before you start, make sure you have the following:
+
+<Properties>
+  <Property name="A server">
+    A VPS or dedicated server running **Ubuntu 22.04+** (or Debian 11+). Minimum 2 CPU cores and 4 GB RAM. Providers like DigitalOcean, Hetzner, Linode, or AWS EC2 all work.
+  </Property>
+  <Property name="A domain name">
+    A domain you control (e.g. `yourdomain.com`). You will need access to its DNS settings. If you do not have one yet, you can still follow this tutorial and access your app via the auto-assigned subdomain.
+  </Property>
+  <Property name="A GitHub account">
+    With a repository you want to deploy. If you do not have one ready, you can fork a starter template — we will show you how.
+  </Property>
+  <Property name="SSH access">
+    You should be able to SSH into your server: `ssh root@your-server-ip`.
+  </Property>
+</Properties>
+
+---
+
+## Install Temps {{ anchor: true, id: 'install-temps' }}
+
+SSH into your server and run the Temps installer:
+
+```bash
+curl -fsSL https://temps.sh/deploy.sh | bash
+```
+
+The installer is interactive. It will walk you through each step:
+
+### 1. Docker
+
+The installer checks whether Docker is already present. If not, it installs Docker Engine for you. You do not need to install Docker beforehand.
+
+```
+Checking Docker... Not found.
+Installing Docker...
+Docker installed successfully (v27.x.x)
+```
+
+### 2. Database
+
+Temps needs PostgreSQL with the TimescaleDB extension. The installer starts a TimescaleDB container automatically:
+
+```
+Starting TimescaleDB...
+Database ready on port 16432
+```
+
+<Note>
+The database runs on port **16432** (not the default 5432) to avoid conflicts with any existing PostgreSQL installation on your server.
+</Note>
+
+### 3. Domain and SSL
+
+The installer asks for your domain configuration. You have two options:
+
+- **Temps Cloud subdomain** — Get a free `*.temps.sh` subdomain automatically. Good for trying Temps out.
+- **Your own domain** — Use your own domain with Let's Encrypt certificates. Required for production.
+
+If you use your own domain, point a DNS A record to your server's IP address before this step:
+
+```
+yourdomain.com  →  A  →  YOUR_SERVER_IP
+*.yourdomain.com  →  A  →  YOUR_SERVER_IP
+```
+
+The wildcard record (`*`) is needed so that each project gets its own subdomain automatically (e.g. `my-app.yourdomain.com`).
+
+### 4. Temps binary
+
+The installer downloads the latest Temps release for your platform and places it at `/usr/local/bin/temps`:
+
+```
+Downloading Temps v0.1.x...
+Installed to /usr/local/bin/temps
+```
+
+### 5. Background service
+
+A systemd service is created so Temps starts automatically on boot and restarts if it crashes:
+
+```
+Created systemd service: temps.service
+Temps is running and will start on boot.
+```
+
+### 6. Verification
+
+The installer generates an API key and verifies the console is reachable:
+
+```
+✓ Temps is running at https://yourdomain.com
+✓ API key: tk_xxxxxxxxxxxxxxxx (save this!)
+```
+
+<Note>
+**Save your API key.** You will need it later if you want to use the CLI or API. You can always generate a new one from the dashboard, but having this initial key is convenient.
+</Note>
+
+---
+
+## Log in to the dashboard {{ anchor: true, id: 'log-in-to-the-dashboard' }}
+
+Open the URL shown at the end of the installation in your browser.
+
+On your first visit, you will see the login screen. If this is a fresh installation, you will be prompted to **create an admin account**. Choose a strong password and save it somewhere safe.
+
+After logging in, you will see the **Dashboard** — a summary of your projects, visitors, and page views. It will be empty since you have not deployed anything yet.
+
+The sidebar on the left gives you access to all platform sections:
+
+- **Dashboard** — Overview of all projects
+- **Projects** — Create and manage your applications
+- **Storage** — KV and Blob storage
+- **Domains** — Manage custom domains and SSL certificates
+- **Monitoring** — Uptime monitors and alerts
+- **Email** — Transactional email configuration
+- **Git Providers** — Connect GitHub or GitLab
+- **DNS Providers** — Configure DNS automation (Cloudflare, etc.)
+
+---
+
+## Connect GitHub {{ anchor: true, id: 'connect-github' }}
+
+Before you can deploy from a repository, Temps needs access to your GitHub account.
+
+1. In the sidebar, click **Git Providers**
+2. Click **Add Git Provider**
+3. Choose **GitHub**
+
+You have two connection methods:
+
+<Row>
+  <Col>
+    **GitHub App (Recommended)**
+
+    Installs a GitHub App on your account or organization. This method:
+    - Uses fine-grained permissions
+    - Supports webhook-triggered deployments
+    - Can be limited to specific repositories
+
+    Click **Create GitHub App**, then follow the GitHub authorization flow.
+  </Col>
+  <Col>
+    **Personal Access Token**
+
+    Uses a GitHub PAT for repository access. This method:
+    - Works immediately without app installation
+    - Requires a token with `repo` scope
+    - Good for quick setups or private repos
+
+    Generate a token at [github.com/settings/tokens](https://github.com/settings/tokens) with the `repo` scope, then paste it in.
+  </Col>
+</Row>
+
+After connecting, you should see your provider listed as **Active** on the Git Providers page.
+
+<Note>
+If you are using GitLab instead of GitHub, the process is the same. Click **Add Git Provider**, choose **GitLab**, and provide your personal access token. Self-hosted GitLab instances are also supported — just provide the base URL.
+</Note>
+
+---
+
+## Create your first project {{ anchor: true, id: 'create-your-first-project' }}
+
+Now you are ready to deploy an application.
+
+### If you have a repository ready
+
+1. In the sidebar, click **Projects**
+2. Click **New Project** in the top-right corner
+3. Select the **Browse Repositories** tab
+4. Find your repository in the list (use the search bar if needed)
+5. Click on it to begin setup
+
+### If you need a starter project
+
+If you do not have a repository ready, Temps includes built-in templates:
+
+1. Click **New Project**
+2. On the **Templates** tab, choose one:
+   - **Next.js SaaS Starter** — A full-stack starter with authentication and database
+   - **Next.js Docs Template** — A documentation site with syntax highlighting
+3. Click the template card to create a project from it
+
+### Configure your project
+
+After selecting a repository or template, Temps asks you to configure the project:
+
+<Properties>
+  <Property name="Project Name">
+    A human-readable name for your project. This also determines the default subdomain (e.g. `my-app.yourdomain.com`).
+  </Property>
+  <Property name="Branch">
+    The Git branch to deploy from. Defaults to `main` or `master`.
+  </Property>
+  <Property name="Framework Preset">
+    Temps auto-detects your framework based on your repository files. It will show the detected preset (Next.js, Vite, Node.js, static, Docker, etc.). You can override this if the detection is wrong.
+  </Property>
+  <Property name="Build Command">
+    The command used to build your application. Auto-detected (e.g. `npm run build` for Next.js).
+  </Property>
+  <Property name="App Directory">
+    For monorepos, the subdirectory containing your application. Leave empty for single-project repositories.
+  </Property>
+</Properties>
+
+Click **Create Project** to start the deployment.
+
+---
+
+## Watch it deploy {{ anchor: true, id: 'watch-it-deploy' }}
+
+After creating the project, Temps immediately starts deploying your application. You are taken to the **Deployments** page where you can watch the process in real-time.
+
+The deployment goes through several stages:
+
+### 1. Cloning
+
+Temps clones your repository from GitHub. You will see the branch and commit hash:
+
+```
+Cloning repository...
+Branch: main
+Commit: a1b2c3d "Initial commit"
+```
+
+### 2. Building
+
+Temps detects your framework and builds a Docker image. For a typical Next.js app, this looks like:
+
+```
+Detected framework: Next.js
+Building with Nixpacks...
+Installing dependencies...
+Running: npm run build
+Build complete (42s)
+```
+
+<Note>
+Build times depend on your application size and server resources. A typical first build takes 30-90 seconds. Subsequent builds are faster because of caching.
+</Note>
+
+### 3. Deploying
+
+The built image is started as a Docker container:
+
+```
+Starting container...
+Waiting for health check...
+Health check passed
+```
+
+### 4. Going live
+
+Once the health check passes, Temps routes traffic to the new container and provisions an SSL certificate:
+
+```
+Updating routes...
+Provisioning SSL certificate...
+Deployment complete!
+```
+
+You will see the deployment status change to **completed** with a green badge on the Deployments page. The deployment entry shows the branch, commit, duration, and a **Current** label indicating it is the active deployment.
+
+---
+
+## Visit your live app {{ anchor: true, id: 'visit-your-live-app' }}
+
+Your application is now live. You can access it at the URL shown on the project page. Click the **Visit** button in the top-right corner to open it in a new tab.
+
+Temps automatically assigns a URL based on your project name:
+
+```
+https://my-project.yourdomain.com
+```
+
+If you used the Temps Cloud subdomain option during installation:
+
+```
+https://my-project.yourname.temps.sh
+```
+
+From the project page you can also see:
+
+- **Deployment Information** — The production and deployment URLs, current status, branch, and commit
+- **Visitors last 24 hours** — A counter that will start populating once you add analytics
+- **Deployment history** — A contribution-graph-style visualization of all deployments over the past year
+
+---
+
+## Add a custom domain {{ anchor: true, id: 'add-a-custom-domain' }}
+
+If you want your app to be available at a specific domain like `app.yourdomain.com`, follow these steps:
+
+### Step 1: Add a DNS record
+
+In your DNS provider (Cloudflare, Namecheap, etc.), create a record pointing to your Temps server:
+
+| Type | Name | Value |
+|------|------|-------|
+| **A** | `app` | `YOUR_SERVER_IP` |
+
+Or, if you want the root domain:
+
+| Type | Name | Value |
+|------|------|-------|
+| **A** | `@` | `YOUR_SERVER_IP` |
+
+Wait a few minutes for DNS propagation.
+
+### Step 2: Add the domain in Temps
+
+1. Open your project in the dashboard
+2. Click **Domains** in the project sidebar
+3. Click **Add Domain**
+4. Enter your domain name (e.g. `app.yourdomain.com`)
+5. Select the SSL challenge type:
+   - **HTTP-01** (default) — Automatic. Works if port 80 is open on your server.
+   - **DNS-01** — Required for wildcard certificates. Needs a DNS provider configured.
+6. Click **Add**
+
+### Step 3: Verify and get your certificate
+
+Temps will verify domain ownership and issue an SSL certificate from Let's Encrypt:
+
+```
+Domain: app.yourdomain.com
+Status: Verifying...
+Status: Certificate issued!
+```
+
+Your app is now available at `https://app.yourdomain.com` with a valid SSL certificate that renews automatically.
+
+<Note>
+If verification fails, check that your DNS record has propagated. You can verify with: `dig app.yourdomain.com` or use an online DNS checker. DNS changes can take up to 48 hours, but usually propagate within minutes.
+</Note>
+
+---
+
+## What to explore next {{ anchor: true, id: 'what-to-explore-next' }}
+
+You have a live application running on your own infrastructure. Here is what to do next:
+
+<div className="not-prose">
+  <Button href="/docs/tutorials/add-observability" variant="text" arrow="right">
+    Add analytics, error tracking, and session replay
+  </Button>
+  <Button href="/docs/tutorials/set-up-backups-and-monitoring" variant="text" arrow="right">
+    Set up automated backups and uptime monitoring
+  </Button>
+  <Button href="/docs/tutorials/deploy-with-database" variant="text" arrow="right">
+    Deploy an app with a managed PostgreSQL database
+  </Button>
+  <Button href="/docs/howto/manage-environment-variables" variant="text" arrow="right">
+    Manage environment variables across environments
+  </Button>
+  <Button href="/docs/concepts/deployments" variant="text" arrow="right">
+    Understand how the deployment pipeline works
+  </Button>
+</div>

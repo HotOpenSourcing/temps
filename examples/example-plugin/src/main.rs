@@ -1,208 +1,145 @@
-//! Example external plugin for Temps.
+//! SEO Analyzer — an example external plugin for Temps.
 //!
-//! A simple "Cron Jobs" plugin that demonstrates the plugin SDK.
-//! Does NOT require Postgres — works standalone for testing.
+//! Crawls deployed sites, analyzes pages for technical SEO issues, and
+//! generates actionable reports with scores. Demonstrates realistic use
+//! of the plugin SDK: HTTP routes, SQLite persistence, background analysis,
+//! and a React-based UI embedded at compile time.
 //!
-//! ## Test it manually
+//! ## Features
+//!
+//! - **Site crawling**: Follows internal links with configurable depth
+//! - **Technical SEO checks**: Title, meta description, headings, images,
+//!   canonical URLs, Open Graph tags, robots directives, and more
+//! - **Scoring**: Per-page and per-report aggregate scores (0–100)
+//! - **Issue classification**: Critical / Warning / Info severity levels
+//! - **SQLite persistence**: Reports survive plugin restarts
+//! - **Configurable**: Max pages, crawl delay, user-agent, timeout — all
+//!   adjustable via the settings API
+//! - **React UI**: Full React + TypeScript frontend embedded at compile time
+//!
+//! ## API
+//!
+//! ```text
+//! POST   /analyze              — Start a new analysis (body: { "url": "...", "max_pages": 100 })
+//! GET    /reports               — List all reports
+//! GET    /reports/{id}          — Get a single report with page-level details
+//! GET    /reports/{id}/prompt   — Get report as LLM-friendly plain text (text/plain)
+//! DELETE /reports/{id}          — Delete a report
+//! GET    /settings              — Get plugin settings
+//! PATCH  /settings              — Update plugin settings (partial)
+//! GET    /ui/                   — Plugin UI (React SPA, served in Temps iframe)
+//! GET    /ui/{*path}            — Plugin UI static assets
+//! ```
+//!
+//! ## Development
 //!
 //! ```bash
-//! # Terminal 1: build and run the plugin
-//! cargo build -p temps-example-plugin
-//! ./target/debug/temps-example-plugin \
-//!     --socket-path /tmp/temps-cron.sock \
-//!     --database-url sqlite::memory: \
-//!     --auth-secret test-secret \
-//!     --data-dir /tmp/temps-cron-data
+//! # Run the React dev server (hot reload)
+//! cd examples/example-plugin/web && bun install && bun run dev
 //!
-//! # Terminal 2: talk to it over the unix socket
-//! curl --unix-socket /tmp/temps-cron.sock http://localhost/health
-//! curl --unix-socket /tmp/temps-cron.sock http://localhost/cron-jobs
-//! curl --unix-socket /tmp/temps-cron.sock http://localhost/cron-jobs/42
-//! curl --unix-socket /tmp/temps-cron.sock -X POST http://localhost/cron-jobs \
-//!     -H 'Content-Type: application/json' \
-//!     -d '{"name":"nightly build","schedule":"0 3 * * *","command":"make build"}'
-//! curl --unix-socket /tmp/temps-cron.sock http://localhost/stats
+//! # Build the plugin binary (skips web build in debug mode)
+//! cargo build -p temps-example-plugin
+//!
+//! # Build with embedded UI
+//! FORCE_WEB_BUILD=1 cargo build -p temps-example-plugin
 //! ```
 
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
-use axum::routing::get;
-use axum::Json;
-use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
+mod crawl;
+mod db;
+mod handlers;
+mod types;
+
+use axum::routing::{get, post};
+use include_dir::{include_dir, Dir};
 use temps_plugin_sdk::prelude::*;
-use temps_plugin_sdk::protocol::TempsAuth;
+
+use crate::db::SeoStore;
+use crate::handlers::AppState;
+
+/// Embed the web/dist/ directory at compile time.
+/// In debug mode without FORCE_WEB_BUILD, this contains a placeholder page.
+static UI_DIST: Dir = include_dir!("$CARGO_MANIFEST_DIR/web/dist");
+
+/// Access the embedded UI directory (used by handlers module).
+pub fn ui_dist() -> &'static Dir<'static> {
+    &UI_DIST
+}
 
 // ============================================================================
 // Plugin Definition
 // ============================================================================
 
 #[derive(Default)]
-struct CronPlugin;
+struct SeoPlugin;
 
-impl ExternalPlugin for CronPlugin {
+impl ExternalPlugin for SeoPlugin {
     fn manifest(&self) -> PluginManifest {
-        PluginManifest::builder("cron-jobs", "0.1.0")
-            .display_name("Cron Jobs")
-            .description("Schedule and manage recurring tasks for your projects")
-            .requires_db(false) // No Postgres needed for this demo
+        PluginManifest::builder("seo-analyzer", "0.1.0")
+            .display_name("SEO Analyzer")
+            .description(
+                "Crawl deployed sites and generate technical SEO reports with actionable insights",
+            )
+            .requires_db(false)
             .nav(NavEntry {
-                label: "Cron Jobs".into(),
-                icon: "clock".into(),
+                label: "SEO Reports".into(),
+                icon: "search".into(),
                 section: NavSection::Platform,
-                path: "/cron-jobs".into(),
-                order: 45,
-            })
-            .nav(NavEntry {
-                label: "Cron Settings".into(),
-                icon: "settings".into(),
-                section: NavSection::Settings,
-                path: "/cron-settings".into(),
-                order: 55,
+                path: "/seo-reports".into(),
+                order: 42,
             })
             .build()
     }
 
     fn router(&self, ctx: PluginContext) -> axum::Router {
-        // In-memory store for demo purposes
-        let store = Arc::new(Mutex::new(vec![
-            CronJob {
-                id: 1,
-                name: "Daily backup".into(),
-                schedule: "0 0 * * *".into(),
-                command: "backup --full".into(),
-                enabled: true,
-                created_at: "2026-01-15T10:00:00Z".into(),
-            },
-            CronJob {
-                id: 2,
-                name: "Cache cleanup".into(),
-                schedule: "*/15 * * * *".into(),
-                command: "cache:clear".into(),
-                enabled: false,
-                created_at: "2026-01-20T14:30:00Z".into(),
-            },
-        ]));
+        // router() is sync but called inside the tokio runtime during startup.
+        // Use block_in_place to run the async SQLite init without deadlocking.
+        let store = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(SeoStore::open(ctx.data_dir()))
+        })
+        .expect("Failed to open SEO store");
+
+        // Build HTTP client using plugin settings defaults.
+        // Settings are loaded lazily per-request for the crawl itself,
+        // but the client timeout is set here.
+        let http_client = reqwest::Client::builder()
+            .user_agent(types::PluginSettings::DEFAULT_USER_AGENT)
+            .timeout(std::time::Duration::from_secs(
+                types::PluginSettings::DEFAULT_REQUEST_TIMEOUT_SECS,
+            ))
+            .redirect(reqwest::redirect::Policy::limited(5))
+            .build()
+            .unwrap_or_default();
+
+        let state = AppState { store, http_client };
 
         axum::Router::new()
-            .route("/cron-jobs", get(list_cron_jobs).post(create_cron_job))
-            .route("/cron-jobs/{id}", get(get_cron_job).delete(delete_cron_job))
-            .route("/stats", get(get_stats))
-            .with_state(AppState { ctx, store })
+            // API routes
+            .route("/analyze", post(handlers::start_analysis))
+            .route("/reports", get(handlers::list_reports))
+            .route(
+                "/reports/{id}",
+                get(handlers::get_report).delete(handlers::delete_report),
+            )
+            .route("/reports/{id}/prompt", get(handlers::get_report_prompt))
+            .route(
+                "/settings",
+                get(handlers::get_settings).patch(handlers::update_settings),
+            )
+            // UI routes — serve the embedded React SPA
+            .route("/ui", get(handlers::redirect_to_ui))
+            .route("/ui/", get(handlers::serve_ui_index))
+            .route("/ui/{*path}", get(handlers::serve_ui_asset))
+            .with_state(state)
     }
 
     fn on_start(&self, ctx: &PluginContext) -> Result<(), PluginSdkError> {
         tracing::info!(
             plugin = ctx.plugin_name(),
             data_dir = %ctx.data_dir().display(),
-            "Cron Jobs plugin starting up"
+            "SEO Analyzer plugin started"
         );
         Ok(())
     }
 }
 
-// Generate the main() function
-temps_plugin_sdk::main!(CronPlugin);
-
-// ============================================================================
-// State & Types
-// ============================================================================
-
-#[derive(Clone)]
-struct AppState {
-    ctx: PluginContext,
-    store: Arc<Mutex<Vec<CronJob>>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CronJob {
-    id: i32,
-    name: String,
-    schedule: String,
-    command: String,
-    enabled: bool,
-    created_at: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateCronJobRequest {
-    name: String,
-    schedule: String,
-    command: String,
-}
-
-#[derive(Debug, Serialize)]
-struct StatsResponse {
-    total_jobs: usize,
-    plugin_name: String,
-    plugin_data_dir: String,
-}
-
-// ============================================================================
-// Handlers
-// ============================================================================
-
-async fn list_cron_jobs(
-    TempsAuth(user): TempsAuth,
-    State(state): State<AppState>,
-) -> impl IntoResponse {
-    tracing::info!(user_id = ?user.user_id, role = %user.role, "Listing cron jobs");
-    let jobs = state.store.lock().unwrap().clone();
-    Json(jobs)
-}
-
-async fn create_cron_job(
-    TempsAuth(user): TempsAuth,
-    State(state): State<AppState>,
-    Json(req): Json<CreateCronJobRequest>,
-) -> impl IntoResponse {
-    tracing::info!(user_id = ?user.user_id, name = %req.name, "Creating cron job");
-
-    let mut store = state.store.lock().unwrap();
-    let next_id = store.iter().map(|j| j.id).max().unwrap_or(0) + 1;
-    let job = CronJob {
-        id: next_id,
-        name: req.name,
-        schedule: req.schedule,
-        command: req.command,
-        enabled: true,
-        created_at: chrono::Utc::now().to_rfc3339(),
-    };
-    store.push(job.clone());
-
-    (StatusCode::CREATED, Json(job))
-}
-
-async fn get_cron_job(State(state): State<AppState>, Path(id): Path<i32>) -> impl IntoResponse {
-    let store = state.store.lock().unwrap();
-    match store.iter().find(|j| j.id == id) {
-        Some(job) => Json(job.clone()).into_response(),
-        None => (StatusCode::NOT_FOUND, format!("Cron job {} not found", id)).into_response(),
-    }
-}
-
-async fn delete_cron_job(
-    TempsAuth(user): TempsAuth,
-    State(state): State<AppState>,
-    Path(id): Path<i32>,
-) -> impl IntoResponse {
-    tracing::info!(user_id = ?user.user_id, cron_job_id = id, "Deleting cron job");
-    let mut store = state.store.lock().unwrap();
-    let before = store.len();
-    store.retain(|j| j.id != id);
-    if store.len() < before {
-        StatusCode::NO_CONTENT.into_response()
-    } else {
-        (StatusCode::NOT_FOUND, format!("Cron job {} not found", id)).into_response()
-    }
-}
-
-async fn get_stats(State(state): State<AppState>) -> impl IntoResponse {
-    let count = state.store.lock().unwrap().len();
-    Json(StatsResponse {
-        total_jobs: count,
-        plugin_name: state.ctx.plugin_name().to_string(),
-        plugin_data_dir: state.ctx.data_dir().display().to_string(),
-    })
-}
+temps_plugin_sdk::main!(SeoPlugin);

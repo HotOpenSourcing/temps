@@ -1,0 +1,103 @@
+export const metadata = {
+  title: 'Deploy React App',
+  description: 'Complete tutorial: Deploy React and Vite applications on Temps.',
+  alternates: {
+    canonical: '/docs/tutorials/deploy-react',
+  },
+}
+
+# Deploy React App
+
+## Page Goal
+Provide clear tutorial for deploying React apps (CRA, Vite, or vanilla). Cover both build approaches and common configurations.
+
+## Target Persona
+**React Rachel** - A developer who:
+- Building with React (Vite, CRA, or custom)
+- Needs simple static hosting
+- May need API integration
+- Looking for Netlify/Vercel alternative
+- Values: Simplicity, fast builds, flexibility
+- Search intent: "deploy react app", "vite deployment"
+- Timeline: Quick deployment needed
+
+## Key Content to Include
+
+**1. What You'll Deploy**
+- React with Vite (recommended)
+- Create React App
+- Custom React builds
+- Time: 5-8 minutes
+
+**2. Prerequisites**
+- Temps account
+- React app in Git
+- Built and tested locally
+
+**3. Vite React Deployment**
+
+**Step 1: Prepare Vite App**
+- Verify vite.config.js
+- Environment variables (VITE_* prefix)
+- Build command check
+- Example configuration
+
+**Step 2: Connect & Configure**
+- Connect Git repository
+- Build command: `npm run build`
+- Output directory: `dist`
+- No start command (static)
+
+**Step 3: Environment Variables**
+- Add VITE_API_URL, etc.
+- Public vs server variables
+- Runtime vs build-time
+
+**Step 4: Deploy**
+- Initial deployment
+- Build logs
+- Success verification
+
+**Step 5: Configure Routing**
+- SPA routing (all routes → index.html)
+- Configuring redirects
+- 404 handling
+
+**4. Create React App Deployment**
+- Build command: `npm run build`
+- Output directory: `build`
+- Similar process as Vite
+- Specific CRA considerations
+
+**5. Custom React Builds**
+- Webpack configuration
+- Custom build scripts
+- Output configuration
+
+**6. Common Configurations**
+- Client-side routing
+- Environment variables
+- API proxy/CORS
+- Asset optimization
+
+**7. Connecting to Backend**
+- Environment variable for API URL
+- CORS configuration
+- Proxy setup alternatives
+
+**8. Troubleshooting**
+- Build failures
+- Routing 404s
+- Environment variable issues
+- Asset loading problems
+
+**9. Example Projects**
+- Vite React template
+- CRA template
+- One-click deploy buttons
+
+## Success Metrics
+- User deploys React app successfully
+- Clear for both Vite and CRA users
+- Routing configuration is clear
+- Fast deployment time

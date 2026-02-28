@@ -34,8 +34,16 @@ impl PluginProxy {
 ///
 /// Mounts at `/x/{plugin_name}` — strips the prefix before forwarding.
 /// Adds Temps headers (user context, request ID, auth signature).
+///
+/// Uses explicit wildcard routes instead of `.fallback()` because axum
+/// fallbacks are lost when routers are `.merge()`d together.
 pub fn create_plugin_proxy_router(proxy: PluginProxy) -> Router {
-    Router::new().fallback(proxy_handler).with_state(proxy)
+    use axum::routing::any;
+
+    Router::new()
+        .route("/", any(proxy_handler))
+        .route("/{*rest}", any(proxy_handler))
+        .with_state(proxy)
 }
 
 /// The actual proxy handler — forwards requests to the plugin over Unix socket.
@@ -95,7 +103,10 @@ async fn forward_to_unix_socket(
 
     tokio::spawn(async move {
         if let Err(e) = conn.await {
-            error!("Plugin proxy connection error: {}", e);
+            // hyper reports "error shutting down connection" when the Unix
+            // socket closes without a clean TCP shutdown — this is expected
+            // for short-lived HTTP/1.1 connections over Unix sockets.
+            debug!("Plugin proxy connection closed: {}", e);
         }
     });
 

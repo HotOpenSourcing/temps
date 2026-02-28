@@ -1,0 +1,165 @@
+export const metadata = {
+  title: 'Projects',
+  description:
+    'Understand what a project is in Temps, what it contains, and how projects relate to environments, services, and deployments.',
+  alternates: {
+    canonical: '/docs/concepts/projects',
+  },
+}
+
+export const sections = [
+  { title: 'What is a project', id: 'what-is-a-project' },
+  { title: 'What a project contains', id: 'what-a-project-contains' },
+  { title: 'Project sources', id: 'project-sources' },
+  { title: 'How projects relate to other concepts', id: 'how-projects-relate-to-other-concepts' },
+  { title: 'Naming and subdomains', id: 'naming-and-subdomains' },
+  { title: 'Project settings', id: 'project-settings' },
+  { title: 'When to create a new project', id: 'when-to-create-a-new-project' },
+]
+
+# Projects
+
+A project is the top-level organizational unit in Temps. It represents one deployable application — a web app, an API, a static site, or a documentation site. Everything in Temps (deployments, environments, domains, analytics, error tracking, environment variables) belongs to a project. {{ className: 'lead' }}
+
+---
+
+## What is a project {{ anchor: true, id: 'what-is-a-project' }}
+
+A project is a mapping between a **source** (a Git repository, a Docker image, or a static file bundle) and a **running application** on your server. When you create a project, you tell Temps where the code lives and how to build it. Temps handles the rest: cloning, building, deploying, routing, SSL, and monitoring.
+
+Each project gets:
+
+- A **slug** derived from its name (e.g. `my-app`), used in URLs and container names
+- A **default environment** (production), with optional preview environments per branch
+- An **auto-assigned subdomain** (e.g. `my-app.yourdomain.com`)
+- Its own **deployment history**, analytics, error tracking, and logs
+
+---
+
+## What a project contains {{ anchor: true, id: 'what-a-project-contains' }}
+
+| Component | Description |
+|-----------|-------------|
+| **Environments** | At least one (production). Additional environments for staging, preview branches, etc. Each has its own containers, domains, and deployment config. |
+| **Deployments** | The history of every build and deploy. Each deployment is linked to a Git commit (or an image/bundle). |
+| **Environment Variables** | Key-value pairs injected into containers at deploy time. Scoped per environment. |
+| **Domains** | Custom domains with SSL certificates, assigned per environment. |
+| **Linked Services** | Managed databases and storage (PostgreSQL, Redis, MongoDB, S3) connected to the project. |
+| **Analytics** | Page views, visitors, custom events, funnels, and session replays. |
+| **Error Tracking** | Captured errors with stack traces, grouped by type. Each project has its own DSN. |
+| **Monitors** | Uptime checks that verify the application is healthy. |
+| **Webhooks** | Outbound HTTP notifications for deployment events. |
+
+---
+
+## Project sources {{ anchor: true, id: 'project-sources' }}
+
+A project's source determines where the code comes from and how it is built.
+
+| Source type | How it works |
+|------------|-------------|
+| **Git repository** | Temps clones the repo, detects the framework, builds a Docker image, and deploys it. Pushes to the tracked branch trigger automatic deploys. |
+| **Docker image** | You provide a registry image (or upload a tarball). Temps pulls and deploys it without building. |
+| **Static files** | You upload a zip or tar.gz of pre-built static files. Temps serves them directly. |
+| **Template** | Temps forks a built-in starter template to your Git provider and deploys it. |
+
+The source type is set when you create the project. Git-based projects additionally have:
+
+- A **main branch** (usually `main` or `master`) that maps to the production environment
+- A **framework preset** (auto-detected: Next.js, Vite, Express, Dockerfile, static, etc.)
+- Optional **build command** and **app directory** overrides
+
+---
+
+## How projects relate to other concepts {{ anchor: true, id: 'how-projects-relate-to-other-concepts' }}
+
+<Mermaid chart={`
+graph TD
+    P[Project] --> E1[Environment: Production]
+    P --> E2[Environment: Staging]
+    P --> E3[Environment: Preview/feature-x]
+    E1 --> D1[Deployment 1]
+    E1 --> D2[Deployment 2]
+    E1 --> D3[Deployment 3 - current]
+    P --> EV[Environment Variables]
+    P --> S[Linked Services]
+    S --> PG[PostgreSQL]
+    S --> RD[Redis]
+    E1 --> DOM[Custom Domain]
+    P --> AN[Analytics & Error Tracking]
+    P --> MO[Monitors]
+`} />
+
+- **Project → Environments**: A project has one or more environments. The production environment is created automatically. Preview environments are created per branch when enabled.
+- **Environment → Deployments**: Each environment has its own deployment history. The "current" deployment is the one serving traffic.
+- **Project → Services**: Managed services are linked at the project level. Each environment gets its own isolated database/cache within the shared service.
+- **Project → Environment Variables**: Variables are defined at the project level and scoped to specific environments.
+
+---
+
+## Naming and subdomains {{ anchor: true, id: 'naming-and-subdomains' }}
+
+The project name determines the default subdomain:
+
+| Project name | Slug | Default URL |
+|-------------|------|-------------|
+| My App | `my-app` | `my-app.yourdomain.com` |
+| API Service | `api-service` | `api-service.yourdomain.com` |
+
+The slug is generated from the name: lowercased, spaces and special characters replaced with hyphens. It is used in:
+
+- The default subdomain
+- Docker container names (e.g. `my-app-production`)
+- Per-project database names (e.g. `my_app_production`)
+- File paths for static deployments
+
+You can add custom domains to override the default subdomain. See [Add a Custom Domain](/docs/howto/add-a-custom-domain).
+
+---
+
+## Project settings {{ anchor: true, id: 'project-settings' }}
+
+Key settings available on each project:
+
+<Properties>
+  <Property name="Name">
+    Display name. Changing the name does not change the slug or existing URLs.
+  </Property>
+  <Property name="Branch">
+    The Git branch that maps to the production environment. Default: `main`.
+  </Property>
+  <Property name="Framework Preset">
+    The detected or manually set framework. Affects how Temps builds the project.
+  </Property>
+  <Property name="Build Command">
+    Override the auto-detected build command (e.g. `npm run build`).
+  </Property>
+  <Property name="App Directory">
+    For monorepos, the subdirectory containing the application.
+  </Property>
+  <Property name="Preview Environments">
+    Toggle automatic preview environments for non-main branches.
+  </Property>
+  <Property name="Deployment Config">
+    Default CPU, memory, replicas, and exposed port for new environments.
+  </Property>
+</Properties>
+
+---
+
+## When to create a new project {{ anchor: true, id: 'when-to-create-a-new-project' }}
+
+**Create a new project when:**
+
+- You have a separate deployable application (different repo, different build process)
+- You want independent deployment history and analytics
+- The application serves a different domain
+- You want separate error tracking and monitoring
+
+**Use environments within the same project when:**
+
+- You need staging/preview versions of the same application
+- You want to test the same codebase with different configuration
+- You need branch-based previews for code review
+
+**One project per repo** is the most common pattern. For monorepos with multiple deployable apps, create a separate project per app and set the **App Directory** to the relevant subdirectory.

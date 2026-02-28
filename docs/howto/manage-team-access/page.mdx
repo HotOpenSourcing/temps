@@ -1,0 +1,160 @@
+export const metadata = {
+  title: 'Manage Team Access',
+  description:
+    'Create user accounts, assign roles, and generate API keys with scoped permissions.',
+  alternates: {
+    canonical: '/docs/howto/manage-team-access',
+  },
+}
+
+export const sections = [
+  { title: 'Understand roles', id: 'understand-roles' },
+  { title: 'Create a user account', id: 'create-a-user-account' },
+  { title: 'Assign a role', id: 'assign-a-role' },
+  { title: 'Create an API key', id: 'create-an-api-key' },
+  { title: 'Scope API key permissions', id: 'scope-api-key-permissions' },
+  { title: 'Deployment tokens', id: 'deployment-tokens' },
+]
+
+# Manage Team Access
+
+Temps has a role-based permission system that controls who can view, deploy, and configure your projects. Use roles for team members and API keys for CI/CD and external integrations. {{ className: 'lead' }}
+
+---
+
+## Understand roles {{ anchor: true, id: 'understand-roles' }}
+
+Temps includes several built-in roles:
+
+| Role | Description |
+|------|-------------|
+| **Admin** | Full access to everything — projects, deployments, settings, users, backups, and system configuration |
+| **User** | Can create and manage projects, deploy, and view most resources. Cannot delete critical resources or manage system settings. |
+| **Reader** | Read-only access. Can view projects, deployments, logs, and analytics but cannot make changes. |
+| **Custom** | No default permissions. Used for API keys where you want to grant only specific capabilities. |
+
+Additional specialized roles:
+
+| Role | Description |
+|------|-------------|
+| **ApiReader** | Read-only API access. For monitoring and reporting integrations. |
+| **Mcp** | For MCP (Model Context Protocol) server integrations. |
+| **Demo** | Limited access for demonstration purposes. |
+
+---
+
+## Create a user account {{ anchor: true, id: 'create-a-user-account' }}
+
+1. In the sidebar, click **Settings**
+2. Go to the **Users** section
+3. Click **Add User**
+4. Enter the user's email and name
+5. Set a temporary password (the user should change it on first login)
+6. Select a role
+
+The new user can now log in at your Temps instance URL with the provided credentials.
+
+<Note>
+The first user account is created during `temps setup` (or the first visit to the dashboard). This account always has the **Admin** role and cannot be downgraded.
+</Note>
+
+---
+
+## Assign a role {{ anchor: true, id: 'assign-a-role' }}
+
+To change a user's role:
+
+1. Go to **Settings > Users**
+2. Find the user
+3. Click **Edit** (or the actions menu)
+4. Select the new role
+5. Save
+
+Role changes take effect immediately. The user's next API call or page load uses the new permissions. Active sessions are not terminated — the user does not need to log in again.
+
+### Permission examples by role
+
+| Action | Admin | User | Reader |
+|--------|-------|------|--------|
+| View projects and deployments | Yes | Yes | Yes |
+| Create and deploy projects | Yes | Yes | No |
+| Manage environment variables | Yes | Yes | No |
+| View logs and analytics | Yes | Yes | Yes |
+| Manage domains | Yes | Yes | No |
+| Delete projects | Yes | No | No |
+| Manage users and roles | Yes | No | No |
+| Configure backups | Yes | No | No |
+| System settings | Yes | No | No |
+
+---
+
+## Create an API key {{ anchor: true, id: 'create-an-api-key' }}
+
+API keys are used for programmatic access — CI/CD pipelines, scripts, monitoring integrations, and MCP servers.
+
+1. Go to **Settings > API Keys**
+2. Click **Create API Key**
+3. Enter a name (e.g. `github-actions-deploy`, `monitoring-readonly`)
+4. Select the permissions to grant (see below)
+5. Click **Create**
+6. Copy the key immediately — it is shown only once
+
+The API key is used in the `Authorization` header:
+
+```bash
+curl -H "Authorization: Bearer tk_your_api_key" \
+  "https://your-temps-instance/api/projects"
+```
+
+---
+
+## Scope API key permissions {{ anchor: true, id: 'scope-api-key-permissions' }}
+
+API keys use the **Custom** role by default, meaning they have no permissions until you explicitly grant them. This follows the principle of least privilege.
+
+Common permission scopes:
+
+### CI/CD deployment key
+
+Grant only what is needed to trigger deployments:
+
+- `deployments:create` — trigger new deployments
+- `deployments:read` — check deployment status
+- `projects:read` — list projects
+- `environments:read` — list environments
+
+### Read-only monitoring key
+
+For dashboards and reporting tools:
+
+- `projects:read`
+- `deployments:read`
+- `environments:read`
+- `analytics:read`
+- `monitoring:read`
+
+### Full management key
+
+For administrative scripts (use sparingly):
+
+- All permissions — equivalent to Admin role
+
+<Note>
+**Security best practice:** Create separate API keys for each integration. If a key is compromised, you can revoke it without affecting other systems. Name keys descriptively so you know which integration each key belongs to.
+</Note>
+
+---
+
+## Deployment tokens {{ anchor: true, id: 'deployment-tokens' }}
+
+In addition to API keys, Temps automatically generates a **deployment token** for each project environment. This token is injected as the `TEMPS_API_TOKEN` environment variable in your application container.
+
+Deployment tokens allow your running application to call back into the Temps API — for example, to report analytics events or upload source maps.
+
+These tokens are:
+- Auto-generated and managed by Temps
+- Scoped to the specific project and environment
+- Rotated on each deployment
+- Not visible in the API key management UI (they are managed per-environment)
+
+You do not need to create or manage deployment tokens manually. They are available in your application as `process.env.TEMPS_API_TOKEN`.

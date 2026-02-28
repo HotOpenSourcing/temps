@@ -42,7 +42,7 @@ export function S3SourceDetail() {
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: 'Backups', href: '/backups' },
+      { label: 'Backups', href: '/settings/backups' },
       { label: source?.name || 'S3 Source Details' },
     ])
   }, [setBreadcrumbs, source?.name])
@@ -75,7 +75,7 @@ export function S3SourceDetail() {
           The requested S3 source could not be found.
         </p>
         <Button asChild className="mt-4">
-          <Link to="/backups">
+          <Link to="/settings/backups">
             <ArrowLeft className="mr-2 h-4 w-4" />
             Back to Backups
           </Link>
@@ -89,7 +89,7 @@ export function S3SourceDetail() {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Button variant="ghost" size="sm" asChild>
-            <Link to="/backups">
+            <Link to="/settings/backups">
               <ArrowLeft className="mr-2 h-4 w-4" />
               Back
             </Link>
@@ -173,7 +173,7 @@ export function S3SourceDetail() {
                 {sortedBackups?.map((backup) => (
                   <Link
                     key={backup.backup_id}
-                    to={`/backups/s3-sources/${id}/backups/${backup.backup_id}`}
+                    to={`/settings/backups/s3-sources/${id}/backups/${backup.backup_id}`}
                     className="block"
                   >
                     <div className="flex items-center justify-between p-4 border rounded-lg hover:bg-muted/50 transition-colors">

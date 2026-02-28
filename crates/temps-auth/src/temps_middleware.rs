@@ -444,21 +444,20 @@ impl AuthMiddleware {
             // User has selected a specific user to view as in demo mode
             match self.user_service.get_user_by_id(user_id).await {
                 Ok(user) => {
-                    // Determine the role of the selected user
-                    let role = if self.user_service.is_admin(user.id).await.unwrap_or(false) {
-                        crate::permissions::Role::Admin
-                    } else {
-                        crate::permissions::Role::User
-                    };
+                    // SECURITY: Always use Role::Demo for demo sessions regardless of the
+                    // selected user's actual role. This prevents privilege escalation where
+                    // a demo visitor could select an admin user and gain admin permissions.
                     tracing::debug!(
-                        "Demo mode: authenticated as selected user (id={}, email={}, role={:?})",
+                        "Demo mode: viewing as selected user (id={}, email={}) with Demo role",
                         user.id,
                         user.email,
-                        role
                     );
                     return Some((
                         user.clone(),
-                        crate::context::AuthContext::new_demo_session(user, role),
+                        crate::context::AuthContext::new_demo_session(
+                            user,
+                            crate::permissions::Role::Demo,
+                        ),
                     ));
                 }
                 Err(e) => {

@@ -13,6 +13,7 @@ use temps_entities::deployment_tokens::{
     DeploymentTokenPermission, Entity as DeploymentTokenEntity,
 };
 use thiserror::Error;
+use tracing::warn;
 
 #[derive(Error, Debug)]
 pub enum DeploymentTokenValidationError {
@@ -83,6 +84,8 @@ impl DeploymentTokenValidationService {
         }
 
         // Parse permissions from JSON
+        // SECURITY: NULL permissions defaults to empty (no access) instead of FullAccess.
+        // Tokens must explicitly include "*" (FullAccess) in their permissions array.
         let permissions = if let Some(ref perms_json) = token_model.permissions {
             let perm_strings: Vec<String> =
                 serde_json::from_value(perms_json.clone()).unwrap_or_default();
@@ -92,7 +95,11 @@ impl DeploymentTokenValidationService {
                 .filter_map(|s| DeploymentTokenPermission::from_str(s))
                 .collect()
         } else {
-            vec![DeploymentTokenPermission::FullAccess]
+            warn!(
+                "Deployment token {} has NULL permissions, defaulting to no access",
+                token_model.id
+            );
+            vec![]
         };
 
         // Update last_used_at (fire and forget - don't fail validation if this fails)
@@ -544,11 +551,150 @@ mod tests {
         assert!(result.is_ok());
 
         let validated = result.unwrap();
-        // Should default to FullAccess when no permissions specified
+        // SECURITY: NULL permissions should default to empty (no access), not FullAccess
+        assert!(
+            validated.permissions.is_empty(),
+            "NULL permissions should result in empty permissions (no access), got {:?}",
+            validated.permissions
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validate_token_explicit_full_access() {
+        let now = Utc::now();
+        let token_prefix = "dt_fullac";
+        let token = format!("{}12345678901234567890123456789012", token_prefix);
+
+        let mut hasher = Sha256::new();
+        hasher.update(token.as_bytes());
+        let token_hash = format!("{:x}", hasher.finalize());
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![temps_entities::deployment_tokens::Model {
+                id: 2,
+                project_id: 10,
+                environment_id: None,
+                deployment_id: None,
+                name: "explicit-full-access".to_string(),
+                token_hash,
+                token_prefix: token_prefix.to_string(),
+                permissions: Some(serde_json::json!(["*"])), // Explicit FullAccess
+                is_active: true,
+                expires_at: None,
+                last_used_at: None,
+                created_at: now,
+                updated_at: now,
+                created_by: Some(1),
+                encrypted_token: None,
+            }]])
+            .append_query_results(vec![vec![temps_entities::deployment_tokens::Model {
+                id: 2,
+                project_id: 10,
+                environment_id: None,
+                deployment_id: None,
+                name: "explicit-full-access".to_string(),
+                token_hash: "hash".to_string(),
+                token_prefix: token_prefix.to_string(),
+                permissions: Some(serde_json::json!(["*"])),
+                is_active: true,
+                expires_at: None,
+                last_used_at: None,
+                created_at: now,
+                updated_at: now,
+                created_by: Some(1),
+                encrypted_token: None,
+            }]])
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 2,
+                rows_affected: 1,
+            }])
+            .into_connection();
+
+        let service = create_service_with_mock(db);
+
+        let result = service.validate_token(&token).await;
+        assert!(result.is_ok());
+
+        let validated = result.unwrap();
+        // Explicit FullAccess should be granted
         assert_eq!(validated.permissions.len(), 1);
         assert!(matches!(
             validated.permissions[0],
             DeploymentTokenPermission::FullAccess
         ));
+    }
+
+    #[tokio::test]
+    async fn test_validate_token_null_permissions_denies_access() {
+        let now = Utc::now();
+        let token_prefix = "dt_noperm";
+        let token = format!("{}12345678901234567890123456789012", token_prefix);
+
+        let mut hasher = Sha256::new();
+        hasher.update(token.as_bytes());
+        let token_hash = format!("{:x}", hasher.finalize());
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![temps_entities::deployment_tokens::Model {
+                id: 3,
+                project_id: 10,
+                environment_id: None,
+                deployment_id: None,
+                name: "no-perms-token".to_string(),
+                token_hash,
+                token_prefix: token_prefix.to_string(),
+                permissions: None, // NULL
+                is_active: true,
+                expires_at: None,
+                last_used_at: None,
+                created_at: now,
+                updated_at: now,
+                created_by: Some(1),
+                encrypted_token: None,
+            }]])
+            .append_query_results(vec![vec![temps_entities::deployment_tokens::Model {
+                id: 3,
+                project_id: 10,
+                environment_id: None,
+                deployment_id: None,
+                name: "no-perms-token".to_string(),
+                token_hash: "hash".to_string(),
+                token_prefix: token_prefix.to_string(),
+                permissions: None,
+                is_active: true,
+                expires_at: None,
+                last_used_at: None,
+                created_at: now,
+                updated_at: now,
+                created_by: Some(1),
+                encrypted_token: None,
+            }]])
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 3,
+                rows_affected: 1,
+            }])
+            .into_connection();
+
+        let service = create_service_with_mock(db);
+
+        let result = service.validate_token(&token).await;
+        assert!(result.is_ok());
+
+        let validated = result.unwrap();
+        // Verify that NULL permissions result in no access -
+        // none of the specific permissions should be granted
+        assert!(validated.permissions.is_empty());
+        assert!(!validated
+            .permissions
+            .iter()
+            .any(|p| matches!(p, DeploymentTokenPermission::FullAccess)));
+        assert!(!validated
+            .permissions
+            .iter()
+            .any(|p| matches!(p, DeploymentTokenPermission::EventsWrite)));
+        assert!(!validated
+            .permissions
+            .iter()
+            .any(|p| matches!(p, DeploymentTokenPermission::AnalyticsRead)));
     }
 }

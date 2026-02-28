@@ -1,0 +1,79 @@
+export const metadata = {
+  title: 'Deploy Static Sites',
+  description: 'Deploy Next.js, React, Vue, Vite, and other static sites on Temps.',
+  alternates: {
+    canonical: '/docs/deploy/static-sites',
+  },
+}
+
+# Deploy Static Sites
+
+## Page Goal
+Guide users through deploying static sites and frontend applications. Cover popular frameworks and build configurations. Show that Temps is great for modern frontend deployments.
+
+## Target Persona
+**Frontend Fran** - A developer who:
+- Building with React, Next.js, Vue, Svelte, etc.
+- Familiar with npm/yarn/pnpm
+- Needs fast static hosting with CDN
+- May need SSR (for Next.js)
+- Values: Fast builds, modern tooling, preview deployments
+- Questions: "Does it support my framework?", "How fast is it?"
+- Timeline: 5-10 minutes for first deployment
+
+## Key Content to Include
+
+**1. Supported Frameworks**
+- Next.js (static and SSR)
+- React (CRA, Vite)
+- Vue (Nuxt, Vite)
+- Svelte (SvelteKit)
+- Astro
+- Gatsby
+- And more...
+
+**2. Automatic Detection**
+- Framework auto-detection
+- Build command detection
+- Output directory detection
+- How to override defaults
+
+**3. Next.js Deployment**
+- Static export vs SSR
+- Image optimization
+- API routes
+- Environment variables
+
+**4. React/Vite Deployment**
+- Build configuration
+- Output directory
+- Environment variables (VITE_*)
+- Client-side routing
+
+**5. Vue/Nuxt Deployment**
+- Nuxt SSR support
+- Static generation
+- Build modes
+
+**6. Build Configuration**
+- Custom build commands
+- Install commands
+- Node version
+- Build environment variables
+
+**7. Performance**
+- Build caching
+- Asset optimization
+- CDN integration
+- Compression
+
+**8. Preview Deployments**
+- Pull request previews
+- Branch deployments
+- Temporary URLs
+
+## Success Metrics
+- User can deploy frontend application in minutes
+- User understands framework-specific configuration
+- User knows how to optimize builds
+- Preview deployments work automatically

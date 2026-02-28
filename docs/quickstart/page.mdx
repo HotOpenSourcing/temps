@@ -1,0 +1,151 @@
+export const metadata = {
+  title: "Quickstart",
+  description:
+    "Deploy your first application on Temps in under 5 minutes. Connect your Git repo, configure your project, and ship to production instantly.",
+  alternates: {
+    canonical: "/docs/quickstart",
+  },
+};
+
+# Quickstart
+
+Deploy your first app in 60 seconds. No configuration files, no Docker Compose, no Kubernetes manifests. Just point Temps at your Git repo and deploy. {{ className: 'lead' }}
+
+---
+
+## Prerequisites
+
+Before you begin, make sure you have:
+
+- **Docker** installed and running
+- **A GitHub or GitLab account** with a repository to deploy
+
+---
+
+## Step 1: Start PostgreSQL with TimescaleDB
+
+Temps requires PostgreSQL with TimescaleDB. Run this one-time setup:
+
+```bash
+# Create a persistent volume for your database
+docker volume create temps-postgres
+
+# Start TimescaleDB (runs on port 16432 to avoid conflicts)
+docker run -d \
+  --name temps-postgres \
+  -v temps-postgres:/var/lib/postgresql/data \
+  -e POSTGRES_USER=postgres \
+  -e POSTGRES_PASSWORD=temps \
+  -e POSTGRES_DB=temps \
+  -p 16432:5432 \
+  timescale/timescaledb:latest-pg18
+```
+
+---
+
+## Step 2: Install Temps
+
+Choose your installation method:
+
+<CodeGroup>
+
+```bash {{ title: 'macOS (Homebrew)' }}
+brew tap gotempsh/tap && brew install temps
+```
+
+```bash {{ title: 'Linux/macOS (curl)' }}
+curl -fsSL https://temps.sh/deploy.sh | bash
+```
+
+</CodeGroup>
+
+Verify the installation:
+
+```bash
+temps --version
+```
+
+---
+
+## Step 3: Start Temps
+
+```bash
+temps serve \
+  --address 0.0.0.0:8080 \
+  --database-url postgresql://postgres:temps@localhost:16432/temps
+```
+
+Open [http://localhost:8080](http://localhost:8080) in your browser.
+
+---
+
+## Step 4: Complete the Onboarding
+
+1. **Create your admin account** - Follow the on-screen wizard
+2. **Connect your Git provider** - Click "Connect GitHub" or "Connect GitLab"
+3. **Authorize Temps** - Grant access to your repositories
+
+---
+
+## Step 5: Deploy Your First App
+
+1. Go to **Projects → New Project**
+2. Select your repository from the list
+3. Choose the branch to deploy (e.g., `main`)
+4. Click **Deploy**
+
+That's it! Watch the build logs in real-time. Your app will be live in ~30-60 seconds with:
+
+- **HTTPS** (automatic TLS certificates)
+- **Analytics** (visitor tracking, page views)
+- **Error tracking** (Sentry-compatible)
+- **Monitoring** (uptime checks)
+- **Live logs** (real-time container logs)
+
+---
+
+## What Gets Auto-Detected?
+
+Temps automatically detects your framework and configures the build:
+
+| Framework       | Build Command                     | Start Command      |
+| --------------- | --------------------------------- | ------------------ |
+| **Next.js**     | `npm run build`                   | `npm start`        |
+| **Vite/React**  | `npm run build`                   | Static serve       |
+| **Node.js**     | `npm install`                     | `npm start`        |
+| **Python**      | `pip install -r requirements.txt` | `uvicorn main:app` |
+| **Go**          | `go build`                        | Binary execution   |
+| **Static HTML** | None                              | nginx serve        |
+
+For custom applications, just add a `Dockerfile` to your repository.
+
+---
+
+## Example: Deploy a Next.js App
+
+```bash
+# Your repository structure
+my-nextjs-app/
+├── package.json
+├── next.config.js
+└── pages/
+    └── index.tsx
+
+# Temps auto-detects and deploys with:
+# - Build command: npm run build
+# - Start command: npm start
+# - Port: 3000 (auto-detected)
+```
+
+---
+
+## Next Steps
+
+Now that your app is deployed:
+
+- **Add a custom domain** - Go to Project Settings → Domains
+- **Set environment variables** - Go to Project Settings → Environment Variables
+- **View analytics** - Check the Analytics tab in your project
+- **Set up error tracking** - Get your DSN from Error Tracking → DSN & Setup
+
+For a more detailed installation guide with production configuration, see the [Installation](/docs/installation) page.

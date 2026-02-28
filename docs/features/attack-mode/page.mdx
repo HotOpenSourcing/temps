@@ -1,0 +1,491 @@
+export const metadata = {
+  title: "Attack Mode",
+  description:
+    "Protect your applications from DDoS attacks and bot traffic with built-in proof-of-work CAPTCHA protection.",
+  alternates: {
+    canonical: "/docs/features/attack-mode",
+  },
+};
+
+export const sections = [
+  { title: "Overview", id: "overview" },
+  { title: "How It Works", id: "how-it-works" },
+  { title: "Enabling Attack Mode", id: "enabling-attack-mode" },
+  { title: "Security Headers", id: "security-headers" },
+  { title: "IP Access Control", id: "ip-access-control" },
+  { title: "Rate Limiting", id: "rate-limiting" },
+  { title: "Vulnerability Scanning", id: "vulnerability-scanning" },
+  { title: "Configuration Inheritance", id: "configuration-inheritance" },
+];
+
+# Attack Mode
+
+Protect your deployed applications from DDoS attacks and bot traffic with a built-in proof-of-work challenge system. No third-party CAPTCHA services, no external dependencies -- everything runs on your infrastructure. {{ className: 'lead' }}
+
+---
+
+## Overview {{ anchor: true, id: 'overview' }}
+
+Attack Mode is Temps's self-hosted alternative to Cloudflare's "Under Attack Mode." When enabled, every visitor must complete a proof-of-work (PoW) challenge before accessing your application. The challenge is solved automatically in the visitor's browser using a WebAssembly solver -- no user interaction required.
+
+<Row>
+  <Col>
+    **Key Features:**
+    - **Zero dependencies** -- no third-party CAPTCHA services or API keys
+    - **Automatic solving** -- visitors see a brief checkpoint page while their browser solves the challenge (2-5 seconds)
+    - **24-hour sessions** -- once verified, visitors can browse freely for 24 hours
+    - **TLS fingerprinting** -- sessions are tied to JA4 TLS fingerprints for stronger identity binding
+    - **WASM-powered** -- Rust compiled to WebAssembly for 30-50x faster solving than JavaScript
+    - **Per-project control** -- enable or disable per project from the dashboard, CLI, or API
+  </Col>
+  <Col>
+    **When to use Attack Mode:**
+    - Your application is under active DDoS attack
+    - You're seeing suspicious bot traffic patterns
+    - You want to protect a public-facing app during a critical event
+    - You need immediate protection without external service setup
+
+    **When not to use it:**
+    - For API endpoints consumed by other services (they can't solve PoW challenges)
+    - Permanently on production -- it adds latency for first-time visitors
+    - For applications that need to be crawled by search engines
+
+  </Col>
+</Row>
+
+---
+
+## How It Works {{ anchor: true, id: 'how-it-works' }}
+
+When a visitor requests a page on a project with Attack Mode enabled, the Temps proxy intercepts the request and runs through the following flow:
+
+### Challenge Flow
+
+1. **Request arrives** at the Pingora-based reverse proxy
+2. **Session check** -- the proxy looks up the visitor's JA4 TLS fingerprint (or IP address as fallback) in the `challenge_sessions` table
+3. **If valid session exists** -- the request passes through to your application normally
+4. **If no valid session** -- the proxy returns a **403 response** with an HTML challenge page
+5. **Browser solves challenge** -- the embedded WASM solver finds a nonce such that `SHA-256(challenge + nonce)` has at least 20 leading zero bits (~1 million hash attempts, takes 2-5 seconds)
+6. **Solution submitted** -- the browser POSTs the solution to `/api/_temps/captcha/verify`
+7. **Server verifies** -- the proxy recomputes the hash and checks the leading zero bits
+8. **Session created** -- a 24-hour session is stored in the database, keyed to the visitor's TLS fingerprint
+9. **Page loads** -- the browser redirects to the original URL
+
+<Note>
+  Attack Mode requires HTTPS. HTTP requests return a **426 Upgrade Required**
+  response because JA4 TLS fingerprinting -- used to identify visitors across
+  requests -- is only available on TLS connections.
+</Note>
+
+### Proof-of-Work Details
+
+The challenge uses SHA-256 hashing with a difficulty of **20 leading zero bits**, which requires approximately 1 million hash attempts on average. The WASM solver processes this in 2-5 seconds on modern hardware.
+
+<Properties>
+  <Property name="Algorithm" type="SHA-256">
+    The solver concatenates the challenge string with a nonce and computes
+    `SHA-256(challenge + nonce)`. It increments the nonce until the hash has the
+    required number of leading zero bits.
+  </Property>
+  <Property name="Difficulty" type="20 bits">
+    20 leading zero bits means the hash must start with at least 5 hex zeros
+    (e.g., `00000a3f...`). This takes ~1M attempts on average -- enough to deter
+    bots while remaining fast for browsers.
+  </Property>
+  <Property name="WASM Solver" type="Rust → WebAssembly">
+    The solver is written in Rust and compiled to WebAssembly via
+    `wasm-bindgen`. It uses the optimized `sha2` crate and is 30-50x faster than
+    the JavaScript fallback. Progress callbacks update the UI every 10,000
+    iterations.
+  </Property>
+  <Property name="Session Duration" type="24 hours">
+    Once a challenge is solved, the session is valid for 24 hours. Sessions are
+    keyed to the visitor's JA4 TLS fingerprint (or IP address if fingerprinting
+    is unavailable). Disabling attack mode clears all active sessions.
+  </Property>
+  <Property name="JavaScript Fallback">
+    If the WASM module fails to load (older browsers, disabled WebAssembly), the
+    challenge page falls back to a pure JavaScript solver. It's slower but
+    functional.
+  </Property>
+</Properties>
+
+---
+
+## Enabling Attack Mode {{ anchor: true, id: 'enabling-attack-mode' }}
+
+Attack Mode can be enabled from the dashboard, CLI, or API.
+
+### Via Dashboard
+
+1. Go to **Projects** and select your project
+2. Open **Settings** → **Security**
+3. Toggle **Enable Attack Mode** in the Attack Mode card
+4. Click **Save Attack Mode Settings**
+
+When enabled, an orange banner appears on the project detail page:
+
+> **Attack Mode is enabled for this project** -- with a quick-access **Disable** button to turn it off immediately.
+
+### Via CLI
+
+<CodeGroup title="CLI Commands">
+
+```bash {{ title: 'Enable' }}
+# Enable attack mode on a project
+bunx @temps-sdk/cli projects settings -p my-app --attack-mode
+```
+
+```bash {{ title: 'Disable' }}
+# Disable attack mode
+bunx @temps-sdk/cli projects settings -p my-app --no-attack-mode
+```
+
+```bash {{ title: 'Check Status' }}
+# View current attack mode status
+bunx @temps-sdk/cli projects show -p my-app
+```
+
+</CodeGroup>
+
+### Via API
+
+```bash
+# Enable attack mode
+curl -X PATCH "https://your-temps-instance.com/api/projects/{project_id}/settings" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"attack_mode": true}'
+
+# Disable attack mode
+curl -X PATCH "https://your-temps-instance.com/api/projects/{project_id}/settings" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"attack_mode": false}'
+```
+
+### Per-Environment Override
+
+Attack mode can also be toggled per environment (e.g., enable only for production, not staging):
+
+1. Go to **Project Settings** → **Environments**
+2. Select the environment (production, staging, preview)
+3. Open the **Security** card
+4. Toggle **Attack Mode** for that specific environment
+
+<Note>
+  Environment-level settings override project-level settings. If attack mode is
+  disabled at the project level but enabled on a specific environment, that
+  environment will still require the PoW challenge.
+</Note>
+
+---
+
+## Security Headers {{ anchor: true, id: 'security-headers' }}
+
+Temps automatically applies configurable HTTP security headers to all responses from your deployed applications. Headers can be configured at three levels: **global**, **project**, and **environment**.
+
+### Presets
+
+Choose from built-in presets or configure headers individually:
+
+<Properties>
+  <Property name="Strict">
+    Maximum security. Restrictive Content-Security-Policy (self only),
+    `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, disabled browser
+    features via Permissions-Policy. Best for applications that don't embed
+    third-party content.
+  </Property>
+  <Property name="Moderate">
+    Balanced security. Allows inline scripts with nonces, `X-Frame-Options:
+    SAMEORIGIN`, `Referrer-Policy: strict-origin-when-cross-origin`. Good
+    default for most applications.
+  </Property>
+  <Property name="Permissive">
+    Development-friendly. Allows `unsafe-inline` and `unsafe-eval` in CSP,
+    relaxed restrictions. Use for development or staging environments where
+    strict CSP would interfere with debugging tools.
+  </Property>
+  <Property name="Custom">
+    Full manual control over each header. Set individual values for
+    Content-Security-Policy, X-Frame-Options, HSTS, Referrer-Policy,
+    Permissions-Policy, X-Content-Type-Options, and X-XSS-Protection.
+  </Property>
+  <Property name="Disabled">
+    No security headers applied by Temps. Use when your application handles its
+    own security headers.
+  </Property>
+</Properties>
+
+### Headers Configured
+
+| Header                      | Description                                           |
+| --------------------------- | ----------------------------------------------------- |
+| `Content-Security-Policy`   | Controls which resources the browser can load         |
+| `X-Frame-Options`           | Prevents clickjacking by controlling iframe embedding |
+| `X-Content-Type-Options`    | Prevents MIME type sniffing (`nosniff`)               |
+| `X-XSS-Protection`          | Enables browser's built-in XSS filter                 |
+| `Strict-Transport-Security` | Forces HTTPS connections (HSTS)                       |
+| `Referrer-Policy`           | Controls how much referrer information is sent        |
+| `Permissions-Policy`        | Restricts browser features (camera, microphone, etc.) |
+
+### Configuring Headers
+
+<CodeGroup title="Dashboard vs API">
+
+```text {{ title: 'Dashboard' }}
+1. Global:      Settings → Security → Security Headers
+2. Project:     Project Settings → Security → Security Headers
+3. Environment: Project Settings → Environments → [env] → Security
+```
+
+```bash {{ title: 'API' }}
+# Set project-level security headers to "strict" preset
+curl -X PATCH "https://your-temps-instance.com/api/projects/{project_id}/settings" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "deployment_config": {
+      "security": {
+        "enabled": true,
+        "headers": {
+          "preset": "strict"
+        }
+      }
+    }
+  }'
+```
+
+</CodeGroup>
+
+---
+
+## IP Access Control {{ anchor: true, id: 'ip-access-control' }}
+
+Control access to your Temps instance at the infrastructure level with IP-based allow and block lists. Rules are enforced at the proxy layer before requests reach your applications.
+
+<Row>
+  <Col>
+    ### Block List
+    Block known bad actors by IP address or CIDR range:
+
+    - Block individual IPs (e.g., `192.168.1.100`)
+    - Block entire subnets (e.g., `10.0.0.0/8`)
+    - Add a reason for each rule for audit purposes
+    - Blocked requests receive a `403 Forbidden` response
+
+    ### Allow List
+    Restrict access to only trusted IPs:
+
+    - Allow specific office or VPN IPs
+    - Allow CIDR ranges for your infrastructure
+    - Useful for internal tools or staging environments
+
+  </Col>
+  <Col>
+    ### Configuring IP Rules
+
+    1. Go to **Settings** → **Security** → **IP Access Control**
+    2. Click **Add Rule**
+    3. Enter the IP address or CIDR range
+    4. Select **Block** or **Allow**
+    5. Optionally add a reason
+    6. Save -- rules take effect immediately
+
+    ### Via API
+
+    ```bash
+    # Block an IP
+    curl -X POST ".../api/ip-access-control" \
+      -H "Authorization: Bearer YOUR_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "ip_address": "192.168.1.100",
+        "action": "block",
+        "reason": "Suspicious activity"
+      }'
+
+    # Check if an IP is blocked
+    curl ".../api/ip-access-control/check/192.168.1.100" \
+      -H "Authorization: Bearer YOUR_TOKEN"
+    ```
+
+  </Col>
+</Row>
+
+<Note>
+IP access control uses PostgreSQL's native `inet` type with the `<<=` operator for efficient CIDR matching. Both individual IPs and subnet ranges are supported in a single rule.
+</Note>
+
+---
+
+## Rate Limiting {{ anchor: true, id: 'rate-limiting' }}
+
+Configure per-IP request rate limits to protect against abuse. Rate limiting is available at the **global**, **project**, and **environment** levels.
+
+<Properties>
+  <Property name="Max Requests Per Minute" type="number">
+    Maximum number of requests allowed from a single IP per minute. Requests
+    exceeding this limit receive a `429 Too Many Requests` response.
+  </Property>
+  <Property name="Max Requests Per Hour" type="number">
+    Maximum number of requests allowed from a single IP per hour. Provides a
+    secondary limit for sustained abuse.
+  </Property>
+  <Property name="Whitelist IPs" type="string[]">
+    IP addresses or CIDR ranges that bypass rate limiting entirely. Useful for
+    your own monitoring services, CI/CD pipelines, or trusted partners.
+  </Property>
+  <Property name="Blacklist IPs" type="string[]">
+    IP addresses or CIDR ranges that are always blocked, regardless of rate
+    limits. These IPs receive an immediate `403 Forbidden` response.
+  </Property>
+</Properties>
+
+### Configuring Rate Limits
+
+<CodeGroup title="Rate Limiting">
+
+```text {{ title: 'Dashboard' }}
+1. Global:      Settings → Security → Rate Limiting
+2. Project:     Project Settings → Security → Rate Limiting
+3. Environment: Project Settings → Environments → [env] → Security
+```
+
+```bash {{ title: 'API' }}
+# Set project-level rate limits
+curl -X PATCH "https://your-temps-instance.com/api/projects/{project_id}/settings" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "deployment_config": {
+      "security": {
+        "rate_limiting": {
+          "max_requests_per_minute": 60,
+          "max_requests_per_hour": 1000,
+          "whitelist_ips": ["10.0.0.0/8"],
+          "blacklist_ips": ["203.0.113.50"]
+        }
+      }
+    }
+  }'
+```
+
+</CodeGroup>
+
+<Note>
+  When rate limiting is configured at multiple levels, whitelist and blacklist
+  IPs are **additive** (merged from all levels), while numeric limits use the
+  most specific configuration (environment overrides project, project overrides
+  global).
+</Note>
+
+---
+
+## Vulnerability Scanning {{ anchor: true, id: 'vulnerability-scanning' }}
+
+Temps automatically scans your deployed Docker images for known vulnerabilities using [Trivy](https://trivy.dev/), an open-source security scanner. Scans run daily at midnight UTC and can also be triggered manually.
+
+### What Gets Scanned
+
+- **OS packages** (Alpine, Debian, Ubuntu, etc.) -- detects CVEs in system libraries
+- **Language packages** (npm, pip, Go modules, etc.) -- detects CVEs in application dependencies
+- **Container configuration** -- checks for security misconfigurations
+
+### Severity Levels
+
+<Properties>
+  <Property name="Critical">
+    Vulnerabilities that are trivially exploitable with severe impact (e.g.,
+    remote code execution without authentication). Fix immediately.
+  </Property>
+  <Property name="High">
+    Serious vulnerabilities that are exploitable with significant impact. Fix as
+    soon as possible.
+  </Property>
+  <Property name="Medium">
+    Vulnerabilities that require specific conditions to exploit or have limited
+    impact. Plan to fix in the next release cycle.
+  </Property>
+  <Property name="Low">
+    Minor vulnerabilities with minimal impact or very difficult to exploit. Fix
+    when convenient.
+  </Property>
+</Properties>
+
+### Viewing Scan Results
+
+1. Go to **Projects** and select your project
+2. Vulnerability scan results appear in the project overview
+3. Each scan shows total count and breakdown by severity (critical, high, medium, low)
+4. Click into a scan to see individual CVEs with package names, installed versions, fixed versions, and CVSS scores
+
+### Triggering a Manual Scan
+
+```bash
+# Via API
+curl -X POST "https://your-temps-instance.com/api/projects/{project_id}/scans" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+
+# View latest scan results
+curl "https://your-temps-instance.com/api/projects/{project_id}/scans/latest" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+
+# View vulnerabilities for a specific scan
+curl "https://your-temps-instance.com/api/projects/{project_id}/scans/{scan_id}/vulnerabilities" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+<Note>
+  Vulnerability scanning requires Trivy to be available on the Temps server.
+  Temps will automatically use it if installed. Install Trivy with: `curl -sfL
+  https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh |
+  sh`
+</Note>
+
+---
+
+## Configuration Inheritance {{ anchor: true, id: 'configuration-inheritance' }}
+
+Security settings follow a three-level inheritance chain. More specific settings override less specific ones:
+
+```text
+Global Settings  →  Project Settings  →  Environment Settings
+  (defaults)         (overrides global)    (overrides project)
+```
+
+<Properties>
+  <Property name="Global Level">
+    Default settings applied to all projects. Configure in **Settings** →
+    **Security**. These act as your baseline security posture.
+  </Property>
+  <Property name="Project Level">
+    Override global settings for a specific project. Configure in **Project
+    Settings** → **Security**. Leave fields empty to inherit from global.
+  </Property>
+  <Property name="Environment Level">
+    Override project settings for a specific environment (production, staging,
+    preview). Configure in **Project Settings** → **Environments** →
+    **Security**. Useful for stricter production settings or relaxed staging
+    settings.
+  </Property>
+</Properties>
+
+### What Inherits How
+
+| Setting                  | Inheritance Behavior                                     |
+| ------------------------ | -------------------------------------------------------- |
+| Security headers preset  | Child overrides parent (most specific wins)              |
+| Rate limit numbers       | Child overrides parent                                   |
+| Rate limit whitelist IPs | Additive (merged across all levels)                      |
+| Rate limit blacklist IPs | Additive (merged across all levels)                      |
+| Attack mode              | Can be set at project or environment level independently |
+
+---
+
+## Next Steps
+
+- [Monitoring](/docs/features/monitoring) -- Monitor application health and resource usage
+- [Error Tracking](/docs/features/error-tracking) -- Track and debug application errors
+- [Logs](/docs/features/logs) -- View application and deployment logs
+- [Architecture: Security](/docs/architecture/security) -- Security architecture overview

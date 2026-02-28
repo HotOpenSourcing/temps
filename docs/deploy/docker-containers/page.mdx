@@ -1,0 +1,76 @@
+export const metadata = {
+  title: 'Deploy Docker Containers',
+  description: 'Deploy custom Docker containers and Dockerized applications on Temps.',
+  alternates: {
+    canonical: '/docs/deploy/docker-containers',
+  },
+}
+
+# Deploy Docker Containers
+
+## Page Goal
+Empower users to deploy any application using Docker, providing maximum flexibility. Show that Temps supports complex, custom deployments beyond standard frameworks.
+
+## Target Persona
+**Docker Dave** - A developer who:
+- Comfortable with Docker
+- Has complex application requirements
+- Needs custom runtime configurations
+- May have multi-stage builds
+- Values: Control, flexibility, containerization
+- Use cases: Legacy apps, custom stacks, complex dependencies
+- Timeline: 15-20 minutes including Dockerfile writing
+
+## Key Content to Include
+
+**1. Docker Support**
+- Dockerfile-based deployments
+- Docker Compose (single container)
+- Custom base images
+- Multi-stage builds
+
+**2. Dockerfile Requirements**
+- Must expose a port
+- EXPOSE instruction
+- Proper CMD/ENTRYPOINT
+- Port binding best practices
+
+**3. Basic Docker Deployment**
+- Repository with Dockerfile
+- Auto-detection
+- Port configuration
+- Deployment
+
+**4. Dockerfile Best Practices**
+- Multi-stage builds for smaller images
+- Layer caching optimization
+- Security considerations
+- .dockerignore
+
+**5. Advanced Configuration**
+- Build arguments
+- Environment variables in Docker
+- Volume mounts (limitations)
+- Resource limits
+
+**6. Docker Compose**
+- Single-service compose files
+- Environment variable substitution
+- Port mapping
+
+**7. Registry Integration**
+- Docker Hub images
+- Private registries
+- Pre-built images
+
+**8. Troubleshooting**
+- Build failures
+- Port binding issues
+- Image size problems
+- Runtime errors
+
+## Success Metrics
+- User can deploy Dockerized application
+- User understands Dockerfile requirements
+- User can optimize their Docker builds
+- User knows limitations and capabilities

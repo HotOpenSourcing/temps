@@ -1,0 +1,203 @@
+export const metadata = {
+  title: "Manage Environment Variables",
+  description:
+    "Tutorial: Configure environment variables and secrets in Temps. Manage build-time and runtime variables across environments securely.",
+  alternates: {
+    canonical: "/docs/tutorials/environment-variables",
+  },
+};
+
+# Manage Environment Variables
+
+## Page Goal
+
+Teach proper environment variable management and secrets handling. Help users avoid common security mistakes and configuration issues.
+
+## Target Persona
+
+**Secure Sam** - A developer who:
+
+- Needs to manage API keys, secrets
+- Wants production-ready security
+- May have different env per environment
+- Concerned about security best practices
+- Values: Security, proper configuration, peace of mind
+- Questions: "Is this secure?", "How do I structure these?"
+- Timeline: Setting up production deployment
+
+## Key Content to Include
+
+**1. What You'll Learn**
+
+- Add environment variables
+- Manage secrets securely
+- Environment-specific configs
+- Best practices
+- Time: 10 minutes
+
+**2. Understanding Environment Variables**
+
+- What they are
+- When to use them
+- What should be environment variables
+- What shouldn't be
+
+**3. Adding Environment Variables**
+
+**Step 1: Navigate to Settings** (1 min)
+
+- Go to your application
+- Environment variables section
+- Screenshots
+
+**Step 2: Add Variables** (2 min)
+
+- Variable name
+- Variable value
+- Per-environment (dev/staging/prod)
+- Visibility (shown/hidden for secrets)
+
+**Step 3: Trigger Redeploy** (1 min)
+
+- Changes require redeploy
+- How to redeploy
+- Verify new variables loaded
+
+**4. Common Environment Variables**
+
+**For Frontend Apps:**
+
+```bash
+VITE_API_URL=https://api.example.com
+NEXT_PUBLIC_ANALYTICS_ID=UA-12345
+REACT_APP_ENV=production
+```
+
+**For Backend APIs:**
+
+```bash
+DATABASE_URL=postgresql://...
+JWT_SECRET=your-secret-key
+API_KEY=your-api-key
+NODE_ENV=production
+PORT=3000 # (usually auto-set by Temps)
+```
+
+**For Databases:**
+
+```bash
+DB_HOST=db.example.com
+DB_PORT=5432
+DB_NAME=myapp
+DB_USER=user
+DB_PASSWORD=secret
+```
+
+**5. Security Best Practices**
+
+**✅ DO:**
+
+- Use environment variables for secrets
+- Different secrets per environment
+- Rotate secrets regularly
+- Use strong, unique values
+- Limit who can view secrets
+
+**❌ DON'T:**
+
+- Commit secrets to Git
+- Use same secrets in dev and prod
+- Share secrets in plain text
+- Reuse secrets across projects
+- Log secret values
+
+**6. Framework-Specific Guidelines**
+
+**Next.js:**
+
+- NEXT*PUBLIC*\* for client-side
+- No prefix for server-side
+- When each is available
+
+**Vite:**
+
+- VITE\_\* for client-side exposure
+- Security implications
+
+**Node.js:**
+
+- process.env.VARIABLE_NAME
+- dotenv for local development
+
+**7. Environment-Specific Configuration**
+
+- Dev environment variables
+- Staging environment variables
+- Production environment variables
+- When to use same vs different values
+
+**8. Managing .env Files**
+
+- .env.example for documentation
+- Never commit .env
+- Local development setup
+- Template example
+
+**9. Variable Precedence**
+
+- Project-level variables
+- Environment-level variables
+- Which takes precedence
+
+**10. Troubleshooting**
+
+**Variables not available:**
+
+- Redeploy required after changes
+- Check variable names
+- Framework-specific prefixes
+
+**Secrets exposed:**
+
+- Client-side vs server-side
+- Browser devtools check
+- Fixing leaked secrets
+
+**Build-time vs Runtime:**
+
+- When variables are read
+- Static site considerations
+- Dynamic APIs
+
+**11. Real-World Examples**
+
+**Example 1: Next.js with Database**
+
+```bash
+DATABASE_URL=postgres://... # server-only
+NEXT_PUBLIC_APP_NAME=MyApp # client-side
+```
+
+**Example 2: React + API**
+
+```bash
+VITE_API_URL=https://api.myapp.com
+VITE_SENTRY_DSN=https://...
+```
+
+**Example 3: Node.js API**
+
+```bash
+DATABASE_URL=postgres://...
+REDIS_URL=redis://...
+JWT_SECRET=super-secret-key
+CORS_ORIGIN=https://app.myapp.com
+```
+
+## Success Metrics
+
+- User understands how to add variables
+- User knows security best practices
+- User can configure framework-specific variables
+- Zero accidental secret exposure
+- Proper environment separation

@@ -1,0 +1,136 @@
+export const metadata = {
+  title: 'Deploy Node.js API',
+  description: 'Tutorial: Deploy Node.js REST APIs and backend services on Temps.',
+  alternates: {
+    canonical: '/docs/tutorials/deploy-nodejs',
+  },
+}
+
+# Deploy Node.js API
+
+## Page Goal
+Show developers how to deploy backend services and APIs on Temps. Cover Express and other popular frameworks with production best practices.
+
+## Target Persona
+**Backend Bob** - A developer who:
+- Building REST APIs or backend services
+- Using Express, Fastify, NestJS, etc.
+- Needs environment variables and secrets
+- May connect to external databases
+- Values: Reliability, security, performance
+- Search intent: "deploy nodejs api", "host express app"
+- Timeline: Production deployment needed
+
+## Key Content to Include
+
+**1. What You'll Deploy**
+- Express.js REST API
+- Fastify API
+- NestJS application
+- Other Node.js backends
+- Time: 10-15 minutes
+
+**2. Prerequisites**
+- Temps installed
+- Node.js API in Git
+- (Optional) Database connection string
+
+**3. Preparing Your API**
+
+**Step 1: Port Configuration**
+- Must listen on process.env.PORT
+- Example code for Express/Fastify
+- Common mistake: hardcoded ports
+```javascript
+const PORT = process.env.PORT || 3000
+app.listen(PORT)
+```
+
+**Step 2: Package.json Configuration**
+- Start script required
+- Build script (if TypeScript)
+- Dependencies vs devDependencies
+- Example package.json
+
+**Step 3: Health Check Endpoint**
+- Add /health or /ping
+- Why health checks matter
+- Example implementation
+
+**4. Deployment Steps**
+
+**Step 1: Connect Repository**
+- Git integration
+- Select branch
+- Monorepo path (if applicable)
+
+**Step 2: Configure Build**
+- Build command (if TypeScript): `npm run build`
+- Start command: `npm start`
+- Node version selection
+
+**Step 3: Environment Variables**
+- Database connection strings
+- API keys and secrets
+- NODE_ENV=production
+- Security best practices
+
+**Step 4: Deploy**
+- Trigger deployment
+- Monitor build logs
+- Verify startup
+
+**5. Testing Your API**
+- Get deployment URL
+- Test endpoints with curl
+- Verify database connection
+- Load testing considerations
+
+**6. Production Best Practices**
+- Error handling
+- Logging setup
+- Rate limiting
+- Security headers
+- CORS configuration
+
+**7. Framework-Specific Guides**
+
+**Express.js**
+- Example Express app
+- Middleware configuration
+- Static files serving
+
+**Fastify**
+- Fastify-specific config
+- Plugin setup
+- Performance tips
+
+**NestJS**
+- NestJS production build
+- Module configuration
+- Microservices
+
+**8. Database Connection**
+- PostgreSQL connection example
+- MongoDB connection example
+- Connection pooling
+- Handling reconnections
+
+**9. Troubleshooting**
+- Port binding errors
+- Database connection failures
+- Memory/CPU limits
+- Timeout issues
+
+**10. Monitoring & Logs**
+- Accessing logs
+- Structured logging
+- Error tracking
+- Performance monitoring
+
+## Success Metrics
+- User deploys working API
+- API is production-ready
+- User understands port configuration
+- Database connections work
+- Security best practices followed

@@ -1,0 +1,428 @@
+export const metadata = {
+  title: 'React Analytics SDK',
+  description:
+    'API reference for @temps-sdk/react-analytics. Provider configuration, hooks, session recording, engagement tracking, and Web Vitals.',
+  alternates: {
+    canonical: '/docs/reference/react-analytics-sdk',
+  },
+}
+
+export const sections = [
+  { title: 'Installation', id: 'installation' },
+  { title: 'TempsAnalyticsProvider', id: 'tempsanalyticsprovider' },
+  { title: 'useTempsAnalytics', id: 'usetempsanalytics' },
+  { title: 'useTrackEvent', id: 'usetrackevent' },
+  { title: 'useTrackPageview', id: 'usetrackpageview' },
+  { title: 'usePageLeave', id: 'usepageleave' },
+  { title: 'useSpeedAnalytics', id: 'usespeedanalytics' },
+  { title: 'useEngagementTracking', id: 'useengagementtracking' },
+  { title: 'useScrollVisibility', id: 'usescrollvisibility' },
+  { title: 'useSessionRecording', id: 'usesessionrecording' },
+  { title: 'Declarative tracking', id: 'declarative-tracking' },
+  { title: 'Session recording configuration', id: 'session-recording-configuration' },
+  { title: 'Environment detection', id: 'environment-detection' },
+]
+
+# React Analytics SDK
+
+API reference for `@temps-sdk/react-analytics`. This package provides analytics, Web Vitals, session replay, and engagement tracking for React applications deployed on Temps. {{ className: 'lead' }}
+
+---
+
+## Installation {{ anchor: true, id: 'installation' }}
+
+<CodeGroup>
+
+```bash {{ title: 'npm' }}
+npm install @temps-sdk/react-analytics
+```
+
+```bash {{ title: 'bun' }}
+bun add @temps-sdk/react-analytics
+```
+
+```bash {{ title: 'pnpm' }}
+pnpm add @temps-sdk/react-analytics
+```
+
+</CodeGroup>
+
+**Requirements:** React 18+ or React 19
+
+---
+
+## TempsAnalyticsProvider {{ anchor: true, id: 'tempsanalyticsprovider' }}
+
+The root provider component. Wrap your application with it to enable analytics.
+
+```tsx
+import { TempsAnalyticsProvider } from '@temps-sdk/react-analytics';
+
+<TempsAnalyticsProvider basePath="/api/_temps">
+  {children}
+</TempsAnalyticsProvider>
+```
+
+### Props
+
+<Properties>
+  <Property name="basePath" type="string" defaultValue="/api/_temps">
+    API endpoint path. When deployed on Temps, the proxy handles this automatically.
+  </Property>
+  <Property name="domain" type="string">
+    Override the detected hostname. Use when not deployed on Temps or running locally.
+  </Property>
+  <Property name="disabled" type="boolean" defaultValue="false">
+    Kill switch to disable all analytics.
+  </Property>
+  <Property name="ignoreLocalhost" type="boolean" defaultValue="true">
+    Skip tracking on localhost, 127.0.0.1, and test environments.
+  </Property>
+  <Property name="autoTrackPageviews" type="boolean" defaultValue="true">
+    Automatically track page views on `pushState` and `popstate` events.
+  </Property>
+  <Property name="autoTrackPageLeave" type="boolean" defaultValue="true">
+    Track `page_leave` events with time-on-page via `pagehide` and `beforeunload`.
+  </Property>
+  <Property name="pageLeaveEventName" type="string" defaultValue="page_leave">
+    Custom event name for page leave tracking.
+  </Property>
+  <Property name="autoTrackSpeedAnalytics" type="boolean" defaultValue="true">
+    Collect Core Web Vitals (LCP, FID, CLS, TTFB, FCP, INP).
+  </Property>
+  <Property name="autoTrackEngagement" type="boolean" defaultValue="true">
+    Enable heartbeat-based engagement tracking.
+  </Property>
+  <Property name="heartbeatInterval" type="number" defaultValue="30000">
+    Engagement heartbeat interval in milliseconds.
+  </Property>
+  <Property name="inactivityTimeout" type="number" defaultValue="30000">
+    Milliseconds of no interaction before marking the user as inactive.
+  </Property>
+  <Property name="engagementThreshold" type="number" defaultValue="10000">
+    Milliseconds on page before the user is considered "engaged".
+  </Property>
+  <Property name="enableSessionRecording" type="boolean" defaultValue="false">
+    Enable rrweb-based session recording.
+  </Property>
+  <Property name="sessionRecordingConfig" type="SessionRecordingConfig">
+    Configuration object for session recording. See [Session Recording Configuration](#session-recording-configuration).
+  </Property>
+</Properties>
+
+---
+
+## useTempsAnalytics {{ anchor: true, id: 'usetempsanalytics' }}
+
+The core analytics hook. Returns the full analytics context.
+
+```tsx
+import { useTempsAnalytics } from '@temps-sdk/react-analytics';
+
+const { trackEvent, trackPageview, identify, enabled } = useTempsAnalytics();
+```
+
+### Return value
+
+<Properties>
+  <Property name="trackEvent" type="(name: string, data?: Record<string, JsonValue>) => Promise<void>">
+    Send a custom event with optional properties.
+  </Property>
+  <Property name="trackPageview" type="() => void">
+    Manually fire a pageview event.
+  </Property>
+  <Property name="identify" type="(userId: string, traits?: Record<string, any>) => void">
+    Identify a user for analytics enrichment.
+  </Property>
+  <Property name="enabled" type="boolean">
+    Whether analytics are currently active.
+  </Property>
+</Properties>
+
+---
+
+## useTrackEvent {{ anchor: true, id: 'usetrackevent' }}
+
+Convenience hook that returns only the `trackEvent` function.
+
+```tsx
+import { useTrackEvent } from '@temps-sdk/react-analytics';
+
+const track = useTrackEvent();
+track('button_clicked', { id: 'cta-hero' });
+```
+
+---
+
+## useTrackPageview {{ anchor: true, id: 'usetrackpageview' }}
+
+Returns a function to manually trigger a pageview.
+
+```tsx
+import { useTrackPageview } from '@temps-sdk/react-analytics';
+
+const trackPageview = useTrackPageview();
+useEffect(() => { trackPageview(); }, []);
+```
+
+---
+
+## usePageLeave {{ anchor: true, id: 'usepageleave' }}
+
+Track when users leave a page, including time spent.
+
+```tsx
+import { usePageLeave } from '@temps-sdk/react-analytics';
+
+const { triggerPageLeave } = usePageLeave({
+  eventName: 'article_leave',
+  eventData: { category: 'blog' },
+  enabled: true,
+});
+```
+
+### Options
+
+<Properties>
+  <Property name="eventName" type="string" defaultValue="page_leave">
+    Event name for the page leave event.
+  </Property>
+  <Property name="eventData" type="Record<string, JsonValue>">
+    Additional data merged into the event payload.
+  </Property>
+  <Property name="enabled" type="boolean" defaultValue="true">
+    Enable or disable tracking.
+  </Property>
+</Properties>
+
+### Return value
+
+<Properties>
+  <Property name="triggerPageLeave" type="() => void">
+    Manually trigger a page leave event (e.g. before client-side navigation).
+  </Property>
+</Properties>
+
+The event payload automatically includes `time_on_page_ms`, `url`, `referrer`, and `timestamp`.
+
+---
+
+## useSpeedAnalytics {{ anchor: true, id: 'usespeedanalytics' }}
+
+Tracks Web Vitals performance metrics. Enabled by default through the provider.
+
+```tsx
+import { useSpeedAnalytics } from '@temps-sdk/react-analytics';
+
+useSpeedAnalytics({ basePath: '/api/_temps', disabled: false });
+```
+
+Metrics collected:
+
+| Metric | Full name | What it measures |
+|--------|-----------|-----------------|
+| TTFB | Time to First Byte | Server responsiveness |
+| FCP | First Contentful Paint | First pixels rendered |
+| LCP | Largest Contentful Paint | Main content visible |
+| FID | First Input Delay | Input responsiveness |
+| CLS | Cumulative Layout Shift | Visual stability |
+| INP | Interaction to Next Paint | Overall responsiveness |
+
+Initial metrics (TTFB, FCP, LCP, FID) are batched into a single request. Late metrics (CLS, INP) are sent individually as they stabilize.
+
+---
+
+## useEngagementTracking {{ anchor: true, id: 'useengagementtracking' }}
+
+Manual engagement tracking for specific pages or components.
+
+```tsx
+import { useEngagementTracking } from '@temps-sdk/react-analytics';
+
+const { engagementData, isTracking } = useEngagementTracking({
+  heartbeatInterval: 15000,
+  engagementThreshold: 5000,
+  onEngagementUpdate: (data) => console.log(data),
+  onPageLeave: (data) => console.log(data),
+});
+```
+
+### Engagement data shape
+
+```typescript
+interface EngagementData {
+  engagement_time_seconds: number;
+  total_time_seconds: number;
+  heartbeat_count: number;
+  is_engaged: boolean;
+  is_visible: boolean;
+  time_since_last_activity: number;
+}
+```
+
+---
+
+## useScrollVisibility {{ anchor: true, id: 'usescrollvisibility' }}
+
+Track when elements scroll into view using Intersection Observer.
+
+```tsx
+import { useScrollVisibility } from '@temps-sdk/react-analytics';
+
+const ref = useScrollVisibility({
+  eventName: 'pricing_viewed',
+  eventData: { section: 'pricing' },
+  threshold: 0.75,
+  once: true,
+});
+
+return <section ref={ref}>Pricing Plans</section>;
+```
+
+### Options
+
+<Properties>
+  <Property name="eventName" type="string" defaultValue="component_visible">
+    Event name to fire when the element is visible.
+  </Property>
+  <Property name="eventData" type="Record<string, JsonValue>">
+    Additional event properties.
+  </Property>
+  <Property name="threshold" type="number" defaultValue="0.5">
+    Visibility percentage (0.0 to 1.0) required to trigger.
+  </Property>
+  <Property name="once" type="boolean" defaultValue="true">
+    Track only the first time the element becomes visible.
+  </Property>
+  <Property name="enabled" type="boolean" defaultValue="true">
+    Enable or disable tracking.
+  </Property>
+  <Property name="root" type="Element | null" defaultValue="null">
+    Scroll container (null = viewport).
+  </Property>
+  <Property name="rootMargin" type="string" defaultValue="0px">
+    Margin around the root element.
+  </Property>
+</Properties>
+
+---
+
+## useSessionRecording {{ anchor: true, id: 'usesessionrecording' }}
+
+Control session recording programmatically.
+
+```tsx
+import { useSessionRecording } from '@temps-sdk/react-analytics';
+
+const {
+  isRecordingEnabled,
+  enableRecording,
+  disableRecording,
+  toggleRecording,
+  sessionId,
+} = useSessionRecording();
+```
+
+### Return value
+
+<Properties>
+  <Property name="isRecordingEnabled" type="boolean">
+    Whether recording is currently active.
+  </Property>
+  <Property name="enableRecording" type="() => void">
+    Start recording.
+  </Property>
+  <Property name="disableRecording" type="() => void">
+    Stop recording.
+  </Property>
+  <Property name="toggleRecording" type="() => void">
+    Toggle recording on/off.
+  </Property>
+  <Property name="sessionId" type="string | null">
+    The current session ID if recording.
+  </Property>
+</Properties>
+
+---
+
+## Declarative tracking {{ anchor: true, id: 'declarative-tracking' }}
+
+Track click events without writing JavaScript using HTML attributes:
+
+```html
+<button temps-event-name="cta_click" temps-data-section="hero" temps-data-variant="blue">
+  Get Started
+</button>
+```
+
+Any element with `temps-event-name` fires an event on click. All `temps-data-*` attributes are sent as event properties (with the `temps-data-` prefix stripped).
+
+---
+
+## Session recording configuration {{ anchor: true, id: 'session-recording-configuration' }}
+
+Pass to the provider as `sessionRecordingConfig`:
+
+<Properties>
+  <Property name="sessionSampleRate" type="number" defaultValue="1.0">
+    Percentage of sessions to record (0.0 to 1.0). Use 0.1 for 10%.
+  </Property>
+  <Property name="maskAllInputs" type="boolean" defaultValue="true">
+    Replace all input field values with asterisks. Password fields are always masked.
+  </Property>
+  <Property name="maskTextSelector" type="string">
+    CSS selector for text elements to mask (e.g. `[data-mask]`).
+  </Property>
+  <Property name="blockClass" type="string" defaultValue="rr-block">
+    CSS class to completely hide elements from recordings.
+  </Property>
+  <Property name="ignoreClass" type="string" defaultValue="rr-ignore">
+    CSS class to exclude elements from capture.
+  </Property>
+  <Property name="maskTextClass" type="string" defaultValue="rr-mask">
+    CSS class to mask text content.
+  </Property>
+  <Property name="excludedPaths" type="string[]">
+    URL paths to exclude from recording. Supports wildcards (e.g. `/admin/*`).
+  </Property>
+  <Property name="recordCanvas" type="boolean" defaultValue="false">
+    Record canvas element content.
+  </Property>
+  <Property name="collectFonts" type="boolean" defaultValue="false">
+    Collect font data for accurate replay.
+  </Property>
+  <Property name="batchSize" type="number" defaultValue="100">
+    Number of events per batch before sending.
+  </Property>
+  <Property name="flushInterval" type="number" defaultValue="5000">
+    Maximum time (ms) before flushing a batch.
+  </Property>
+</Properties>
+
+---
+
+## Environment detection {{ anchor: true, id: 'environment-detection' }}
+
+When `ignoreLocalhost` is `true` (default), the SDK disables itself in:
+
+| Environment | Detection |
+|-------------|-----------|
+| Localhost | `localhost`, `127.0.0.1`, `::1`, `*.local` |
+| Test runners | `jest`, `mocha`, `vitest`, `cypress` globals detected |
+| Manual override | `localStorage.temps_ignore = "true"` |
+
+### TypeScript exports
+
+All types are exported:
+
+```typescript
+import type {
+  AnalyticsContextValue,
+  TempsAnalyticsProviderProps,
+  EngagementData,
+  EngagementTrackerOptions,
+  WebVitalMetric,
+  SpeedMetric,
+  JsonValue,
+} from '@temps-sdk/react-analytics';
+```

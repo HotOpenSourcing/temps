@@ -1,0 +1,188 @@
+export const metadata = {
+  title: 'Resources & Scaling',
+  description:
+    'How Temps allocates CPU, memory, and replicas to your containers, and how to scale vertically and horizontally.',
+  alternates: {
+    canonical: '/docs/concepts/resources',
+  },
+}
+
+export const sections = [
+  { title: 'Resource model', id: 'resource-model' },
+  { title: 'CPU', id: 'cpu' },
+  { title: 'Memory', id: 'memory' },
+  { title: 'Replicas', id: 'replicas' },
+  { title: 'Configuration hierarchy', id: 'configuration-hierarchy' },
+  { title: 'Monitoring resource usage', id: 'monitoring-resource-usage' },
+  { title: 'Scaling strategies', id: 'scaling-strategies' },
+]
+
+# Resources & Scaling
+
+Every container deployed by Temps runs with configurable CPU and memory limits. You control how much of your server's resources each application gets, and how many instances (replicas) run per environment. {{ className: 'lead' }}
+
+---
+
+## Resource model {{ anchor: true, id: 'resource-model' }}
+
+Each environment has a **deployment configuration** with four resource fields:
+
+| Field | Unit | Default | Purpose |
+|-------|------|---------|---------|
+| `cpu_request` | Millicores | Not set | Minimum CPU guaranteed |
+| `cpu_limit` | Millicores | Not set | Maximum CPU allowed |
+| `memory_request` | MB | Not set | Minimum memory guaranteed |
+| `memory_limit` | MB | Not set | Maximum memory allowed |
+| `replicas` | Count | 1 | Number of container instances |
+| `exposed_port` | Port number | 3000 | The port your application listens on |
+
+When resource limits are not set, Docker allocates resources dynamically — the container can use whatever is available on the server. Setting explicit limits prevents one application from starving others.
+
+---
+
+## CPU {{ anchor: true, id: 'cpu' }}
+
+CPU is measured in **millicores**. 1000 millicores = 1 CPU core.
+
+| Millicores | CPU cores | Typical use case |
+|-----------|-----------|-----------------|
+| 100 | 0.1 | Static sites, minimal APIs |
+| 250 | 0.25 | Low-traffic web applications |
+| 500 | 0.5 | Standard web applications |
+| 1000 | 1.0 | Medium traffic, server-side rendering |
+| 2000 | 2.0 | High traffic, CPU-intensive processing |
+
+**Request vs Limit:**
+
+- `cpu_request` — The minimum CPU guaranteed to the container. Docker reserves this capacity.
+- `cpu_limit` — The maximum CPU the container can use. If the container tries to exceed this, it is throttled (not killed).
+
+When the server has spare capacity, a container can burst above its request up to its limit. When the server is under load, each container is guaranteed at least its requested amount.
+
+---
+
+## Memory {{ anchor: true, id: 'memory' }}
+
+Memory is measured in **megabytes (MB)**.
+
+| MB | Typical use case |
+|----|-----------------|
+| 128 | Static file servers |
+| 256 | Small APIs, microservices |
+| 512 | Standard web applications |
+| 1024 | Server-side rendering, large datasets |
+| 2048+ | Memory-intensive applications |
+
+**Request vs Limit:**
+
+- `memory_request` — The minimum memory guaranteed.
+- `memory_limit` — The maximum memory allowed. If the container exceeds this, Docker kills it (OOM kill) and Temps restarts it.
+
+<Note>
+**OOM kills are the most common cause of container restarts.** If your application is being killed, check its memory usage in the monitoring dashboard and increase the memory limit. Memory leaks (usage growing continuously over time) should be fixed in application code.
+</Note>
+
+---
+
+## Replicas {{ anchor: true, id: 'replicas' }}
+
+Replicas are the number of container instances running for a given environment. The reverse proxy load-balances requests across all healthy replicas.
+
+| Replicas | Use case |
+|----------|----------|
+| 1 | Development, staging, low-traffic production |
+| 2-3 | Standard production with some redundancy |
+| 5+ | High-traffic applications |
+
+### What replicas provide
+
+- **Higher throughput** — More containers handle more concurrent requests
+- **Fault tolerance** — If one replica crashes, others continue serving traffic while it restarts
+
+### What replicas require
+
+- **Stateless application design** — Each replica has its own memory space. Session data, caches, and temporary files are not shared. Use Redis or a database for shared state.
+- **Sufficient server resources** — Each replica consumes its own CPU and memory allocation. Three replicas with 512 MB each need 1.5 GB total.
+
+---
+
+## Configuration hierarchy {{ anchor: true, id: 'configuration-hierarchy' }}
+
+Resource settings are configured at two levels:
+
+1. **Project level** — Default deployment config that applies to new environments
+2. **Environment level** — Per-environment overrides that take precedence
+
+| Setting | Project default | Production override | Staging |
+|---------|----------------|-------------------|---------|
+| `cpu_limit` | 1000 | 2000 | (uses project default: 1000) |
+| `memory_limit` | 512 | 1024 | (uses project default: 512) |
+| `replicas` | 1 | 3 | (uses project default: 1) |
+
+This lets you allocate more resources to production while keeping staging lightweight, without configuring every setting on every environment.
+
+### Port resolution
+
+The exposed port determines which port Temps routes traffic to inside the container. It is resolved in priority order:
+
+1. `EXPOSE` directive in your Dockerfile (highest priority)
+2. `exposed_port` on the environment
+3. `exposed_port` on the project
+4. Default: `3000`
+
+---
+
+## Monitoring resource usage {{ anchor: true, id: 'monitoring-resource-usage' }}
+
+The monitoring dashboard shows real-time resource consumption for each container:
+
+- **CPU usage (%)** — Current CPU usage as a percentage of the limit
+- **Memory usage (bytes and %)** — Current memory consumption and percentage of the limit
+- **Network traffic (bytes/sec)** — Inbound and outbound data transfer rates
+
+Metrics are delivered in real-time via Server-Sent Events (SSE) so the dashboard updates continuously without polling.
+
+Access metrics programmatically:
+
+```bash
+curl "https://your-temps-instance/api/projects/{id}/environments/{id}/containers/{id}/metrics" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+---
+
+## Scaling strategies {{ anchor: true, id: 'scaling-strategies' }}
+
+### Vertical scaling (more resources per container)
+
+Increase CPU and memory limits when:
+
+- CPU usage is consistently above 80%
+- Memory usage is approaching the limit
+- Response times are increasing due to resource contention
+
+This is the simplest approach and works until you hit your server's physical limits.
+
+### Horizontal scaling (more replicas)
+
+Increase the replica count when:
+
+- Single-container throughput is maxed out despite adequate CPU/memory
+- You need fault tolerance (at least 2 replicas for redundancy)
+- Your application handles many concurrent requests
+
+Requirements:
+- Your application must be stateless (use Redis for sessions, database for persistence)
+- All replicas share the same linked services and environment variables
+
+### Scaling the server
+
+If both vertical and horizontal scaling within the current server are insufficient:
+
+- Move to a larger VPS (more CPU cores, more RAM)
+- Move the PostgreSQL database to a dedicated server or managed service
+- Use the Temps backup system to migrate: back up on the old server, restore on the new one
+
+<Note>
+Temps does not currently support auto-scaling. Resource allocation and replica count are manual settings. Monitor your metrics and adjust proactively as traffic patterns change.
+</Note>
