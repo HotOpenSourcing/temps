@@ -22,7 +22,7 @@ export function Routes() {
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: 'Load Balancer', href: '/load-balancer' },
+      { label: 'Load Balancer', href: '/settings/load-balancer' },
       { label: 'Routes' },
     ])
   }, [setBreadcrumbs])

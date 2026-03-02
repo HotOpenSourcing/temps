@@ -1,0 +1,143 @@
+export const metadata = {
+  title: 'Data Ownership & Privacy',
+  description:
+    'How Temps keeps all your data on your own infrastructure and what that means for privacy, compliance, and control.',
+  alternates: {
+    canonical: '/docs/data-ownership-and-privacy',
+  },
+}
+
+export const sections = [
+  { title: 'Your server, your data', id: 'your-server-your-data' },
+  { title: 'What data Temps stores', id: 'what-data-temps-stores' },
+  { title: 'Encryption at rest', id: 'encryption-at-rest' },
+  { title: 'Privacy by design', id: 'privacy-by-design' },
+  { title: 'GDPR and compliance', id: 'gdpr-and-compliance' },
+  { title: 'What Temps does not do', id: 'what-temps-does-not-do' },
+]
+
+# Data Ownership & Privacy
+
+When you self-host Temps, every byte of data — analytics events, error reports, session recordings, database backups, application logs — stays on your infrastructure. Nothing is sent to Temps (the company), third-party analytics services, or any external server. {{ className: 'lead' }}
+
+---
+
+## Your server, your data {{ anchor: true, id: 'your-server-your-data' }}
+
+Temps is a binary you run on your own server. It stores data in a PostgreSQL database (with TimescaleDB extension) running on that same server. There is no cloud backend, no telemetry endpoint, and no "call home" mechanism.
+
+This means:
+
+- **You control data retention** — keep analytics for 1 day or 10 years, your choice
+- **You control access** — only people you grant access to can see your data
+- **You control location** — host in the EU, the US, or anywhere that suits your compliance requirements
+- **You control deletion** — delete data permanently at any time
+
+If you stop using Temps, your data stays on your server. There is no export step, no data request process, and no 30-day deletion window.
+
+---
+
+## What data Temps stores {{ anchor: true, id: 'what-data-temps-stores' }}
+
+All data lives in one PostgreSQL database:
+
+| Data type | What is stored | Where |
+|-----------|---------------|-------|
+| **Analytics events** | Page views, custom events, visitor metadata (country, browser, device, referrer) | TimescaleDB hypertable |
+| **Session recordings** | DOM snapshots captured by rrweb (mouse movements, clicks, scroll, DOM changes) | TimescaleDB |
+| **Error reports** | Stack traces, error messages, browser context, breadcrumbs | PostgreSQL tables |
+| **Deployment logs** | Build output, deploy output, job statuses | Structured JSONL in PostgreSQL |
+| **Application logs** | stdout/stderr from your containers | Docker log driver |
+| **Backups** | Database dumps, service snapshots | S3-compatible storage you provide |
+| **User accounts** | Email, hashed password, role | PostgreSQL tables |
+| **API keys** | Key hash, permissions, name | PostgreSQL tables |
+| **Service credentials** | Database passwords, S3 keys | Encrypted (AES-256-GCM) in PostgreSQL |
+
+### Where data does NOT go
+
+- No data is sent to `temps.sh` or any Temps-operated server
+- No data is sent to Google, Facebook, or any advertising network
+- No data is shared with analytics aggregators
+- The Temps binary does not contain tracking code or telemetry
+- The `temps upgrade` command checks GitHub for new releases (a public API call) — this is the only external request, and it contains no user data
+
+---
+
+## Encryption at rest {{ anchor: true, id: 'encryption-at-rest' }}
+
+Sensitive values are encrypted before being stored in the database:
+
+- **Managed service credentials** (PostgreSQL passwords, Redis passwords, S3 keys) — encrypted with AES-256-GCM using a key stored at `~/.temps/encryption_key`
+- **S3 backup credentials** — encrypted with the same key
+- **Session cookies** — encrypted with a separate cookie secret
+
+The encryption key is generated during `temps setup` and stored on the filesystem. Anyone with access to both the database and the encryption key can decrypt credentials. Protect the `~/.temps/` directory accordingly.
+
+API responses always mask sensitive values with `***`. The dashboard never shows raw passwords or API keys after initial creation.
+
+---
+
+## Privacy by design {{ anchor: true, id: 'privacy-by-design' }}
+
+### Analytics
+
+Temps analytics are designed to be useful without being invasive:
+
+- **No cookies** — Visitor identification uses a hash of IP + User-Agent + a daily rotating salt. No cookies are set for analytics.
+- **No cross-site tracking** — Each project's analytics are independent. There is no mechanism to track users across different projects or sites.
+- **No personal data collection** — Analytics capture country (from IP via a local GeoLite2 database), browser, OS, referrer, and page path. No names, emails, or account IDs are collected automatically.
+- **IP geolocation is local** — The GeoLite2 database is downloaded during setup and runs entirely on your server. IP addresses are not sent to any external service for resolution.
+
+### Session replay
+
+Session recordings capture DOM state, not raw user input:
+
+- **Password fields are always masked** — regardless of configuration
+- **`maskAllInputs` option** — when enabled, all form input values are replaced with asterisks
+- **`blockClass` option** — add a CSS class to any element to hide it completely from recordings
+- **Sample rate** — control what percentage of sessions are recorded (e.g. 10%)
+- **Recordings stay on your server** — they are stored in your PostgreSQL database and never transmitted externally
+
+### Error tracking
+
+Error reports capture stack traces and browser context. The Sentry-compatible client sends data to your Temps instance over your own domain (via the `/api/_temps` proxy path), so:
+
+- No data goes to `sentry.io` or any external error tracking service
+- Error reports are not shared with anyone
+- Source maps are uploaded to your server for server-side symbolication
+
+---
+
+## GDPR and compliance {{ anchor: true, id: 'gdpr-and-compliance' }}
+
+Self-hosting Temps simplifies compliance because you are both the data controller and the data processor. There is no third-party processor to evaluate or sign a DPA with.
+
+**GDPR considerations:**
+
+- **Lawful basis** — Analytics without cookies can often rely on legitimate interest. Consult your legal advisor for your specific case.
+- **Data minimization** — Temps collects minimal data by default (no PII, no cookies, no cross-site tracking)
+- **Right to erasure** — You have full database access. Delete any data at any time with SQL.
+- **Data location** — Host in the EU to keep data within EU borders.
+- **Data portability** — All data is in standard PostgreSQL. Export with `pg_dump`.
+- **No sub-processors** — Self-hosted means no data flows to external services (except the S3 provider you choose for backups, which you control)
+
+**SOC 2, HIPAA, and other frameworks:**
+
+Self-hosting gives you full control over the security posture. You manage:
+
+- Server hardening and access controls
+- Network security and firewall rules
+- Encryption at rest and in transit
+- Audit logging (Temps includes a built-in audit log for all write operations)
+- Backup and disaster recovery
+
+---
+
+## What Temps does not do {{ anchor: true, id: 'what-temps-does-not-do' }}
+
+To be explicit about what Temps does not handle for you:
+
+- **Server security** — You are responsible for OS updates, firewall configuration, SSH hardening, and access controls on the server itself
+- **Database backups to a separate location** — Temps can back up to S3, but you must configure the S3 storage. Without it, backups only exist on the same server as the data.
+- **Disk encryption** — Temps encrypts sensitive fields in the database but does not encrypt the entire disk. Use your cloud provider's disk encryption or LUKS if you need full-disk encryption.
+- **DDoS protection** — Temps does not include DDoS mitigation. Use Cloudflare, AWS Shield, or your provider's DDoS protection if needed.

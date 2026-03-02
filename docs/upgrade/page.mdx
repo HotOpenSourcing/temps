@@ -1,0 +1,273 @@
+export const metadata = {
+  title: "Upgrading Temps",
+  description:
+    "How to upgrade your Temps installation to the latest version. Includes backup procedures, migration steps, and rollback instructions.",
+  alternates: {
+    canonical: "/docs/upgrade",
+  },
+};
+
+# Upgrading Temps
+
+This guide covers how to upgrade your self-hosted Temps instance to the latest version. Temps is designed for zero-downtime upgrades — database migrations run automatically on startup. {{ className: 'lead' }}
+
+---
+
+## Before You Upgrade
+
+### Back Up Your Data
+
+While Temps handles migrations automatically, it's good practice to back up before upgrading:
+
+```bash
+# 1. Back up the database
+docker exec temps-timescaledb pg_dump -U temps temps > temps-backup-$(date +%Y%m%d).sql
+
+# 2. Back up the data directory
+cp -r ~/.temps/data ~/.temps/data-backup-$(date +%Y%m%d)
+
+# 3. Back up encryption keys (critical — these cannot be regenerated)
+cp ~/.temps/data/encryption_key ~/encryption_key.backup
+```
+
+### Check the Current Version
+
+```bash
+temps --version
+```
+
+---
+
+## Upgrade Methods
+
+### Upgrade Script (Recommended)
+
+If you installed Temps using `deploy.sh`, this is the fastest way to upgrade. It handles everything in a single command — backs up your encryption key, downloads the latest binary, upgrades Localup if you use tunnel mode, and restarts all services automatically.
+
+```bash
+curl -fsSL https://temps.sh/upgrade.sh | bash
+```
+
+To upgrade to a specific version:
+
+```bash
+curl -fsSL https://temps.sh/upgrade.sh | bash -s vX.Y.Z
+```
+
+The upgrade script will:
+
+1. **Back up your encryption key** to `~/.temps/backups/pre-upgrade-<timestamp>/`
+2. **Download and install** the latest Temps binary for your platform
+3. **Upgrade Localup** if tunnel mode is detected
+4. **Restart all services** (Temps and tunnel if applicable)
+5. **Wait for a health check** to confirm the upgrade succeeded
+
+### Quick Upgrade
+
+If you prefer to upgrade the binary only and restart services yourself:
+
+```bash
+curl -fsSL https://temps.sh/install.sh | bash
+```
+
+This will:
+
+- Download the latest Temps binary for your platform
+- Replace the existing binary at `~/.temps/bin/temps`
+- Preserve all configuration, data, and certificates
+
+Then restart the service:
+
+<CodeGroup>
+
+```bash {{ title: 'Linux (systemd)' }}
+sudo systemctl restart temps
+```
+
+```bash {{ title: 'macOS (launchd)' }}
+launchctl kickstart -k gui/$(id -u)/dev.temps.temps
+```
+
+</CodeGroup>
+
+### Homebrew (macOS)
+
+```bash
+brew update
+brew upgrade temps
+
+# Restart the service
+launchctl kickstart -k gui/$(id -u)/dev.temps.temps
+```
+
+### Manual Upgrade
+
+<CodeGroup>
+
+```bash {{ title: 'Linux AMD64' }}
+curl -LO https://github.com/gotempsh/temps/releases/latest/download/temps-linux-amd64.tar.gz
+tar -xzf temps-linux-amd64.tar.gz
+sudo mv temps /usr/local/bin/temps
+sudo systemctl restart temps
+```
+
+```bash {{ title: 'Linux ARM64' }}
+curl -LO https://github.com/gotempsh/temps/releases/latest/download/temps-linux-arm64.tar.gz
+tar -xzf temps-linux-arm64.tar.gz
+sudo mv temps /usr/local/bin/temps
+sudo systemctl restart temps
+```
+
+```bash {{ title: 'macOS Apple Silicon' }}
+curl -LO https://github.com/gotempsh/temps/releases/latest/download/temps-darwin-arm64.tar.gz
+tar -xzf temps-darwin-arm64.tar.gz
+sudo mv temps /usr/local/bin/temps
+launchctl kickstart -k gui/$(id -u)/dev.temps.temps
+```
+
+</CodeGroup>
+
+---
+
+## What Happens During an Upgrade
+
+When Temps starts after a binary upgrade:
+
+1. **Detects the new version** and logs the upgrade
+2. **Runs database migrations** automatically — any new tables, columns, or indexes are applied
+3. **Reloads configuration** from the existing data directory
+4. **Resumes serving** with zero manual intervention
+
+Database migrations are **idempotent** — re-running a version that's already migrated is safe and has no effect.
+
+---
+
+## Verify the Upgrade
+
+After restarting, confirm the new version is running:
+
+```bash
+# Check the running version
+temps --version
+
+# Verify the service is healthy
+curl -sf http://localhost:8081/health
+
+# Check service status
+sudo systemctl status temps    # Linux
+launchctl list dev.temps.temps # macOS
+```
+
+---
+
+## Upgrading the Database
+
+TimescaleDB runs as a Docker container and is upgraded independently of Temps:
+
+```bash
+# Pull the latest image
+docker pull timescale/timescaledb-ha:pg18
+
+# Stop and remove the old container (data persists in the volume)
+docker stop temps-timescaledb
+docker rm temps-timescaledb
+
+# Start with the new image
+docker run -d \
+  --name temps-timescaledb \
+  --restart unless-stopped \
+  -e POSTGRES_USER=temps \
+  -e POSTGRES_PASSWORD="YOUR_DB_PASSWORD" \
+  -e POSTGRES_DB=temps \
+  -p 127.0.0.1:5432:5432 \
+  -v temps-db-data:/home/postgres/pgdata/data \
+  timescale/timescaledb-ha:pg18
+
+# Restart Temps to reconnect
+sudo systemctl restart temps
+```
+
+Your database password is stored in `~/.temps/.wizard-state/db_password` if you used the deploy script.
+
+---
+
+## Upgrading Localup (Tunnel)
+
+If you use tunnel mode and are not using the upgrade script, upgrade the localup binary separately:
+
+```bash
+curl -fsSL https://localup.dev/install.sh | bash
+
+# Restart the tunnel service
+sudo systemctl restart localup-tunnel    # Linux
+launchctl kickstart -k gui/$(id -u)/dev.temps.localup-tunnel # macOS
+```
+
+Note: The `upgrade.sh` script handles this automatically when tunnel mode is detected.
+
+---
+
+## Troubleshooting
+
+### Service Fails to Start After Upgrade
+
+```bash
+# Check logs for errors
+sudo journalctl -u temps -n 50 --no-pager   # Linux
+tail -50 ~/.temps/logs/temps.log             # macOS
+
+# Common fix: ensure data directory permissions are correct
+chmod 700 ~/.temps/data
+chmod 600 ~/.temps/data/encryption_key
+```
+
+### Database Migration Errors
+
+If migrations fail on startup:
+
+```bash
+# Check that the database is reachable
+docker exec temps-timescaledb pg_isready -U temps
+
+# Check database logs
+docker logs temps-timescaledb --tail 50
+```
+
+If the database container isn't running, start it first:
+
+```bash
+docker start temps-timescaledb
+```
+
+### Rolling Back
+
+If you need to revert to a previous version, use the upgrade script with an explicit version tag:
+
+```bash
+curl -fsSL https://temps.sh/upgrade.sh | bash -s vX.Y.Z
+```
+
+Or manually:
+
+```bash
+# 1. Download the specific version
+curl -LO https://github.com/gotempsh/temps/releases/download/vX.Y.Z/temps-linux-amd64.tar.gz
+tar -xzf temps-linux-amd64.tar.gz
+sudo mv temps /usr/local/bin/temps
+
+# 2. Restore the database backup if needed
+docker exec -i temps-timescaledb psql -U temps temps < temps-backup-YYYYMMDD.sql
+
+# 3. Restart
+sudo systemctl restart temps
+```
+
+Note: Rolling back database migrations is not automatically supported. If a new version added migrations, restoring the database from a pre-upgrade backup is the safest way to roll back.
+
+---
+
+## Next Steps
+
+- Check the [Release Notes](https://github.com/gotempsh/temps/releases) for what's new in each version
+- Review the [Troubleshooting](/docs/troubleshooting) guide if you encounter issues
+- Set up [Backups](/docs/backups) to automate pre-upgrade snapshots

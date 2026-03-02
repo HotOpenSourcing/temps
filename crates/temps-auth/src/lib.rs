@@ -17,6 +17,7 @@ mod permission_decorator;
 mod permission_guard;
 pub mod permissions;
 mod plugin;
+pub mod rate_limit;
 pub mod state;
 mod temps_middleware;
 mod types;

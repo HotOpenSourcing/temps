@@ -13,18 +13,34 @@ use crate::error::OtelError;
 use crate::proto;
 use crate::types::*;
 
+/// Maximum decompressed size to prevent decompression bombs (10 MB)
+const MAX_DECOMPRESSED_SIZE: usize = 10 * 1024 * 1024;
+
 /// Decompress a request body based on Content-Encoding header.
+///
+/// SECURITY: Uses size-limited readers to prevent decompression bomb attacks where
+/// a small compressed payload expands to consume all available memory.
 pub fn decompress(body: &Bytes, encoding: Option<&str>) -> Result<Bytes, OtelError> {
     match encoding {
         Some("gzip") => {
-            let mut decoder = flate2::read::GzDecoder::new(&body[..]);
+            let decoder = flate2::read::GzDecoder::new(&body[..]);
+            let mut limited_reader = decoder.take(MAX_DECOMPRESSED_SIZE as u64 + 1);
             let mut decompressed = Vec::new();
-            decoder
-                .read_to_end(&mut decompressed)
-                .map_err(|e| OtelError::DecompressionFailed {
+            limited_reader.read_to_end(&mut decompressed).map_err(|e| {
+                OtelError::DecompressionFailed {
                     encoding: "gzip".into(),
                     reason: e.to_string(),
-                })?;
+                }
+            })?;
+            if decompressed.len() > MAX_DECOMPRESSED_SIZE {
+                return Err(OtelError::DecompressionFailed {
+                    encoding: "gzip".into(),
+                    reason: format!(
+                        "Decompressed data exceeds maximum allowed size of {} bytes",
+                        MAX_DECOMPRESSED_SIZE
+                    ),
+                });
+            }
             Ok(Bytes::from(decompressed))
         }
         Some("zstd") => {
@@ -33,6 +49,15 @@ pub fn decompress(body: &Bytes, encoding: Option<&str>) -> Result<Bytes, OtelErr
                     encoding: "zstd".into(),
                     reason: e.to_string(),
                 })?;
+            if decompressed.len() > MAX_DECOMPRESSED_SIZE {
+                return Err(OtelError::DecompressionFailed {
+                    encoding: "zstd".into(),
+                    reason: format!(
+                        "Decompressed data exceeds maximum allowed size of {} bytes",
+                        MAX_DECOMPRESSED_SIZE
+                    ),
+                });
+            }
             Ok(Bytes::from(decompressed))
         }
         Some("") | None => Ok(body.clone()),
@@ -884,5 +909,92 @@ mod tests {
                 severity_number, expected
             );
         }
+    }
+
+    // === Decompression bomb protection tests ===
+
+    #[test]
+    fn test_decompress_gzip_normal() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        let data = b"Hello, OTel World!";
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(data).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let result = decompress(&Bytes::from(compressed), Some("gzip"));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().as_ref(), data);
+    }
+
+    #[test]
+    fn test_decompress_no_encoding() {
+        let data = Bytes::from_static(b"raw protobuf");
+        let result = decompress(&data, None);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().as_ref(), b"raw protobuf");
+    }
+
+    #[test]
+    fn test_decompress_gzip_bomb_rejected() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        // Create a gzip bomb: highly compressible data exceeding MAX_DECOMPRESSED_SIZE
+        let large_data = vec![0u8; MAX_DECOMPRESSED_SIZE + 1024];
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+        encoder.write_all(&large_data).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        assert!(
+            compressed.len() < MAX_DECOMPRESSED_SIZE,
+            "Compressed size should be much smaller than the decompressed limit"
+        );
+
+        let result = decompress(&Bytes::from(compressed), Some("gzip"));
+        assert!(
+            result.is_err(),
+            "Gzip decompression bomb should be rejected"
+        );
+        match result.unwrap_err() {
+            OtelError::DecompressionFailed { encoding, reason } => {
+                assert_eq!(encoding, "gzip");
+                assert!(
+                    reason.contains("exceeds maximum"),
+                    "Error should mention size limit, got: {}",
+                    reason
+                );
+            }
+            other => panic!("Expected DecompressionFailed, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_decompress_gzip_at_exact_limit_allowed() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        let data = vec![b'X'; MAX_DECOMPRESSED_SIZE];
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&data).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let result = decompress(&Bytes::from(compressed), Some("gzip"));
+        assert!(result.is_ok(), "Data at exact limit should be allowed");
+        assert_eq!(result.unwrap().len(), MAX_DECOMPRESSED_SIZE);
+    }
+
+    #[test]
+    fn test_decompress_unsupported_encoding() {
+        let result = decompress(&Bytes::from_static(b"data"), Some("br"));
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            OtelError::UnsupportedEncoding { encoding } if encoding == "br"
+        ));
     }
 }

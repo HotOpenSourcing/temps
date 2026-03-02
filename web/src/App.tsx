@@ -20,6 +20,7 @@ import { Header } from './components/dashboard/Header'
 import AppSidebar from './components/dashboard/Sidebar'
 import { DemoLayout } from './components/layout/DemoLayout'
 import { ProtectedLayout } from './components/layout/ProtectedLayout'
+import { SettingsLayout } from './components/settings/SettingsLayout'
 import { SidebarInset, SidebarProvider } from './components/ui/sidebar'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import { BreadcrumbProvider } from './contexts/BreadcrumbContext'
@@ -108,7 +109,6 @@ const ImportProject = lazy(() =>
   import('./pages/ImportProject').then((m) => ({ default: m.ImportProject }))
 )
 const Import = lazy(() => import('./pages/Import'))
-// const ImportTemplate = lazy(() => import('./pages/ImportTemplate').then(m => ({ default: m.ImportTemplate })))
 const ProjectDetail = lazy(() =>
   import('./pages/ProjectDetail').then((m) => ({ default: m.ProjectDetail }))
 )
@@ -143,6 +143,33 @@ const MfaVerify = lazy(() =>
   import('./pages/MfaVerify').then((m) => ({ default: m.MfaVerify }))
 )
 const NotFound = lazy(() => import('./components/global/NotFound'))
+
+// Settings sub-pages
+const DockerRegistryPage = lazy(() =>
+  import('./pages/settings/DockerRegistryPage').then((m) => ({
+    default: m.DockerRegistryPage,
+  }))
+)
+const SecurityPage = lazy(() =>
+  import('./pages/settings/SecurityPage').then((m) => ({
+    default: m.SecurityPage,
+  }))
+)
+const RateLimitingPage = lazy(() =>
+  import('./pages/settings/RateLimitingPage').then((m) => ({
+    default: m.RateLimitingPage,
+  }))
+)
+const DiskMonitoringPage = lazy(() =>
+  import('./pages/settings/DiskMonitoringPage').then((m) => ({
+    default: m.DiskMonitoringPage,
+  }))
+)
+const PluginsPage = lazy(() =>
+  import('./pages/settings/PluginsPage').then((m) => ({
+    default: m.PluginsPage,
+  }))
+)
 
 // Loading component
 const PageLoader = () => (
@@ -241,45 +268,59 @@ const FullAppRoutes = () => {
                 <Route path="/storage/import" element={<ImportService />} />
                 <Route path="/storage/:id" element={<ServiceDetail />} />
                 <Route path="/storage/:id/browse" element={<ServiceDataBrowser />} />
-                <Route path="/users" element={<Users />} />
-                <Route path="/load-balancer" element={<CustomRoutes />} />
-                <Route path="/load-balancer/add" element={<AddRoute />} />
-                <Route path="/git-sources" element={<GitSources />} />
-                <Route path="/git-sources/add" element={<AddGitProvider />} />
-                <Route path="/git-providers/:id" element={<GitProviderDetail />} />
-                <Route path="/dns-providers" element={<DnsProviders />} />
-                <Route path="/dns-providers/add" element={<AddDnsProvider />} />
-                <Route path="/dns-providers/:id" element={<DnsProviderDetail />} />
                 <Route path="/domains" element={<Domains />} />
                 <Route path="/domains/add" element={<AddDomain />} />
                 <Route path="/domains/:id" element={<DomainDetail />} />
-                <Route path="/backups" element={<Backups />} />
-                <Route path="/backups/s3-sources/new" element={<CreateS3Source />} />
                 <Route path="/monitoring" element={<Monitoring />}>
                   <Route index element={<Navigate to="resources" replace />} />
                   <Route path="providers/add" element={<AddNotificationProvider />} />
                   <Route path="providers/edit/:id" element={<EditNotificationProvider />} />
                   <Route path=":section" element={<MonitoringSettings />} />
                 </Route>
-                <Route path="/backups/s3-sources/:id" element={<S3SourceDetail />} />
-                <Route path="/backups/s3-sources/:id/backups/:backupId" element={<BackupDetail />} />
+                {/* Email - top-level platform feature */}
+                <Route path="/email" element={<Email />} />
+                <Route path="/email/:id" element={<EmailDetail />} />
+                {/* Git Providers - top-level platform feature */}
+                <Route path="/git-providers" element={<GitSources />} />
+                <Route path="/git-providers/add" element={<AddGitProvider />} />
+                <Route path="/git-providers/:id" element={<GitProviderDetail />} />
+                {/* DNS Providers - top-level platform feature */}
+                <Route path="/dns-providers" element={<DnsProviders />} />
+                <Route path="/dns-providers/add" element={<AddDnsProvider />} />
+                <Route path="/dns-providers/:id" element={<DnsProviderDetail />} />
+                {/* Observe section */}
+                <Route path="/proxy-logs" element={<ProxyLogs />} />
+                <Route path="/proxy-logs/:id" element={<ProxyLogDetail />} />
+                <Route path="/audit-logs" element={<AuditLogs />} />
+                {/* Settings with inner sidebar layout */}
+                <Route path="/settings" element={<SettingsLayout />}>
+                  <Route index element={<Settings />} />
+                  <Route path="notifications" element={<Notifications />} />
+                  <Route path="users" element={<Users />} />
+                  <Route path="keys" element={<ApiKeys />} />
+                  <Route path="keys/new" element={<ApiKeyCreate />} />
+                  <Route path="keys/:id" element={<ApiKeyDetail />} />
+                  <Route path="keys/:id/edit" element={<ApiKeyEdit />} />
+                  <Route path="load-balancer" element={<CustomRoutes />} />
+                  <Route path="load-balancer/add" element={<AddRoute />} />
+                  <Route path="docker-registry" element={<DockerRegistryPage />} />
+                  <Route path="backups" element={<Backups />} />
+                  <Route path="backups/s3-sources/new" element={<CreateS3Source />} />
+                  <Route path="backups/s3-sources/:id" element={<S3SourceDetail />} />
+                  <Route path="backups/s3-sources/:id/backups/:backupId" element={<BackupDetail />} />
+                  <Route path="security" element={<SecurityPage />} />
+                  <Route path="rate-limiting" element={<RateLimitingPage />} />
+                  <Route path="disk-monitoring" element={<DiskMonitoringPage />} />
+                  <Route path="plugins" element={<PluginsPage />} />
+                </Route>
+                {/* Projects */}
                 <Route path="/projects/new" element={<NewProject />} />
                 <Route path="/projects/import-wizard" element={<Import />} />
                 <Route path="/projects/import/*" element={<ImportProject />} />
                 <Route path="/projects/:slug/*" element={<ProjectDetail />} />
-                <Route path="/settings" element={<Settings />} />
-                <Route path="/notifications" element={<Notifications />} />
-                <Route path="/email" element={<Email />} />
-                <Route path="/email/:id" element={<EmailDetail />} />
-                <Route path="/settings/audit-logs" element={<AuditLogs />} />
-                <Route path="/proxy-logs" element={<ProxyLogs />} />
-                <Route path="/proxy-logs/:id" element={<ProxyLogDetail />} />
+                {/* Utility */}
                 <Route path="/ip/:ip" element={<IpGeolocationDetail />} />
                 <Route path="/setup/connectivity" element={<ExternalConnectivitySetup />} />
-                <Route path="/keys" element={<ApiKeys />} />
-                <Route path="/keys/new" element={<ApiKeyCreate />} />
-                <Route path="/keys/:id" element={<ApiKeyDetail />} />
-                <Route path="/keys/:id/edit" element={<ApiKeyEdit />} />
                 {/* External plugin routes */}
                 <Route path="/plugins/:pluginName/*" element={<PluginPage />} />
                 <Route path="*" element={<NotFound />} />

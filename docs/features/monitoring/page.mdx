@@ -1,0 +1,237 @@
+export const metadata = {
+  title: "Monitoring",
+  description:
+    "Monitor your applications with built-in CPU, memory, and network metrics. Set up alerts, view dashboards, and track uptime with Temps monitoring.",
+  alternates: {
+    canonical: "/docs/monitoring",
+  },
+};
+
+# Monitoring
+
+Monitor your application's health, performance, and resource usage in real-time. Get visibility into CPU, memory, network traffic, and response times to proactively detect and resolve issues. {{ className: 'lead' }}
+
+---
+
+## Real-Time Metrics
+
+Temps provides real-time metrics for every deployed container, giving you instant visibility into your application's performance.
+
+<Row>
+  <Col>
+    **Available Metrics:**
+    - **Requests** - Total requests and request rate
+    - **Response Time** - Average response time in ms
+    - **CPU Usage** - Percentage of CPU resources used
+    - **Memory Usage** - RAM consumption in MB and percentage
+    - **Network I/O** - Inbound and outbound data transfer rate
+
+    Metrics update in real-time, so you always see current performance data.
+
+  </Col>
+  <Col>
+    **Where to View:**
+    1. Navigate to your project in the dashboard
+    2. Open the **Monitoring** tab
+    3. View real-time metrics and charts
+  </Col>
+</Row>
+
+---
+
+## Accessing Metrics
+
+### Via Dashboard
+
+1. Go to **Projects** → Select your project
+2. Click the **Monitoring** tab
+3. View real-time metrics: requests, response time, CPU, memory, and network I/O
+
+The monitoring dashboard shows:
+
+- **Requests** - Total requests over time with request rate
+- **Response Time** - Average response time graph
+- **CPU** - Live CPU usage percentage
+- **Memory** - Live memory usage in MB and percentage
+- **Network I/O** - Real-time inbound/outbound data transfer
+
+### Via API
+
+Access metrics programmatically using the API:
+
+```bash
+# Get real-time metrics for an environment
+curl -H "Authorization: Bearer YOUR_TOKEN" \
+  "https://your-temps-instance.com/api/projects/{project_id}/environments/{environment_id}/metrics"
+```
+
+The API returns:
+
+```json
+{
+  "requests_total": 1523,
+  "requests_rate": 12.5,
+  "response_time_avg_ms": 45,
+  "cpu_percent": 23.5,
+  "memory_bytes": 268435456,
+  "memory_percent": 52.0,
+  "network_rx_bytes_per_sec": 1024,
+  "network_tx_bytes_per_sec": 2048
+}
+```
+
+---
+
+## Understanding Metrics
+
+<Properties>
+  <Property name="Requests">
+    **What it shows:** Total number of requests and request rate over time
+    **When to worry:** - Sudden spikes in traffic - Unusually high error rates - Request rate exceeds expected capacity
+    **Action:** Monitor traffic patterns and scale resources if needed
+  </Property>
+
+  <Property name="Response Time">
+    **What it shows:** Average time to process requests in milliseconds
+    **When to worry:** - Consistently above 500ms may indicate performance issues - Sudden spikes in response time
+    **Action:** - Optimize application code - Add caching - Review database queries - Consider scaling
+  </Property>
+
+  <Property name="CPU Usage">
+    **What it shows:** Percentage of CPU resources your container is using
+    **When to worry:** - Consistently above 80% may indicate performance issues
+    - Spikes above 90% during traffic surges are normal
+    - Sustained 100% usage suggests you need more CPU resources
+    **Action:** If CPU is consistently high, consider: - Increasing CPU allocation in project settings - Optimizing application code
+  </Property>
+
+  <Property name="Memory Usage">
+    **What it shows:** RAM consumption in bytes and percentage of allocated memory
+    **When to worry:** - Approaching 90% of allocated memory
+    - Memory usage continuously growing (potential memory leak)
+    - Container restarts due to OOM (Out of Memory) errors
+    **Action:** If memory is high: - Increase memory allocation - Investigate memory leaks in your code
+  </Property>
+
+  <Property name="Network I/O">
+    **What it shows:** Data transfer rates (inbound and outbound) in bytes per second
+    **What to monitor:** - Unusual spikes in traffic - Asymmetric patterns (high outbound, low inbound) - Network saturation
+    **Action:** High network usage is usually normal for web applications, but monitor for: - DDoS attacks (sudden massive spikes) - Data exfiltration (unusual outbound patterns)
+  </Property>
+</Properties>
+
+---
+
+## Health Checks
+
+Configure health checks to automatically monitor your application's availability:
+
+### Setting Up Health Checks
+
+Health checks are configured in your project's deployment settings:
+
+1. Go to **Project Settings** → **Deployment**
+2. Configure **Health Check** settings:
+   - **Path:** Endpoint to check (e.g., `/health` or `/api/health`)
+   - **Interval:** How often to check (default: 30 seconds)
+   - **Timeout:** Maximum wait time (default: 5 seconds)
+   - **Retries:** Number of failed attempts before marking unhealthy
+
+### Health Check Endpoint
+
+Your application should expose a health check endpoint that returns quickly:
+
+```javascript
+// Express.js example
+app.get("/health", (req, res) => {
+  res.status(200).json({ status: "ok", timestamp: Date.now() });
+});
+```
+
+```python
+# Flask example
+@app.route('/health')
+def health():
+    return {'status': 'ok', 'timestamp': time.time()}, 200
+```
+
+<Note>
+  **Best Practice:** Keep health checks lightweight. They should check basic
+  application state (database connectivity, critical services) but avoid
+  expensive operations.
+</Note>
+
+---
+
+## Monitoring Best Practices
+
+<Properties>
+  <Property name="Set Resource Limits">
+    Configure appropriate CPU and memory limits based on your application's
+    needs. Monitor actual usage and adjust as needed. **How to set:** 1. Project
+    Settings → Deployment → Resources 2. Set CPU (millicores) and Memory (MB) 3.
+    Monitor for a few days 4. Adjust based on actual usage patterns
+  </Property>
+
+  <Property name="Monitor Trends">
+    Don't just look at current values—watch for trends: - Gradual memory
+    increases (memory leaks) - CPU spikes during specific times (traffic
+    patterns) - Network anomalies (security issues)
+  </Property>
+
+  <Property name="Set Up Alerts">
+    Configure alerts for critical thresholds: - CPU > 90% for 5 minutes - Memory
+    > 85% of allocation - Container restarts - Health check failures Alerts can
+    notify you via email, webhooks, or integrations.
+  </Property>
+
+  <Property name="Compare Environments">
+    Compare metrics across environments to identify issues: - Production vs
+    staging performance - Preview environment resource usage - Before/after
+    deployment comparisons
+  </Property>
+</Properties>
+
+---
+
+## Troubleshooting
+
+<Properties>
+  <Property name="High CPU Usage">
+    **Symptoms:** CPU consistently above 80-90% **Possible causes:** -
+    Inefficient code or algorithms - Too many concurrent requests - Insufficient
+    CPU allocation **Solutions:** 1. Increase CPU allocation in project settings
+    2. Optimize application code 3. Add caching to reduce computation 4. Scale
+    horizontally (multiple containers)
+  </Property>
+
+  <Property name="High Memory Usage">
+    **Symptoms:** Memory approaching allocation limit, container restarts
+    **Possible causes:** - Memory leaks in application code - Insufficient
+    memory allocation - Large data structures in memory **Solutions:** 1.
+    Increase memory allocation 2. Profile application for memory leaks 3.
+    Implement pagination for large datasets 4. Use streaming for large file
+    operations
+  </Property>
+
+<Property name="Container Restarts">
+    **Symptoms:** Frequent container restarts, deployment failures
+    **Possible causes:** - Out of memory (OOM) errors - Application crashes - Health check failures
+    **Solutions:** 1. Check deployment logs for error messages 2. Review memory usage patterns 3. Verify health check endpoint is working 4. Check application error logs
+  </Property>
+
+<Property name="Metrics Not Updating">
+    **Symptoms:** Monitoring dashboard showing stale data or errors
+    **Possible causes:** - No active deployments - Network connectivity issues - Service unavailable
+    **Solutions:** 1. Verify a deployment is running 2. Check deployment status 3. Refresh the monitoring page 4. Contact support if issue persists
+  </Property>
+</Properties>
+
+---
+
+## Next Steps
+
+- [Configure Resource Limits](/docs/resources) to set CPU and memory allocations
+- [Set Up Health Checks](/docs/monitoring#health-checks) to monitor availability
+- [View Application Logs](/docs/logs) to correlate metrics with application behavior
+- [Set Up Alerts](/docs/monitoring#monitoring-best-practices) for proactive issue detection

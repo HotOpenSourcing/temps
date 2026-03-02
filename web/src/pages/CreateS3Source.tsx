@@ -40,7 +40,7 @@ export function CreateS3Source() {
     },
     onSuccess: () => {
       toast.success('S3 source created successfully')
-      navigate('/backups')
+      navigate('/settings/backups')
     },
   })
 
@@ -78,7 +78,7 @@ export function CreateS3Source() {
       <div className="mb-6">
         <div className="flex items-center gap-2 mb-2">
           <Link
-            to="/backups"
+            to="/settings/backups"
             className="flex items-center text-muted-foreground hover:text-foreground"
           >
             <ArrowLeft className="h-4 w-4" />
@@ -222,7 +222,7 @@ export function CreateS3Source() {
               <Button
                 type="button"
                 variant="outline"
-                onClick={() => navigate('/backups')}
+                onClick={() => navigate('/settings/backups')}
               >
                 Cancel
               </Button>

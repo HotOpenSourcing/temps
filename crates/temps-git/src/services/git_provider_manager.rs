@@ -1779,7 +1779,7 @@ impl GitProviderManager {
                         "No access token in response".to_string(),
                     ))
                 })?;
-                info!("Token data: {}", token_data);
+                debug!("OAuth token exchange completed successfully (token data redacted)");
                 // Extract refresh token if present (GitHub OAuth apps with offline_access scope)
                 let refresh_token = token_data["refresh_token"].as_str().map(|s| s.to_string());
 
@@ -3898,6 +3898,7 @@ impl GitProviderManagerTrait for GitProviderManager {
             if ref_name != repo.default_branch {
                 let output = tokio::process::Command::new("git")
                     .arg("checkout")
+                    .arg("--")
                     .arg(ref_name)
                     .current_dir(target_dir)
                     .output()

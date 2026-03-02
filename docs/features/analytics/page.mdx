@@ -1,0 +1,1094 @@
+export const metadata = {
+  title: 'Analytics & Observability',
+  description: 'Real-time analytics, session replay, and performance monitoring built into Temps.',
+  alternates: {
+    canonical: '/docs/analytics',
+  },
+}
+
+export const sections = [
+  { title: 'Overview', id: 'overview' },
+  { title: 'Visitor Analytics', id: 'visitor-analytics' },
+  { title: 'Event Tracking', id: 'event-tracking' },
+  { title: 'Session Replay', id: 'session-replay' },
+  { title: 'Performance Monitoring', id: 'performance-monitoring' },
+  { title: 'Funnel Analysis', id: 'funnel-analysis' },
+  { title: 'Sending Analytics from React', id: 'react-sdk' },
+  { title: 'Enriching Visitors with Node SDK', id: 'enrich-visitors' },
+  { title: 'Privacy & Compliance', id: 'privacy' },
+]
+
+# Analytics & Observability
+
+Temps includes a comprehensive analytics and observability platform built-in—no external services required. Track visitors, replay sessions, monitor performance, and analyze user behavior all in one place. {{ className: 'lead' }}
+
+---
+
+## Overview {{ anchor: true, id: 'overview' }}
+
+Unlike Vercel and other platforms that require third-party integrations, Temps provides **production-ready analytics** out of the box:
+
+<Row>
+  <Col>
+    **What's Included**
+    - Real-time visitor analytics
+    - Custom event tracking
+    - Session replay with DOM recording
+    - Core Web Vitals monitoring
+    - Funnel analysis
+    - Geographic tracking
+    - User session stitching
+    - Performance metrics
+  </Col>
+  <Col>
+    **Why It Matters**
+    - Zero external dependencies
+    - No data leaves your infrastructure
+    - Unlimited page views (no pricing tiers)
+    - Complete data ownership
+    - GDPR/CCPA compliant by default
+    - Sub-second query performance
+  </Col>
+</Row>
+
+### Architecture
+
+Temps analytics is powered by:
+- **TimescaleDB**: Time-series database for high-throughput event ingestion
+- **PostgreSQL**: Hypertables for automatic data partitioning
+- **In-Memory Caching**: Sub-100ms query performance
+- **Event Batching**: Efficient network usage
+
+---
+
+## Visitor Analytics {{ anchor: true, id: 'visitor-analytics' }}
+
+Track and analyze visitor behavior with detailed metrics and geographic data.
+
+### Metrics Tracked
+
+<Properties>
+  <Property name="Page Views">
+    Total page views with time-series charts, breakdown by path, referrer tracking
+  </Property>
+  <Property name="Unique Visitors">
+    IP-based unique visitor identification, session stitching, returning vs new visitor ratio
+  </Property>
+  <Property name="Session Duration">
+    Average session length, time on page, engagement metrics
+  </Property>
+  <Property name="Bounce Rate">
+    Single-page session tracking, exit page analysis
+  </Property>
+  <Property name="Geographic Data">
+    Country, region, city detection using MaxMind GeoIP, timezone tracking
+  </Property>
+  <Property name="Device & Browser">
+    User agent parsing, browser version, OS, device type (mobile/desktop/tablet)
+  </Property>
+  <Property name="Referrer Sources">
+    Traffic source tracking, UTM parameter parsing, campaign attribution
+  </Property>
+  <Property name="Real-Time Visitors">
+    Live visitor count, currently active pages
+  </Property>
+</Properties>
+
+### Dashboard Views
+
+Access analytics data via the dashboard. View real-time metrics, historical trends, and detailed visitor insights all in one place.
+
+### Time-Series Charts
+
+View trends over time with customizable date ranges:
+
+- Last 24 hours (hourly breakdown)
+- Last 7 days (daily breakdown)
+- Last 30 days (daily breakdown)
+- Last 90 days (weekly breakdown)
+- Custom date range
+
+---
+
+## Event Tracking {{ anchor: true, id: 'event-tracking' }}
+
+Track custom events to understand user interactions and behavior.
+
+### Built-in Events
+
+Temps automatically tracks:
+- Page views
+- Page exits
+- Link clicks (external)
+- Form submissions
+- File downloads
+- 404 errors
+- JavaScript errors
+
+### Custom Events
+
+Track any custom event in your application:
+
+<CodeGroup title="Track Custom Events">
+```typescript {{ title: 'React' }}
+import { useTrackEvent } from '@temps-sdk/react-analytics';
+
+function CheckoutButton() {
+  const trackEvent = useTrackEvent();
+
+  const handleCheckout = () => {
+    trackEvent('checkout_completed', {
+      orderId: '12345',
+      amount: 99.99,
+      currency: 'USD',
+      items: 3
+    });
+  };
+
+  return <button onClick={handleCheckout}>Complete Purchase</button>;
+}
+```
+
+```javascript {{ title: 'Vanilla JS' }}
+// Track custom event
+temps.track('button_click', {
+  button: 'signup',
+  location: 'hero',
+  variant: 'primary'
+});
+
+// Track with user context
+temps.track('feature_used', {
+  feature: 'export',
+  format: 'csv'
+}, {
+  userId: 'user-123',
+  email: 'user@example.com'
+});
+```
+
+```bash {{ title: 'Server-Side' }}
+# Track events from backend
+curl -X POST https://api.temps.sh/events \
+  -H "Authorization: Bearer ${API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "project": "my-app",
+    "event": "subscription_renewed",
+    "properties": {
+      "plan": "pro",
+      "amount": 29.99
+    },
+    "userId": "user-123"
+  }'
+```
+</CodeGroup>
+
+### Event Properties
+
+<Properties>
+  <Property name="Event Name">
+    String identifier for the event (e.g., 'signup_completed', 'video_played')
+  </Property>
+  <Property name="Properties">
+    Custom JSON object with event metadata (any structure)
+  </Property>
+  <Property name="User ID">
+    Optional user identifier to link events across sessions
+  </Property>
+  <Property name="Timestamp">
+    Automatic timestamp (or custom for backfilling)
+  </Property>
+  <Property name="Session ID">
+    Automatically generated session identifier
+  </Property>
+  <Property name="Context">
+    Automatic context (IP, user agent, referrer, page URL)
+  </Property>
+</Properties>
+
+### Querying Events
+
+Query and filter events in the dashboard or via API:
+
+```typescript {{ title: 'Dashboard' }}
+// Filter events in dashboard
+{
+  "event": "purchase_completed",
+  "dateRange": "last_30_days",
+  "filters": {
+    "properties.amount": { "gte": 100 },
+    "properties.currency": "USD"
+  },
+  "groupBy": "properties.plan"
+}
+```
+
+---
+
+## Session Replay {{ anchor: true, id: 'session-replay' }}
+
+Record and replay user sessions to understand how users interact with your application.
+
+### Features
+
+<Properties>
+  <Property name="DOM Recording">
+    Captures DOM snapshots and mutations, CSS styles, input events (with privacy controls)
+  </Property>
+  <Property name="Event Timeline">
+    Visual timeline of all interactions (clicks, scrolls, navigation, errors)
+  </Property>
+  <Property name="Console Logs">
+    Captures browser console output during session
+  </Property>
+  <Property name="Network Activity">
+    Records API requests and responses (optional)
+  </Property>
+  <Property name="Performance Metrics">
+    FPS, memory usage, page load times
+  </Property>
+  <Property name="Error Correlation">
+    Links sessions to error events for debugging
+  </Property>
+</Properties>
+
+### Privacy Controls
+
+<Row>
+  <Col>
+    **Automatic Redaction**
+    - Password inputs (always masked)
+    - Credit card fields (always masked)
+    - Email addresses (configurable)
+    - Phone numbers (configurable)
+    - Custom selectors
+  </Col>
+  <Col>
+    **User Consent**
+    - Opt-in mode (user consent required)
+    - Opt-out mode (user can disable)
+    - Geo-based rules (GDPR compliance)
+    - Sampling rate (record % of sessions)
+  </Col>
+</Row>
+
+<CodeGroup title="Configure Session Replay">
+```typescript {{ title: 'React Setup' }}
+import { TempsAnalyticsProvider } from '@temps-sdk/react-analytics';
+
+function App() {
+  return (
+    <TempsAnalyticsProvider
+      enableSessionRecording={true}
+      sessionRecordingConfig={{
+        sessionSampleRate: 0.1, // Record 10% of sessions
+        maskAllInputs: false,
+        blockClass: 'sensitive-data',
+        maskTextSelector: 'input[type="password"], input[type="email"]'
+      }}
+    >
+      <YourApp />
+    </TempsAnalyticsProvider>
+  );
+}
+```
+
+```javascript {{ title: 'Vanilla JS' }}
+// Initialize session replay
+temps.init({
+  projectId: 'my-app',
+  sessionReplay: {
+    enabled: true,
+    sampling: 0.1,
+    privacy: {
+      maskAllInputs: false,
+      blockClass: 'no-record',
+      maskClass: 'mask-content'
+    }
+  }
+});
+```
+</CodeGroup>
+
+### Replay Player
+
+The replay player includes:
+- Playback controls (play, pause, speed adjustment)
+- Timeline scrubber
+- Event markers (clicks, navigation, errors)
+- Console panel
+- Network panel
+- Device viewport emulation
+
+<Note>
+  **Storage Optimization:** Session recordings are compressed using efficient algorithms. Average session (~5 minutes) uses ~500KB storage.
+</Note>
+
+---
+
+## Performance Monitoring {{ anchor: true, id: 'performance-monitoring' }}
+
+Track Core Web Vitals and performance metrics to optimize user experience.
+
+### Core Web Vitals
+
+<Properties>
+  <Property name="Largest Contentful Paint (LCP)">
+    Measures loading performance. Target: < 2.5 seconds
+  </Property>
+  <Property name="First Input Delay (FID)">
+    Measures interactivity. Target: < 100 milliseconds
+  </Property>
+  <Property name="Cumulative Layout Shift (CLS)">
+    Measures visual stability. Target: < 0.1
+  </Property>
+  <Property name="First Contentful Paint (FCP)">
+    Time to first content render. Target: < 1.8 seconds
+  </Property>
+  <Property name="Time to First Byte (TTFB)">
+    Server response time. Target: < 600 milliseconds
+  </Property>
+  <Property name="Interaction to Next Paint (INP)">
+    Measures responsiveness. Target: < 200 milliseconds
+  </Property>
+</Properties>
+
+### Automatic Collection
+
+Performance metrics are automatically collected when you use the Temps SDK:
+
+<CodeGroup title="Enable Performance Monitoring">
+```typescript {{ title: 'React' }}
+import { TempsAnalyticsProvider } from '@temps-sdk/react-analytics';
+
+function App() {
+  return (
+    <TempsAnalyticsProvider
+      autoTrackSpeedAnalytics={true}
+    >
+      <YourApp />
+    </TempsAnalyticsProvider>
+  );
+}
+```
+
+```javascript {{ title: 'Vanilla JS' }}
+// Auto-collect Core Web Vitals
+import { getCLS, getFID, getFCP, getLCP, getTTFB } from 'web-vitals';
+
+getCLS(metric => temps.track('web_vitals', metric));
+getFID(metric => temps.track('web_vitals', metric));
+getFCP(metric => temps.track('web_vitals', metric));
+getLCP(metric => temps.track('web_vitals', metric));
+getTTFB(metric => temps.track('web_vitals', metric));
+```
+</CodeGroup>
+
+### Performance Insights
+
+View performance trends in the dashboard:
+- Historical performance scores (Lighthouse-style)
+- Performance by page/route
+- Performance by device/browser
+- Performance by geography
+- Percentile distributions (P50, P75, P95, P99)
+
+### Performance Budgets
+
+Set performance budgets and get alerts when exceeded:
+
+```typescript
+// Configure performance budgets
+{
+  "budgets": {
+    "LCP": { "target": 2500, "alert": 3000 },
+    "FID": { "target": 100, "alert": 200 },
+    "CLS": { "target": 0.1, "alert": 0.25 }
+  },
+  "notifications": {
+    "email": "devteam@example.com",
+    "slack": "https://hooks.slack.com/..."
+  }
+}
+```
+
+---
+
+## Funnel Analysis {{ anchor: true, id: 'funnel-analysis' }}
+
+Track multi-step conversion funnels to optimize user flows.
+
+### Create a Funnel
+
+Define a sequence of events that represent a user journey:
+
+<CodeGroup title="Define Funnel">
+```typescript {{ title: 'Dashboard' }}
+// Create funnel via dashboard
+{
+  "name": "Signup Funnel",
+  "steps": [
+    {
+      "name": "Landing Page View",
+      "event": "pageview",
+      "filters": { "path": "/" }
+    },
+    {
+      "name": "Signup Page View",
+      "event": "pageview",
+      "filters": { "path": "/signup" }
+    },
+    {
+      "name": "Form Submitted",
+      "event": "signup_form_submit"
+    },
+    {
+      "name": "Email Verified",
+      "event": "email_verified"
+    },
+    {
+      "name": "Onboarding Completed",
+      "event": "onboarding_complete"
+    }
+  ],
+  "timeWindow": "24h" // Max time between steps
+}
+```
+
+```typescript {{ title: 'Node SDK' }}
+import { TempsClient } from '@temps-sdk/node-sdk';
+
+const client = new TempsClient({
+  baseUrl: 'https://your-temps-instance.com',
+  apiKey: 'your-api-key'
+});
+
+// Create funnel via Node SDK
+await client.funnels.create({
+  path: { project_id: 1 },
+  body: {
+    name: 'Signup Funnel',
+    steps: [
+      { name: 'Landing Page', event: 'pageview', filters: { path: '/' } },
+      { name: 'Signup Page', event: 'pageview', filters: { path: '/signup' } },
+      { name: 'Form Submitted', event: 'signup_form_submit' },
+      { name: 'Email Verified', event: 'email_verified' }
+    ],
+    timeWindow: '24h'
+  }
+});
+```
+</CodeGroup>
+
+### Funnel Metrics
+
+<Properties>
+  <Property name="Conversion Rate">
+    Percentage of users who complete all steps
+  </Property>
+  <Property name="Drop-off Rate">
+    Percentage of users who exit at each step
+  </Property>
+  <Property name="Time to Convert">
+    Average time between first and last step
+  </Property>
+  <Property name="Step Conversion">
+    Conversion rate between consecutive steps
+  </Property>
+  <Property name="Cohort Analysis">
+    Compare funnels across different user segments
+  </Property>
+</Properties>
+
+### Funnel Visualization
+
+The dashboard provides:
+- Visual funnel chart with drop-off indicators
+- Step-by-step conversion rates
+- Time-to-convert distribution
+- User segmentation (device, location, traffic source)
+- Historical trends
+
+---
+
+## Sending Analytics from React {{ anchor: true, id: 'react-sdk' }}
+
+Send analytics events from your React application using the official React SDK.
+
+### Installation
+
+<CodeGroup>
+```bash {{ title: 'npm' }}
+npm install @temps-sdk/react-analytics
+```
+
+```bash {{ title: 'yarn' }}
+yarn add @temps-sdk/react-analytics
+```
+
+```bash {{ title: 'pnpm' }}
+pnpm add @temps-sdk/react-analytics
+```
+
+```bash {{ title: 'bun' }}
+bun add @temps-sdk/react-analytics
+```
+</CodeGroup>
+
+### Setup
+
+<CodeGroup title="React Setup">
+```typescript {{ title: 'App.tsx' }}
+import { TempsAnalyticsProvider } from '@temps-sdk/react-analytics';
+
+function App() {
+  return (
+    <TempsAnalyticsProvider
+      domain="example.com"
+      autoTrackPageviews={true}
+      ignoreLocalhost={true}
+      autoTrackSpeedAnalytics={true}
+      enableSessionRecording={true}
+      sessionRecordingConfig={{
+        sessionSampleRate: 0.1
+      }}
+    >
+      <YourApp />
+    </TempsAnalyticsProvider>
+  );
+}
+```
+
+```typescript {{ title: 'Next.js (App Router)' }}
+// app/layout.tsx
+import { TempsAnalyticsProvider } from '@temps-sdk/react-analytics';
+
+export default function RootLayout({ children }) {
+  return (
+    <html>
+      <body>
+        <TempsAnalyticsProvider autoTrackPageviews={true}>
+          {children}
+        </TempsAnalyticsProvider>
+      </body>
+    </html>
+  );
+}
+```
+
+```typescript {{ title: 'Next.js (Pages Router)' }}
+// pages/_app.tsx
+import { TempsAnalyticsProvider } from '@temps-sdk/react-analytics';
+
+function MyApp({ Component, pageProps }) {
+  return (
+    <TempsAnalyticsProvider autoTrackPageviews={true}>
+      <Component {...pageProps} />
+    </TempsAnalyticsProvider>
+  );
+}
+```
+</CodeGroup>
+
+### Hooks
+
+<CodeGroup title="React Hooks">
+```typescript {{ title: 'useTrackEvent' }}
+import { useTrackEvent } from '@temps-sdk/react-analytics';
+
+function SignupButton() {
+  const trackEvent = useTrackEvent();
+
+  const handleSignup = async () => {
+    // Track event
+    trackEvent('signup_started', {
+      source: 'hero',
+      plan: 'pro'
+    });
+
+    // Your signup logic
+  };
+
+  return <button onClick={handleSignup}>Sign Up</button>;
+}
+```
+
+```typescript {{ title: 'useTrackPageview' }}
+import { useTrackPageview } from '@temps-sdk/react-analytics';
+
+function ProductPage({ productId }) {
+  // Manually track pageview
+  useTrackPageview('/products/' + productId, {
+    productId,
+    category: 'electronics'
+  });
+
+  return <div>Product Details</div>;
+}
+```
+
+```typescript {{ title: 'useAnalytics' }}
+import { useAnalytics } from '@temps-sdk/react-analytics';
+
+function Dashboard() {
+  const analytics = useAnalytics();
+
+  useEffect(() => {
+    // Identify user
+    analytics.identify('user-123', {
+      email: 'user@example.com',
+      plan: 'pro'
+    });
+
+    // Track event
+    analytics.track('dashboard_viewed');
+
+    // Track pageview
+    analytics.pageview('/dashboard');
+  }, [analytics]);
+
+  return <div>Dashboard</div>;
+}
+```
+</CodeGroup>
+
+### Complete React Example
+
+Here's a complete example showing how to send analytics from a React app:
+
+```typescript {{ title: 'Complete Example' }}
+// app/layout.tsx (Next.js App Router)
+import { TempsAnalyticsProvider } from '@temps-sdk/react-analytics';
+
+export default function RootLayout({ children }) {
+  return (
+    <html>
+      <body>
+        <TempsAnalyticsProvider
+          basePath="/api/_temps"
+          autoTrackPageviews={true}
+          autoTrackSpeedAnalytics={true}
+          enableSessionRecording={true}
+          sessionRecordingConfig={{
+            sessionSampleRate: 0.1
+          }}
+        >
+          {children}
+        </TempsAnalyticsProvider>
+      </body>
+    </html>
+  );
+}
+
+// components/CheckoutButton.tsx
+import { useTrackEvent, useAnalytics } from '@temps-sdk/react-analytics';
+
+export function CheckoutButton() {
+  const trackEvent = useTrackEvent();
+  const analytics = useAnalytics();
+
+  const handleCheckout = async (userId: string) => {
+    // Identify the user
+    analytics.identify(userId, {
+      email: 'user@example.com',
+      plan: 'pro'
+    });
+
+    // Track checkout event
+    trackEvent('checkout_completed', {
+      orderId: '12345',
+      amount: 99.99,
+      currency: 'USD',
+      items: 3,
+      paymentMethod: 'credit_card'
+    });
+  };
+
+  return <button onClick={() => handleCheckout('user-123')}>Checkout</button>;
+}
+```
+
+### Declarative Tracking
+
+Track events using data attributes (no JavaScript required):
+
+```tsx
+<button data-temps-event="button_click" data-temps-button="signup">
+  Sign Up
+</button>
+
+<a
+  href="/pricing"
+  data-temps-event="link_click"
+  data-temps-destination="pricing"
+>
+  View Pricing
+</a>
+```
+
+---
+
+## Enriching Visitors with Node SDK {{ anchor: true, id: 'enrich-visitors' }}
+
+Enrich visitor data with custom metadata from your backend using the Node SDK. This allows you to add user information, subscription details, or any custom data to visitor records.
+
+### Why Enrich Visitors?
+
+Visitor enrichment lets you:
+- Link anonymous visitors to known users
+- Add business context (subscription tier, customer segment)
+- Store custom metadata for segmentation
+- Improve analytics insights with user data
+
+### Enrich Visitor Example
+
+```typescript {{ title: 'Node.js/TypeScript' }}
+import { TempsClient } from '@temps-sdk/node-sdk';
+
+const client = new TempsClient({
+  baseUrl: 'https://your-temps-instance.com',
+  apiKey: 'your-api-key'
+});
+
+// After user logs in, enrich their visitor record
+async function enrichVisitorAfterLogin(
+  visitorId: string | number, // Can be GUID, numeric ID, or encrypted GUID (enc_xxx)
+  projectId: number,
+  userId: string,
+  userEmail: string
+) {
+  try {
+    const result = await client.analytics.enrichVisitor({
+      path: {
+        visitor_id: typeof visitorId === 'number' ? visitorId : visitorId
+      },
+      query: { project_id: projectId },
+      body: {
+        custom_data: {
+          userId: userId,
+          email: userEmail,
+          subscriptionTier: 'pro',
+          signupDate: '2024-01-15',
+          customerSegment: 'enterprise',
+          tags: ['vip', 'beta-tester']
+        }
+      }
+    });
+
+    console.log('Visitor enriched:', result);
+    // Response: { success: true, visitor_id: string, message: string }
+  } catch (error) {
+    console.error('Failed to enrich visitor:', error);
+  }
+}
+```
+
+### Getting Visitor ID from Frontend
+
+To enrich a visitor, you need their visitor ID from the frontend. The visitor ID can be:
+- A GUID (e.g., `"550e8400-e29b-41d4-a716-446655440000"`)
+- A numeric ID (e.g., `123`)
+- An encrypted GUID (e.g., `"enc_xxx"`)
+
+```typescript {{ title: 'React - Get Visitor ID' }}
+import { useAnalytics } from '@temps-sdk/react-analytics';
+
+function UserProfile() {
+  const analytics = useAnalytics();
+
+  useEffect(() => {
+    // Get current visitor ID (returns GUID or numeric ID)
+    const visitorId = analytics.getVisitorId();
+
+    // Send to your backend when user logs in
+    if (visitorId && user) {
+      fetch('/api/enrich-visitor', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          visitorId, // Can be string GUID or numeric ID
+          userId: user.id,
+          email: user.email
+        })
+      });
+    }
+  }, [user, analytics]);
+
+  return <div>Profile</div>;
+}
+```
+
+### Backend Integration
+
+Complete example of enriching visitors from your backend:
+
+```typescript {{ title: 'Backend API Route' }}
+// api/enrich-visitor.ts (Next.js API route)
+import { TempsClient } from '@temps-sdk/node-sdk';
+import type { NextApiRequest, NextApiResponse } from 'next';
+
+const tempsClient = new TempsClient({
+  baseUrl: process.env.TEMPS_API_URL!,
+  apiKey: process.env.TEMPS_API_KEY!
+});
+
+export default async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse
+) {
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
+
+  const { visitorId, userId, email } = req.body;
+
+  // Fetch user data from your database
+  const user = await db.users.findUnique({ where: { id: userId } });
+
+  try {
+    // Enrich visitor with user data
+    // visitorId can be string (GUID) or number (numeric ID)
+    const result = await tempsClient.analytics.enrichVisitor({
+      path: {
+        visitor_id: typeof visitorId === 'string' ? visitorId : parseInt(visitorId)
+      },
+      query: {
+        project_id: parseInt(process.env.TEMPS_PROJECT_ID!)
+      },
+      body: {
+        custom_data: {
+          userId: user.id,
+          email: user.email,
+          name: user.name,
+          subscriptionTier: user.subscription?.tier || 'free',
+          signupDate: user.createdAt.toISOString(),
+          lastLogin: new Date().toISOString(),
+          tags: user.tags || []
+        }
+      }
+    });
+
+    res.json({
+      success: true,
+      message: result.message,
+      visitorId: result.visitor_id
+    });
+  } catch (error: any) {
+    console.error('Failed to enrich visitor:', error);
+    res.status(error.status || 500).json({
+      error: error.message || 'Failed to enrich visitor'
+    });
+  }
+}
+```
+
+### Use Cases
+
+<Properties>
+  <Property name="User Identification">
+    Link anonymous visitors to known users after login:
+
+    ```typescript
+    const result = await client.analytics.enrichVisitor({
+      path: {
+        visitor_id: visitorId // string GUID or number
+      },
+      query: { project_id: 1 },
+      body: {
+        custom_data: {
+          userId: user.id,
+          email: user.email,
+          name: user.name
+        }
+      }
+    });
+    // Returns: { success: true, visitor_id: string, message: string }
+    ```
+  </Property>
+
+  <Property name="Subscription Context">
+    Add subscription information for segmentation:
+
+    ```typescript
+    await client.analytics.enrichVisitor({
+      path: { visitor_id: visitorId },
+      query: { project_id: 1 },
+      body: {
+        custom_data: {
+          subscriptionTier: 'enterprise',
+          subscriptionStatus: 'active',
+          monthlySpend: 999.99,
+          features: ['analytics', 'api-access', 'priority-support']
+        }
+      }
+    });
+    ```
+  </Property>
+
+  <Property name="Customer Segmentation">
+    Add tags and segments for analysis:
+
+    ```typescript
+    await client.analytics.enrichVisitor({
+      path: { visitor_id: visitorId },
+      query: { project_id: 1 },
+      body: {
+        custom_data: {
+          segment: 'high-value',
+          tags: ['enterprise', 'beta', 'early-adopter'],
+          acquisitionChannel: 'organic',
+          lifetimeValue: 5000
+        }
+      }
+    });
+    ```
+  </Property>
+</Properties>
+
+### Querying Enriched Visitors
+
+After enriching visitors, you can query them to see the custom data:
+
+```typescript {{ title: 'Query Enriched Visitors' }}
+// Get specific visitor details (includes custom_data)
+const visitor = await client.analytics.getVisitorDetails({
+  path: {
+    visitor_id: 'visitor-guid' // or numeric ID
+  },
+  query: { project_id: 1 }
+});
+
+// Access enriched custom data
+console.log(visitor.custom_data);
+// Output: { userId: '123', email: 'user@example.com', ... }
+
+// Get visitor by numeric ID
+const visitorById = await client.analytics.getVisitorById({
+  path: { id: 123 },
+  query: { project_id: 1 }
+});
+
+// Get visitor by GUID
+const visitorByGuid = await client.analytics.getVisitorByGuid({
+  path: { visitor_id: '550e8400-e29b-41d4-a716-446655440000' },
+  query: { project_id: 1 }
+});
+
+// List all visitors (with pagination)
+const visitors = await client.analytics.getVisitors({
+  query: {
+    project_id: 1,
+    limit: 50,
+    offset: 0
+  }
+});
+
+// Each visitor in the list includes custom_data if enriched
+visitors.forEach(v => {
+  if (v.custom_data) {
+    console.log(`Visitor ${v.visitor_id}:`, v.custom_data);
+  }
+});
+```
+
+---
+
+## Privacy & Compliance {{ anchor: true, id: 'privacy' }}
+
+Temps analytics is designed with privacy in mind and complies with GDPR, CCPA, and other regulations.
+
+### Data Ownership
+
+<Properties>
+  <Property name="Self-Hosted">
+    All data stays on your infrastructure—no data sent to third parties
+  </Property>
+  <Property name="No Cookies">
+    IP-based tracking (no tracking cookies required)
+  </Property>
+  <Property name="Anonymization">
+    IP address hashing and anonymization options
+  </Property>
+  <Property name="Data Retention">
+    Configurable retention policies (30/90/180/365 days, or custom)
+  </Property>
+  <Property name="Right to Erasure">
+    User data deletion via API or dashboard
+  </Property>
+  <Property name="Data Export">
+    Export user data in JSON/CSV format
+  </Property>
+</Properties>
+
+### GDPR Compliance
+
+<CodeGroup title="GDPR Configuration">
+```typescript {{ title: 'Consent Mode' }}
+import { TempsAnalyticsProvider } from '@temps-sdk/react-analytics';
+
+function App() {
+  const [consent, setConsent] = useState(false);
+
+  return (
+    <TempsAnalyticsProvider
+      disabled={!consent} // Only track if user consents
+    >
+      <CookieBanner onAccept={() => setConsent(true)} />
+      <YourApp />
+    </TempsAnalyticsProvider>
+  );
+}
+```
+
+```yaml {{ title: 'Data Retention' }}
+# config/settings.yml
+analytics:
+  data_retention:
+    pageviews: 365  # days
+    events: 180
+    session_replays: 30
+    performance_metrics: 90
+
+  privacy:
+    anonymize_ip: true
+    respect_dnt: true
+    ip_retention: 7  # days before hashing
+```
+</CodeGroup>
+
+### Compliance Features
+
+<Row>
+  <Col>
+    **GDPR**
+    - User consent management
+    - Right to access data
+    - Right to erasure
+    - Data portability
+    - Privacy by design
+  </Col>
+  <Col>
+    **CCPA**
+    - Do Not Sell disclosure
+    - Opt-out mechanisms
+    - Data access requests
+    - Data deletion requests
+  </Col>
+</Row>
+
+---
+
+## Additional Resources
+
+<div className="not-prose">
+  <Button href="/docs/error-tracking" variant="text" arrow="right">
+    Error Tracking
+  </Button>
+  <Button href="/docs/api" variant="text" arrow="right">
+    Analytics API Reference
+  </Button>
+  <Button href="/docs/sdks" variant="text" arrow="right">
+    SDKs & Libraries
+  </Button>
+</div>

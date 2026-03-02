@@ -1,0 +1,178 @@
+export const metadata = {
+  title: 'Scale for Traffic',
+  description:
+    'Adjust CPU, memory, and replica count for your application. Monitor resource usage and scale up when needed.',
+  alternates: {
+    canonical: '/docs/scale-for-traffic',
+  },
+}
+
+export const sections = [
+  { title: 'Check current resource usage', id: 'check-current-resource-usage' },
+  { title: 'Adjust CPU and memory limits', id: 'adjust-cpu-and-memory-limits' },
+  { title: 'Add replicas', id: 'add-replicas' },
+  { title: 'Change the exposed port', id: 'change-the-exposed-port' },
+  { title: 'Scale via the API', id: 'scale-via-the-api' },
+  { title: 'When to scale up', id: 'when-to-scale-up' },
+]
+
+# Scale for Traffic
+
+Temps lets you control how much CPU and memory each container gets, and how many containers (replicas) run for each environment. Scale vertically by increasing resources, or horizontally by adding replicas. {{ className: 'lead' }}
+
+---
+
+## Check current resource usage {{ anchor: true, id: 'check-current-resource-usage' }}
+
+Before changing anything, check what your application is actually using.
+
+1. Open your project in the dashboard
+2. Click **Monitoring** in the project sidebar
+3. Select the environment and container you want to inspect
+
+The metrics dashboard shows real-time data via Server-Sent Events:
+
+- **CPU Usage** — percentage of allocated CPU
+- **Memory Usage** — bytes consumed and percentage of the memory limit
+- **Network Traffic** — inbound and outbound data transfer rates
+
+You can also get metrics from the API:
+
+```bash
+curl "https://your-temps-instance/api/projects/{project_id}/environments/{env_id}/containers/{container_id}/metrics" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+Response:
+
+```json
+{
+  "cpu_percent": 45.2,
+  "memory_bytes": 536870912,
+  "memory_percent": 62.5,
+  "memory_limit": 858993459,
+  "network_rx_bytes": 1048576,
+  "network_tx_bytes": 524288
+}
+```
+
+---
+
+## Adjust CPU and memory limits {{ anchor: true, id: 'adjust-cpu-and-memory-limits' }}
+
+Resource limits are configured per environment. This lets you allocate more resources to production while keeping staging lightweight.
+
+1. Open your project
+2. Click **Environments** in the sidebar
+3. Click on the environment you want to scale (e.g. production)
+4. Go to **Settings**
+5. Adjust the resource fields:
+
+<Properties>
+  <Property name="CPU Request">
+    The minimum CPU guaranteed to the container, in millicores. `1000` = 1 full CPU core. If not set, Docker allocates CPU dynamically.
+  </Property>
+  <Property name="CPU Limit">
+    The maximum CPU the container can use. The container is throttled if it exceeds this. `2000` = 2 CPU cores.
+  </Property>
+  <Property name="Memory Request">
+    The minimum memory guaranteed, in MB. If not set, Docker allocates memory dynamically.
+  </Property>
+  <Property name="Memory Limit">
+    The maximum memory the container can use, in MB. If the container exceeds this, it is killed (OOM) and restarted. Set this to avoid a single container consuming all server memory.
+  </Property>
+  <Property name="Replicas">
+    The number of container instances to run. Default: `1`. Increase to handle more concurrent requests.
+  </Property>
+</Properties>
+
+Click **Save**. Changes take effect on the next deployment. To apply immediately, click **Redeploy** on the current deployment.
+
+---
+
+## Add replicas {{ anchor: true, id: 'add-replicas' }}
+
+Running multiple replicas of your application distributes load across containers. Temps' reverse proxy automatically load-balances requests across all healthy replicas.
+
+To add replicas:
+
+1. Go to your environment's **Settings**
+2. Set **Replicas** to the desired count (e.g. `3`)
+3. Save and redeploy
+
+### What replicas share
+
+- The same Docker image and environment variables
+- The same linked managed services (database, Redis)
+- The same domain and SSL certificate
+
+### What replicas do not share
+
+- Memory and CPU — each replica has its own allocation
+- Local filesystem — do not store state on disk; use the database or KV storage instead
+- In-memory caches — each replica has its own memory space
+
+<Note>
+**Stateless applications work best.** If your application stores session data in memory, switching to Redis sessions before adding replicas ensures users get consistent behavior regardless of which replica handles their request.
+</Note>
+
+---
+
+## Change the exposed port {{ anchor: true, id: 'change-the-exposed-port' }}
+
+If your application listens on a port other than 3000, configure it in the environment settings:
+
+1. Go to your environment's **Settings**
+2. Set **Exposed Port** to the port your application listens on
+3. Save and redeploy
+
+Temps resolves the port in this order:
+
+1. `EXPOSE` directive in your Dockerfile
+2. Exposed port setting on the environment
+3. Exposed port setting on the project
+4. Default: `3000`
+
+---
+
+## Scale via the API {{ anchor: true, id: 'scale-via-the-api' }}
+
+Update environment settings programmatically:
+
+```bash
+curl -X PUT "https://your-temps-instance/api/projects/{project_id}/environments/{env_id}/settings" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "cpu_limit": 2000,
+    "memory_limit": 1024,
+    "replicas": 3,
+    "exposed_port": 8080
+  }'
+```
+
+After updating, trigger a redeploy for the changes to take effect.
+
+---
+
+## When to scale up {{ anchor: true, id: 'when-to-scale-up' }}
+
+| Symptom | Likely cause | Action |
+|---------|-------------|--------|
+| CPU consistently above 80% | Application is compute-bound | Increase CPU limit or add replicas |
+| Memory approaching limit | Large datasets in memory, or memory leak | Increase memory limit; investigate leaks if usage keeps growing |
+| Container restarts (OOM) | Memory limit too low | Increase memory limit |
+| Slow response times under load | Too few replicas | Add replicas to distribute requests |
+| High response times, low CPU | Application is I/O-bound (waiting on database) | Optimize queries, add Redis caching, or increase database resources |
+
+### Scaling your database
+
+Managed services have their own resource configuration. If your PostgreSQL database is the bottleneck:
+
+- Increase `max_connections` in the service settings
+- Use connection pooling in your application (e.g. PgBouncer or built-in pool)
+- Optimize slow queries using the data explorer in the dashboard
+
+<Note>
+Temps does not currently support auto-scaling. Replica count and resource limits are set manually. Monitor your metrics and adjust as traffic patterns change.
+</Note>

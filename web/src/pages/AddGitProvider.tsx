@@ -16,7 +16,7 @@ export function AddGitProvider() {
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: 'Git Sources', href: '/git-sources' },
+      { label: 'Git Sources', href: '/git-providers' },
       { label: 'Add Provider' },
     ])
   }, [setBreadcrumbs])
@@ -26,12 +26,12 @@ export function AddGitProvider() {
   const handleSuccess = () => {
     showSuccess('Git provider added successfully!')
     setTimeout(() => {
-      navigate('/git-sources')
+      navigate('/git-providers')
     }, 1500)
   }
 
   const handleCancel = () => {
-    navigate('/git-sources')
+    navigate('/git-providers')
   }
 
   return (
@@ -41,7 +41,7 @@ export function AddGitProvider() {
           <Button
             variant="ghost"
             size="icon"
-            onClick={() => navigate('/git-sources')}
+            onClick={() => navigate('/git-providers')}
             className="shrink-0"
           >
             <ArrowLeft className="h-4 w-4" />

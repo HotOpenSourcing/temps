@@ -1,0 +1,544 @@
+export const metadata = {
+  title: "MCP Server",
+  description:
+    "Use the Temps MCP server to let AI agents deploy, monitor, and manage your infrastructure through natural language.",
+  alternates: {
+    canonical: "/docs/mcp",
+  },
+};
+
+export const sections = [
+  { title: "Overview", id: "overview" },
+  { title: "Installation", id: "installation" },
+  { title: "Tool Category Filtering", id: "tool-category-filtering" },
+  { title: "Claude Code", id: "claude-code" },
+  { title: "Claude Desktop", id: "claude-desktop" },
+  { title: "OpenCode", id: "opencode" },
+  { title: "Cursor", id: "cursor" },
+  { title: "Windsurf", id: "windsurf" },
+  { title: "OpenAI Codex", id: "codex" },
+  { title: "Cline (VS Code)", id: "cline" },
+  { title: "Available Tools", id: "available-tools" },
+  { title: "Analytics Tools", id: "analytics-tools" },
+  { title: "Authentication", id: "authentication" },
+  { title: "Prompts", id: "prompts" },
+  { title: "Recent Fixes", id: "recent-fixes" },
+];
+
+# MCP Server
+
+Let AI agents deploy, monitor, and manage your Temps infrastructure through natural language using the Model Context Protocol. {{ className: 'lead' }}
+
+---
+
+## Overview {{ anchor: true, id: 'overview' }}
+
+The Temps MCP server (`@temps-sdk/mcp`) exposes your entire Temps platform to AI assistants that support the [Model Context Protocol](https://modelcontextprotocol.io/). This means tools like Claude Code, Claude Desktop, Cursor, Windsurf, OpenAI Codex, and others can directly interact with your deployments, services, monitoring, and more.
+
+<Row>
+  <Col>
+    **What You Can Do** - Deploy and rollback applications - Manage environments
+    and env vars - Provision databases, Redis, S3 - Check deployment logs and
+    status - Monitor uptime and incidents - View error tracking data - Manage
+    domains and SSL certificates - Run vulnerability scans - Configure webhooks
+    and notifications - Browse proxy logs and analytics
+  </Col>
+  <Col>
+    **Why It Matters** - Manage infrastructure without leaving your editor -
+    Natural language instead of memorizing CLI flags - 224 tools covering the
+    full Temps API - Load only the categories you need with `--tools` filtering
+    - Works with any MCP-compatible AI client - Same API key authentication as
+    the CLI - Full read and write access to your platform
+  </Col>
+</Row>
+
+---
+
+## Installation {{ anchor: true, id: 'installation' }}
+
+The MCP server is published as `@temps-sdk/mcp` on npm. You don't need to install it globally — all configurations below use `npx` or `bunx` to run it on demand.
+
+### Prerequisites
+
+Before configuring any AI tool, you need:
+
+1. **A running Temps instance** — the URL of your Temps server (e.g., `https://temps.example.com`)
+2. **An API key** — generate one from the Temps dashboard under **Settings > API Keys**, or via the CLI:
+
+```bash
+bunx @temps-sdk/cli api-keys create --name "mcp-server" --role admin
+```
+
+<Note>
+  Store your API key securely. It grants full access to your Temps platform. Use
+  a dedicated API key for MCP rather than reusing your personal token.
+</Note>
+
+---
+
+## Tool Category Filtering {{ anchor: true, id: 'tool-category-filtering' }}
+
+The MCP server exposes 224 tools by default. To reduce context size and improve AI performance, you can load only the tool categories you need using the `--tools` flag or the `TEMPS_MCP_TOOLS` environment variable.
+
+### Using the `--tools` CLI flag
+
+```json
+{
+  "mcpServers": {
+    "temps": {
+      "command": "npx",
+      "args": ["@temps-sdk/mcp", "--tools", "deployments,analytics,projects"],
+      "env": {
+        "TEMPS_API_URL": "https://temps.example.com",
+        "TEMPS_API_KEY": "tk_..."
+      }
+    }
+  }
+}
+```
+
+### Using the `TEMPS_MCP_TOOLS` environment variable
+
+```json
+{
+  "mcpServers": {
+    "temps": {
+      "command": "npx",
+      "args": ["@temps-sdk/mcp"],
+      "env": {
+        "TEMPS_API_URL": "https://temps.example.com",
+        "TEMPS_API_KEY": "tk_...",
+        "TEMPS_MCP_TOOLS": "deployments,analytics,projects"
+      }
+    }
+  }
+}
+```
+
+### Available categories (30)
+
+```
+projects
+deployments
+environments
+domains
+services
+backups
+monitors
+containers
+users
+settings
+api-keys
+webhooks
+audit
+dns-providers
+notifications
+scans
+custom-domains
+errors
+proxy-logs
+dsn
+ip-access
+incidents
+funnels
+presets
+platform
+email-domains
+email-providers
+load-balancer
+notification-prefs
+analytics
+```
+
+<Note>
+  When no `--tools` flag or `TEMPS_MCP_TOOLS` variable is set, all 224 tools are
+  loaded. Use `--help` to print the available categories and usage information.
+</Note>
+
+---
+
+## Claude Code {{ anchor: true, id: 'claude-code' }}
+
+[Claude Code](https://docs.anthropic.com/en/docs/claude-code) is Anthropic's CLI agent. It reads MCP config from your project's `.mcp.json` or `~/.claude.json`.
+
+### Per-Project Setup
+
+Create a `.mcp.json` file in your project root:
+
+```json
+{
+  "mcpServers": {
+    "temps": {
+      "command": "npx",
+      "args": ["@temps-sdk/mcp"],
+      "env": {
+        "TEMPS_API_URL": "https://temps.example.com",
+        "TEMPS_API_KEY": "your-api-key"
+      }
+    }
+  }
+}
+```
+
+### Global Setup
+
+Add to `~/.claude.json` to make Temps available in all projects:
+
+```json
+{
+  "mcpServers": {
+    "temps": {
+      "command": "npx",
+      "args": ["@temps-sdk/mcp"],
+      "env": {
+        "TEMPS_API_URL": "https://temps.example.com",
+        "TEMPS_API_KEY": "your-api-key"
+      }
+    }
+  }
+}
+```
+
+### Usage
+
+Once configured, ask Claude Code things like:
+
+```
+> Deploy my app to production
+> What's the status of my last deployment?
+> Show me recent errors in project my-app
+> Create a new PostgreSQL service and link it to my project
+> What are the uptime stats for the last 24 hours?
+```
+
+---
+
+## Claude Desktop {{ anchor: true, id: 'claude-desktop' }}
+
+[Claude Desktop](https://claude.ai/download) supports MCP servers via its configuration file.
+
+### Configuration
+
+Edit your Claude Desktop config file:
+
+- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+- **Linux**: `~/.config/Claude/claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "temps": {
+      "command": "npx",
+      "args": ["@temps-sdk/mcp"],
+      "env": {
+        "TEMPS_API_URL": "https://temps.example.com",
+        "TEMPS_API_KEY": "your-api-key"
+      }
+    }
+  }
+}
+```
+
+Restart Claude Desktop after saving. You should see a hammer icon indicating MCP tools are available.
+
+---
+
+## OpenCode {{ anchor: true, id: 'opencode' }}
+
+[OpenCode](https://opencode.ai) is an open-source terminal AI agent. It reads MCP config from its configuration file.
+
+### Configuration
+
+Edit `~/.config/opencode/config.json` (or the config path shown by `opencode config`):
+
+```json
+{
+  "mcpServers": {
+    "temps": {
+      "command": "npx",
+      "args": ["@temps-sdk/mcp"],
+      "env": {
+        "TEMPS_API_URL": "https://temps.example.com",
+        "TEMPS_API_KEY": "your-api-key"
+      }
+    }
+  }
+}
+```
+
+---
+
+## Cursor {{ anchor: true, id: 'cursor' }}
+
+[Cursor](https://cursor.sh) supports MCP servers in its settings.
+
+### Configuration
+
+1. Open Cursor Settings (`Cmd+,` / `Ctrl+,`)
+2. Search for **"MCP"**
+3. Click **"Add MCP Server"**
+4. Fill in:
+   - **Name**: `temps`
+   - **Command**: `npx`
+   - **Args**: `@temps-sdk/mcp`
+
+Alternatively, add to `.cursor/mcp.json` in your project root:
+
+```json
+{
+  "mcpServers": {
+    "temps": {
+      "command": "npx",
+      "args": ["@temps-sdk/mcp"],
+      "env": {
+        "TEMPS_API_URL": "https://temps.example.com",
+        "TEMPS_API_KEY": "your-api-key"
+      }
+    }
+  }
+}
+```
+
+---
+
+## Windsurf {{ anchor: true, id: 'windsurf' }}
+
+[Windsurf](https://codeium.com/windsurf) (by Codeium) supports MCP via its configuration file.
+
+### Configuration
+
+Edit `~/.codeium/windsurf/mcp_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "temps": {
+      "command": "npx",
+      "args": ["@temps-sdk/mcp"],
+      "env": {
+        "TEMPS_API_URL": "https://temps.example.com",
+        "TEMPS_API_KEY": "your-api-key"
+      }
+    }
+  }
+}
+```
+
+Restart Windsurf after saving.
+
+---
+
+## OpenAI Codex {{ anchor: true, id: 'codex' }}
+
+[OpenAI Codex CLI](https://github.com/openai/codex) supports MCP servers via its configuration.
+
+### Configuration
+
+Add to your Codex config (typically `~/.codex/config.json` or the project-level config):
+
+```json
+{
+  "mcpServers": {
+    "temps": {
+      "command": "npx",
+      "args": ["@temps-sdk/mcp"],
+      "env": {
+        "TEMPS_API_URL": "https://temps.example.com",
+        "TEMPS_API_KEY": "your-api-key"
+      }
+    }
+  }
+}
+```
+
+---
+
+## Cline (VS Code) {{ anchor: true, id: 'cline' }}
+
+[Cline](https://github.com/cline/cline) is an AI coding agent for VS Code with MCP support.
+
+### Configuration
+
+1. Open the Cline sidebar in VS Code
+2. Click the **MCP Servers** icon (plug icon)
+3. Click **"Configure MCP Servers"**
+4. Add the following to the configuration:
+
+```json
+{
+  "mcpServers": {
+    "temps": {
+      "command": "npx",
+      "args": ["@temps-sdk/mcp"],
+      "env": {
+        "TEMPS_API_URL": "https://temps.example.com",
+        "TEMPS_API_KEY": "your-api-key"
+      }
+    }
+  }
+}
+```
+
+---
+
+## Available Tools {{ anchor: true, id: 'available-tools' }}
+
+The MCP server exposes **224 tools** across 30 categories, covering the full Temps API. You can [filter which categories are loaded](#tool-category-filtering) to reduce context size. Here's a summary of the key categories:
+
+| Category                | Tools | What You Can Do                                                     |
+| ----------------------- | ----- | ------------------------------------------------------------------- |
+| **Projects**            | 9     | Create, update, delete projects; update git settings                |
+| **Deployments**         | 10    | Trigger, cancel, pause, resume, rollback deployments; view logs     |
+| **Environments**        | 13    | Create environments, manage env vars, scale replicas, manage crons  |
+| **Domains & TLS**       | 19    | Add domains, provision SSL, manage DNS challenges, custom domains   |
+| **Services**            | 14    | Provision Postgres, Redis, S3, MongoDB; link to projects            |
+| **Containers**          | 7     | Start, stop, restart containers; view metrics and logs              |
+| **Backups**             | 16    | Create backup schedules, configure S3 storage, trigger backups      |
+| **Monitors**            | 6     | Create uptime monitors, view status and history                     |
+| **Error Tracking**      | 8     | List error groups, view events and stack traces, get stats          |
+| **Incidents**           | 6     | Create and manage incidents, post status updates                    |
+| **Analytics**           | 14    | Visitors, page views, real-time stats, property breakdowns, funnels |
+| **Vulnerability Scans** | 7     | Trigger scans, view vulnerabilities by severity                     |
+| **Proxy Logs**          | 5     | Search request logs, view stats and individual requests             |
+| **Funnels**             | 6     | Create analytics funnels, preview and view conversion metrics       |
+| **Webhooks**            | 9     | Create webhooks, view deliveries, retry failed deliveries           |
+| **Email**               | 13    | Manage email domains, DKIM records, email providers                 |
+| **Notifications**       | 11    | Configure Slack, email, webhook notification providers              |
+| **Users & API Keys**    | 14    | Manage users, roles, API keys, and permissions                      |
+| **DNS Providers**       | 12    | Register DNS providers, manage zones and domains                    |
+| **Load Balancer**       | 5     | Manage load balancer routes                                         |
+| **Audit Logs**          | 2     | View platform audit trail                                           |
+| **Platform**            | 4     | Get platform info, public/private IP, capabilities                  |
+
+---
+
+## Analytics Tools {{ anchor: true, id: 'analytics-tools' }}
+
+The new `analytics` category provides 14 tools for querying project analytics data. All analytics tools support `environment_id` filtering, and count-based tools support `aggregation_level` (`events`, `sessions`, or `visitors`).
+
+| Tool                       | Description                                                                                                                                                                                                                                             |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `has_analytics_events`     | Check if a project has any analytics events                                                                                                                                                                                                             |
+| `get_unique_counts`        | Unique visitors, sessions, or page views for a date range                                                                                                                                                                                               |
+| `get_active_visitors`      | Real-time active visitors (last 5 minutes)                                                                                                                                                                                                              |
+| `get_hourly_visits`        | Time series of visits bucketed by hour                                                                                                                                                                                                                  |
+| `get_analytics_events`     | Top events ranked by count                                                                                                                                                                                                                              |
+| `get_event_type_breakdown` | Breakdown by event type (page_view, custom, etc.)                                                                                                                                                                                                       |
+| `get_events_timeline`      | Time series for events, optionally filtered by name                                                                                                                                                                                                     |
+| `get_property_breakdown`   | Break down by any of 21 properties: `country`, `browser`, `device_type`, `operating_system`, `referrer_hostname`, `page_path`, `utm_source`, `utm_medium`, `utm_campaign`, `utm_term`, `utm_content`, `channel`, `language`, `region`, `city`, and more |
+| `get_property_timeline`    | Trend a property over time (pivot table)                                                                                                                                                                                                                |
+| `get_aggregated_buckets`   | Flexible time-bucketed counts                                                                                                                                                                                                                           |
+| `get_general_stats`        | Site-wide overview: visitors, page views, bounce rate, engagement rate, trends vs previous period                                                                                                                                                       |
+| `get_page_paths`           | Top pages ranked by sessions/views with average time                                                                                                                                                                                                    |
+| `get_page_detail`          | Per-page bounce rate, entry/exit rates, average time, referrers, countries                                                                                                                                                                              |
+| `get_page_flow`            | Entry pages with bounce rates, exit pages, drop-off points, page transitions                                                                                                                                                                            |
+
+### Example usage
+
+Ask your AI assistant things like:
+
+```
+> How many unique visitors did my project get this week?
+> What are the top pages by session count?
+> Show me a breakdown of visitors by country
+> What's the bounce rate for the /pricing page?
+> Show active visitors right now
+> What are the top referrer hostnames this month?
+```
+
+---
+
+## Authentication {{ anchor: true, id: 'authentication' }}
+
+The MCP server requires two environment variables:
+
+| Variable        | Description                                                        |
+| --------------- | ------------------------------------------------------------------ |
+| `TEMPS_API_URL` | The URL of your Temps instance (e.g., `https://temps.example.com`) |
+| `TEMPS_API_KEY` | An API key with appropriate permissions                            |
+
+### Creating an API Key
+
+<CodeGroup>
+```bash {{ title: 'CLI' }}
+bunx @temps-sdk/cli api-keys create --name "mcp-server" --role admin
+```
+
+```bash {{ title: 'Dashboard' }}
+# Navigate to Settings > API Keys > Create New Key
+# Select role: admin (for full access) or viewer (for read-only)
+```
+
+</CodeGroup>
+
+### Permission Levels
+
+| Role       | Access                                  |
+| ---------- | --------------------------------------- |
+| `admin`    | Full read/write access to all resources |
+| `deployer` | Deploy, manage environments, view logs  |
+| `viewer`   | Read-only access to all resources       |
+
+<Note>
+  For security, use the most restrictive role that covers your use case. If you
+  only need to monitor deployments and view logs, use a `viewer` key.
+</Note>
+
+---
+
+## Prompts {{ anchor: true, id: 'prompts' }}
+
+In addition to tools, the MCP server includes reusable prompt templates for common tasks.
+
+### add_react_analytics
+
+A step-by-step guide to add Temps analytics to your React application. Supports multiple frameworks.
+
+**Arguments:**
+
+| Argument     | Type   | Required | Description                                                  |
+| ------------ | ------ | -------- | ------------------------------------------------------------ |
+| `framework`  | string | Yes      | One of: `nextjs-app`, `nextjs-pages`, `vite`, `cra`, `remix` |
+| `project_id` | number | No       | Your Temps project ID                                        |
+
+When you use this prompt, the AI assistant will walk you through installing `@temps-sdk/react-analytics`, setting up the provider, and configuring features like custom events, session replay, engagement tracking, and Web Vitals.
+
+---
+
+## Recent Fixes {{ anchor: true, id: 'recent-fixes' }}
+
+### Environment scaling and resource tools
+
+`scale_environment` and `update_environment_resources` were sending `PATCH` requests but the backend expects `PUT`. Fixed to use the correct HTTP method. Resource fields (`cpu_limit`, `memory_limit`, `cpu_request`, `memory_request`) corrected from string to integer types (millicores for CPU, MB for memory).
+
+### Deployment logs
+
+`get_deployment_logs` was silently failing because the logs endpoint returns raw JSONL text, not JSON. The tool now shows a pipeline stage summary table with status icons and durations, followed by parsed log content with level-appropriate formatting.
+
+### CLI documentation package name
+
+CLI documentation corrected from `@temps/cli` to `@temps-sdk/cli` and bare `temps` commands to `bunx @temps-sdk/cli`.
+
+---
+
+## Additional Resources
+
+<div className="not-prose">
+  <Button href="/docs/sdks" variant="text" arrow="right">
+    Temps SDKs
+  </Button>
+  <Button
+    href="/docs/cli-getting-started"
+    variant="text"
+    arrow="right"
+  >
+    CLI Getting Started
+  </Button>
+  <Button href="/docs/error-tracking" variant="text" arrow="right">
+    Error Tracking
+  </Button>
+  <Button href="/docs/analytics" variant="text" arrow="right">
+    Analytics
+  </Button>
+</div>

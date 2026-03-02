@@ -141,7 +141,7 @@ export default function GitProviderDetail() {
   useEffect(() => {
     if (provider) {
       setBreadcrumbs([
-        { label: 'Git Providers', href: '/git-sources' },
+        { label: 'Git Providers', href: '/git-providers' },
         { label: provider.name },
       ])
     }
@@ -172,7 +172,7 @@ export default function GitProviderDetail() {
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => navigate('/git-sources')}
+              onClick={() => navigate('/git-providers')}
             >
               <ArrowLeft className="h-4 w-4" />
             </Button>
@@ -195,7 +195,7 @@ export default function GitProviderDetail() {
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => navigate('/git-sources')}
+              onClick={() => navigate('/git-providers')}
             >
               <ArrowLeft className="h-4 w-4" />
             </Button>
@@ -255,7 +255,7 @@ export default function GitProviderDetail() {
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => navigate('/git-sources')}
+              onClick={() => navigate('/git-providers')}
             >
               <ArrowLeft className="h-4 w-4" />
             </Button>

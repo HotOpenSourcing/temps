@@ -1,0 +1,301 @@
+export const metadata = {
+  title: 'Request Flow',
+  description: 'Understanding how requests flow through Temps from client to deployment and back.',
+  alternates: {
+    canonical: '/docs/request-flow',
+  },
+}
+
+export const sections = [
+  { title: 'Overview', id: 'overview' },
+  { title: 'Request Lifecycle', id: 'lifecycle' },
+  { title: 'Processing Phases', id: 'phases' },
+  { title: 'Project Resolution', id: 'project-resolution' },
+  { title: 'Security Checks', id: 'security-checks' },
+]
+
+# Request Flow
+
+Understanding how HTTP requests flow through Temps from the client to your deployment and back. {{ className: 'lead' }}
+
+---
+
+## Overview {{ anchor: true, id: 'overview' }}
+
+Every request to your Temps-hosted application goes through a well-defined pipeline that handles TLS termination, routing, security checks, and analytics.
+
+### High-Level Flow
+
+```mermaid
+graph TB
+    Client["Client Request"]
+    TLS["TLS Termination<br/>(Pingora)"]
+    Early["Early Phase<br/>(select_upstream)"]
+    Modify["Modify Phase<br/>(request_filter)"]
+    Proxy["Proxy Phase<br/>(upstream_peer)"]
+    Upstream["Your Deployment"]
+    Response["Response Phase<br/>(upstream_response_filter)"]
+    Analytics["Analytics Logging"]
+    Client2["Client Response"]
+
+    Client --> TLS
+    TLS --> Early
+    Early --> Modify
+    Modify --> Proxy
+    Proxy --> Upstream
+    Upstream --> Response
+    Response --> Analytics
+    Analytics --> Client2
+```
+
+---
+
+## Request Lifecycle {{ anchor: true, id: 'lifecycle' }}
+
+### Complete Request Flow
+
+```mermaid
+sequenceDiagram
+    actor Client
+    participant TLS as TLS Layer
+    participant Pingora
+    participant Early as Early Phase
+    participant Modify as Modify Phase
+    participant Proxy as Proxy Phase
+    participant Upstream as Your Deployment
+    participant Response as Response Phase
+    participant Analytics
+
+    Client->>TLS: TLS ClientHello (SNI)
+    TLS->>TLS: Load certificate
+    TLS-->>Client: TLS ServerHello
+    Client->>Pingora: HTTP Request
+
+    Pingora->>Early: select_upstream()
+    Early->>Early: Resolve domain to project
+    Early->>Early: Check IP access control
+    Early->>Early: Check CAPTCHA requirement
+    Early-->>Pingora: Upstream selected (or error)
+
+    alt Error in Early Phase
+        Pingora-->>Client: Error response (403/503/etc)
+        Pingora->>Analytics: Log event
+    else Success
+        Pingora->>Modify: request_filter()
+        Modify->>Modify: Add Temps headers
+        Modify->>Modify: Compress if needed
+        Modify-->>Pingora: Modified request
+
+        Pingora->>Proxy: upstream_peer()
+        Proxy->>Upstream: Connect and send request
+        Upstream-->>Proxy: Response headers
+
+        Pingora->>Response: upstream_response_filter()
+        Response->>Response: Decompress if needed
+        Response->>Response: Modify response headers
+        Response-->>Pingora: Modified response
+
+        Pingora-->>Client: HTTP Response
+
+        Pingora->>Analytics: logging()
+        Analytics->>Analytics: Create event
+        Analytics->>DB: Save analytics event
+    end
+```
+
+---
+
+## Processing Phases {{ anchor: true, id: 'phases' }}
+
+Temps uses Pingora's `ProxyHttp` trait, which provides 6 phases for request handling:
+
+### Phase 1: Early (select_upstream)
+
+**Purpose**: Determine which deployment should handle this request.
+
+**Actions**:
+- Extract hostname from request
+- Resolve domain to project and environment
+- Check IP access control rules
+- Determine if CAPTCHA challenge is required
+- Select upstream deployment
+
+**Outcome**: Upstream selected or error returned to client.
+
+### Phase 2: Modify (request_filter)
+
+**Purpose**: Modify the request before forwarding.
+
+**Actions**:
+- Add Temps-specific headers (`X-Request-ID`, `X-Project-ID`, etc.)
+- Extract request metadata (method, path, query string, user agent)
+- Extract client IP address
+- Compress request body if needed
+- Set request start time for performance tracking
+
+**Outcome**: Modified request ready for forwarding.
+
+### Phase 3: Proxy (upstream_peer)
+
+**Purpose**: Establish connection to your deployment.
+
+**Actions**:
+- Connect to deployment container
+- Forward modified request
+- Handle connection errors and timeouts
+
+**Outcome**: Request sent to your application.
+
+### Phase 4: Response (upstream_response_filter)
+
+**Purpose**: Process response from your deployment.
+
+**Actions**:
+- Decompress response if needed
+- Modify response headers
+- Add security headers
+- Handle response errors
+
+**Outcome**: Processed response ready to send to client.
+
+### Phase 5: Filter (response_filter)
+
+**Purpose**: Final response modifications.
+
+**Actions**:
+- Add analytics tracking pixels (if enabled)
+- Inject monitoring scripts (if enabled)
+- Final header modifications
+
+**Outcome**: Final response ready.
+
+### Phase 6: Finish (logging)
+
+**Purpose**: Log request for analytics and monitoring.
+
+**Actions**:
+- Create analytics event with request metadata
+- Record performance metrics (response time, status code)
+- Save to database for dashboard and reports
+
+**Outcome**: Request logged and metrics recorded.
+
+---
+
+## Project Resolution {{ anchor: true, id: 'project-resolution' }}
+
+### Domain to Project Mapping
+
+When a request arrives, Temps must determine which project and environment should handle it:
+
+```mermaid
+graph TB
+    Request["HTTP Request<br/>Host: app.example.com"]
+    SNI["Extract SNI<br/>(Server Name Indication)"]
+    Domain["Lookup Domain<br/>in Database"]
+    Project["Resolve Project<br/>& Environment"]
+    Deployment["Select Active<br/>Deployment"]
+    Route["Route Request"]
+
+    Request --> SNI
+    SNI --> Domain
+    Domain --> Project
+    Project --> Deployment
+    Deployment --> Route
+```
+
+### Resolution Steps
+
+1. **Extract Hostname**: From `Host` header or TLS SNI
+2. **Domain Lookup**: Query `domains` table for matching domain
+3. **Project Resolution**: Get associated project and environment
+4. **Deployment Selection**: Find active deployment for environment
+5. **Upstream Selection**: Determine container endpoint to forward to
+
+### Fallback Behavior
+
+If domain resolution fails:
+- Return `503 Service Unavailable` if domain not found
+- Return `403 Forbidden` if domain exists but project is disabled
+- Log error for debugging
+
+---
+
+## Security Checks {{ anchor: true, id: 'security-checks' }}
+
+### IP Access Control
+
+Before forwarding requests, Temps checks IP access control rules:
+
+```mermaid
+graph TB
+    Request["Incoming Request"]
+    ExtractIP["Extract Client IP"]
+    CheckRules["Check IP Rules<br/>for Project"]
+    Allowed{"IP<br/>Allowed?"}
+    Blocked["403 Forbidden"]
+    Continue["Continue Processing"]
+
+    Request --> ExtractIP
+    ExtractIP --> CheckRules
+    CheckRules --> Allowed
+    Allowed -->|No| Blocked
+    Allowed -->|Yes| Continue
+```
+
+**IP Rules**:
+- **Allow List**: Only specified IPs can access
+- **Block List**: Specified IPs are denied
+- **Default**: All IPs allowed (if no rules configured)
+
+### CAPTCHA Challenge
+
+For projects with CAPTCHA enabled, requests may be challenged:
+
+```mermaid
+graph TB
+    Request["Incoming Request"]
+    CheckCAPTCHA["CAPTCHA<br/>Required?"]
+    HasToken{"Has Valid<br/>Token?"}
+    Challenge["Return CAPTCHA<br/>Challenge"]
+    Verify["Verify Token"]
+    Continue["Continue Processing"]
+
+    Request --> CheckCAPTCHA
+    CheckCAPTCHA -->|No| Continue
+    CheckCAPTCHA -->|Yes| HasToken
+    HasToken -->|No| Challenge
+    HasToken -->|Yes| Verify
+    Verify -->|Valid| Continue
+    Verify -->|Invalid| Challenge
+```
+
+**CAPTCHA Triggers**:
+- First request from new IP
+- Suspicious traffic patterns
+- Rate limiting violations
+- Manual enablement by project owner
+
+### Request Headers Added
+
+Temps automatically adds headers to requests forwarded to your deployment:
+
+- `X-Request-ID`: Unique identifier for this request
+- `X-Project-ID`: Project identifier
+- `X-Environment-ID`: Environment identifier
+- `X-Client-IP`: Client IP address
+- `X-Forwarded-For`: Original client IP (if behind proxy)
+- `X-Forwarded-Proto`: Original protocol (http/https)
+
+---
+
+## Additional Resources
+
+<div className="not-prose">
+  <Button href="/docs/overview" variant="text" arrow="left">
+    Architecture Overview
+  </Button>
+  <Button href="/docs/plugins" variant="text" arrow="right">
+    Plugin System
+  </Button>
+</div>

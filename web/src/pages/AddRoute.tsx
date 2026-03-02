@@ -5,6 +5,7 @@ import {
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
+import { DomainSelector } from '@/components/domains/DomainSelector'
 import {
   Form,
   FormControl,
@@ -17,13 +18,6 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { usePageTitle } from '@/hooks/usePageTitle'
 import { usePlatformCapabilities } from '@/hooks/usePlatformCapabilities'
@@ -78,17 +72,19 @@ export function AddRoute() {
   const isLocalMode = useMemo(() => accessMode === 'local', [accessMode])
 
   const { data: domainsData } = useQuery({
-    ...listDomainsOptions(),
+    ...listDomainsOptions({
+      query: { page_size: 1 },
+    }),
   })
 
   const hasAvailableDomains = useMemo(
-    () => domainsData?.domains && domainsData.domains.length > 0,
+    () => (domainsData?.total ?? 0) > 0,
     [domainsData]
   )
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: 'Load Balancer', href: '/load-balancer' },
+      { label: 'Load Balancer', href: '/settings/load-balancer' },
       { label: 'Add Route' },
     ])
   }, [setBreadcrumbs])
@@ -121,7 +117,7 @@ export function AddRoute() {
     },
     onSuccess: () => {
       toast.success('Route created successfully!')
-      navigate('/load-balancer')
+      navigate('/settings/load-balancer')
     },
   })
 
@@ -166,7 +162,7 @@ export function AddRoute() {
           <Button
             variant="ghost"
             size="icon"
-            onClick={() => navigate('/load-balancer')}
+            onClick={() => navigate('/settings/load-balancer')}
           >
             <ArrowLeft className="h-4 w-4" />
           </Button>
@@ -372,18 +368,12 @@ export function AddRoute() {
                         {watchedDomainInputType === 'select' &&
                         hasAvailableDomains &&
                         !isLocalMode ? (
-                          <Select onValueChange={field.onChange} value={field.value}>
-                            <SelectTrigger>
-                              <SelectValue placeholder="Select a domain" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {domainsData?.domains?.map((domain) => (
-                                <SelectItem key={domain.id} value={domain.domain}>
-                                  {domain.domain}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
+                          <DomainSelector
+                            value={field.value}
+                            onValueChange={field.onChange}
+                            placeholder="Select a domain"
+                            className="w-full"
+                          />
                         ) : (
                           <Input
                             {...field}
@@ -529,7 +519,7 @@ export function AddRoute() {
               <Button
                 type="button"
                 variant="outline"
-                onClick={() => navigate('/load-balancer')}
+                onClick={() => navigate('/settings/load-balancer')}
               >
                 Cancel
               </Button>

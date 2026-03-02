@@ -1127,6 +1127,10 @@ impl GitProviderService for GitHubProvider {
         let mut cmd = Command::new("git");
         cmd.arg("clone");
 
+        // Use -- separator to prevent user-controlled URLs from being
+        // interpreted as git options (e.g., --upload-pack=malicious)
+        cmd.arg("--");
+
         if let Some(token) = access_token {
             // For GitHub, insert token in URL for HTTPS clones
             let authenticated_url = if clone_url.starts_with("https://github.com/") {

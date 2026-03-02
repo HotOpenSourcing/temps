@@ -1,14 +1,17 @@
 //! Service layer for external plugin management.
 //!
-//! Orchestrates plugin lifecycle (discovery, proxy creation) and provides
-//! a clean API consumed by the handler and plugin layers.
+//! Orchestrates plugin lifecycle (discovery, proxy creation, event delivery)
+//! and provides a clean API consumed by the handler and plugin layers.
 
 use std::sync::Arc;
 
 use axum::Router;
 use temps_core::external_plugin::PluginManifest;
-use tracing::{debug, info};
+use temps_core::JobQueue;
+use tokio::sync::RwLock;
+use tracing::{debug, error, info};
 
+use crate::event_listener::PluginEventListener;
 use crate::manager::{ExternalPluginConfig, ExternalPluginManager};
 use crate::proxy;
 
@@ -16,14 +19,28 @@ use crate::proxy;
 /// to the handler layer.
 pub struct ExternalPluginsService {
     manager: Arc<ExternalPluginManager>,
-    /// Cached manifests from discovery (set after `discover_and_start`)
-    manifests: Vec<PluginManifest>,
+    /// Cached manifests from discovery — refreshed on reload.
+    manifests: RwLock<Vec<PluginManifest>>,
+    /// Event listener that delivers platform events to subscribing plugins
+    event_listener: RwLock<Option<PluginEventListener>>,
+    /// Optional job queue for event delivery (stored for reload)
+    queue: Option<Arc<dyn JobQueue>>,
+    /// Swappable proxy router — rebuilt on reload so new/removed plugins
+    /// are reflected without restarting the server.
+    proxy_router: Arc<RwLock<Router>>,
 }
 
 impl ExternalPluginsService {
     /// Create the service and immediately discover + start all plugins.
-    pub async fn new(config: ExternalPluginConfig) -> Self {
-        let manager = Arc::new(ExternalPluginManager::new(config));
+    ///
+    /// If a `JobQueue` is provided and any discovered plugins subscribe to
+    /// events, a [`PluginEventListener`] is started automatically.
+    pub async fn new(
+        config: ExternalPluginConfig,
+        queue: Option<Arc<dyn JobQueue>>,
+        db: Arc<sea_orm::DatabaseConnection>,
+    ) -> Self {
+        let manager = Arc::new(ExternalPluginManager::new(config, db));
         let manifests = manager.discover_and_start().await;
 
         if !manifests.is_empty() {
@@ -40,23 +57,124 @@ impl ExternalPluginsService {
             debug!("No external plugins discovered");
         }
 
-        Self { manager, manifests }
+        // Start the event listener if any plugin subscribes to events
+        let event_listener = Self::start_event_listener(&manager, &manifests, queue.as_ref()).await;
+
+        // Build the initial proxy router
+        let proxy_router = Self::build_proxy_router_from(&manager, &manifests).await;
+
+        Self {
+            manager,
+            manifests: RwLock::new(manifests),
+            event_listener: RwLock::new(event_listener),
+            queue,
+            proxy_router: Arc::new(RwLock::new(proxy_router)),
+        }
     }
 
-    /// Get the cached list of plugin manifests.
-    pub fn manifests(&self) -> &[PluginManifest] {
-        &self.manifests
+    /// Get a snapshot of the current plugin manifests.
+    pub async fn manifests(&self) -> Vec<PluginManifest> {
+        self.manifests.read().await.clone()
     }
 
-    /// Build a router with proxy routes for all running plugins.
+    /// Get the swappable proxy router reference.
     ///
-    /// Returns a router with:
-    /// - `/x/{plugin_name}/*` — reverse proxy for each plugin
-    pub async fn build_proxy_router(&self) -> Router {
+    /// The routing layer holds an `Arc` to this and reads it per-request,
+    /// so swapping the inner `Router` via [`reload_plugins`] takes effect
+    /// immediately for new requests.
+    pub fn proxy_router(&self) -> Arc<RwLock<Router>> {
+        self.proxy_router.clone()
+    }
+
+    /// Build the initial proxy router (used once during startup for the
+    /// pre-built router pattern).
+    pub async fn build_initial_proxy_router(&self) -> Router {
+        self.proxy_router.read().await.clone()
+    }
+
+    /// Reload all external plugins.
+    ///
+    /// 1. Stops the event listener
+    /// 2. Shuts down all running plugin processes
+    /// 3. Re-scans the plugins directory and starts all discovered binaries
+    /// 4. Rebuilds the proxy router
+    /// 5. Restarts the event listener if needed
+    ///
+    /// Returns the manifests of all successfully started plugins.
+    pub async fn reload_plugins(&self) -> Vec<PluginManifest> {
+        // Stop event listener
+        {
+            let mut listener = self.event_listener.write().await;
+            if let Some(l) = listener.take() {
+                l.stop().await;
+            }
+        }
+
+        // Reload all plugins via manager (shutdown + re-discover + re-start)
+        let new_manifests = self.manager.reload_all().await;
+
+        info!(
+            "Reloaded {} external plugin(s): {}",
+            new_manifests.len(),
+            new_manifests
+                .iter()
+                .map(|m| m.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+
+        // Rebuild proxy router and swap it in
+        let new_router = Self::build_proxy_router_from(&self.manager, &new_manifests).await;
+        {
+            let mut router = self.proxy_router.write().await;
+            *router = new_router;
+        }
+
+        // Restart event listener
+        {
+            let new_listener =
+                Self::start_event_listener(&self.manager, &new_manifests, self.queue.as_ref())
+                    .await;
+            let mut listener = self.event_listener.write().await;
+            *listener = new_listener;
+        }
+
+        // Update cached manifests
+        {
+            let mut manifests = self.manifests.write().await;
+            *manifests = new_manifests.clone();
+        }
+
+        new_manifests
+    }
+
+    /// Shut down all external plugins gracefully.
+    pub async fn shutdown_all(&self) {
+        let mut listener = self.event_listener.write().await;
+        if let Some(l) = listener.take() {
+            l.stop().await;
+        }
+        self.manager.shutdown_all().await;
+    }
+
+    /// Get a reference to the underlying manager.
+    pub fn manager(&self) -> &Arc<ExternalPluginManager> {
+        &self.manager
+    }
+
+    // ------------------------------------------------------------------
+    // Internal helpers
+    // ------------------------------------------------------------------
+
+    /// Build a proxy router from a set of manifests.
+    async fn build_proxy_router_from(
+        manager: &ExternalPluginManager,
+        manifests: &[PluginManifest],
+    ) -> Router {
         let mut router = Router::new();
 
-        for manifest in &self.manifests {
-            if let Some(proxy) = self.manager.proxy_for(&manifest.name).await {
+        for manifest in manifests {
+            if let Some(proxy) = manager.proxy_for(&manifest.name).await {
                 let proxy_router = proxy::create_plugin_proxy_router(proxy);
                 let prefix = format!("/x/{}", manifest.name);
                 debug!(
@@ -71,13 +189,37 @@ impl ExternalPluginsService {
         router
     }
 
-    /// Shut down all external plugins gracefully.
-    pub async fn shutdown_all(&self) {
-        self.manager.shutdown_all().await;
-    }
+    /// Start event listener if any plugins subscribe to events.
+    async fn start_event_listener(
+        manager: &Arc<ExternalPluginManager>,
+        manifests: &[PluginManifest],
+        queue: Option<&Arc<dyn JobQueue>>,
+    ) -> Option<PluginEventListener> {
+        let has_event_subscribers = manifests.iter().any(|m| !m.events.is_empty());
+        if !has_event_subscribers {
+            return None;
+        }
 
-    /// Get a reference to the underlying manager.
-    pub fn manager(&self) -> &Arc<ExternalPluginManager> {
-        &self.manager
+        let queue = match queue {
+            Some(q) => q.clone(),
+            None => {
+                debug!(
+                    "Plugins subscribe to events but no JobQueue provided — event delivery disabled"
+                );
+                return None;
+            }
+        };
+
+        let listener = PluginEventListener::new(manager.clone(), queue);
+        if let Err(e) = listener.start().await {
+            error!("Failed to start plugin event listener: {}", e);
+            None
+        } else {
+            info!(
+                "Plugin event listener started for {} subscribing plugin(s)",
+                manifests.iter().filter(|m| !m.events.is_empty()).count()
+            );
+            Some(listener)
+        }
     }
 }

@@ -8,6 +8,7 @@ pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
     pub user_id: i32,
+    #[serde(skip_serializing)]
     pub session_token: String,
     pub expires_at: DBDateTime,
 }

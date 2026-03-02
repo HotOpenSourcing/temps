@@ -14,7 +14,9 @@ pub struct Model {
     pub base_url: Option<String>, // For self-hosted instances (web UI URL)
     pub api_url: Option<String>, // API endpoint URL (different from base_url for GitHub Apps)
     pub auth_method: String,   // app, oauth, pat, basic, ssh
-    pub auth_config: Json,     // JSON with provider-specific auth config
+    #[serde(skip_serializing)]
+    pub auth_config: Json, // JSON with provider-specific auth config
+    #[serde(skip_serializing)]
     pub webhook_secret: Option<String>,
     pub is_active: bool,
     pub is_default: bool,

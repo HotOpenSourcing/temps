@@ -1,0 +1,197 @@
+export const metadata = {
+  title: "Deployment Pipeline",
+  description:
+    "Learn how Temps builds and deploys your applications from Git. Understand the build pipeline, Docker image creation, and zero-downtime rollout process.",
+  alternates: {
+    canonical: "/docs/deployment",
+  },
+};
+
+# Deployment Pipeline
+
+When you deploy an application, Temps automatically handles the entire process from Git to production. Here's what happens and what you can control.
+
+<Mermaid
+  chart={`
+sequenceDiagram
+    participant User
+    participant Temps
+    participant Git
+    participant Builder
+    participant Container
+    participant SSL
+
+    User->>Temps: Deploy from Git
+    Temps->>Git: Clone Repository
+    Git-->>Temps: Source Code
+    Temps->>Builder: Detect Language & Build
+    Builder->>Builder: Build Container Image
+    Builder-->>Temps: Image Ready
+    Temps->>Container: Start Container
+    Container->>Container: Health Check
+    Container-->>Temps: Running
+    Temps->>SSL: Request Certificate
+    SSL-->>Temps: Certificate Issued
+    Temps-->>User: App Live
+`}
+/>
+
+## What Happens When You Deploy
+
+### Step 1: Connect Your Repository
+
+- Link your GitHub, GitLab, or other Git repository
+- Temps clones your code
+- Automatically detects your language and framework
+
+### Step 2: Build Your Application
+
+**If you have a Dockerfile:**
+
+- Temps uses your Dockerfile to build the container
+- Supports all Docker features and build arguments
+- Optimized builds with layer caching
+
+**If you don't have a Dockerfile:**
+
+- Temps automatically detects your language
+- Generates an appropriate Dockerfile for you
+- Works for Node.js, Python, Rust, Go, Java, Ruby, PHP, and more
+- Zero configuration needed
+
+### Step 3: Configure Environment
+
+- Set environment variables in the dashboard
+- Use secrets for sensitive data (encrypted storage)
+- Different variables for dev, staging, and production
+- Automatic database credentials if using managed databases
+
+### Step 4: Deploy Container
+
+- Container starts with your environment variables
+- Health checks ensure your app is running
+- Automatic retries if startup fails
+- Resource limits (CPU, memory) as configured
+
+### Step 5: Set Up Domain & SSL
+
+- Assign a custom domain or use auto-generated subdomain
+- Automatic SSL certificate from Let's Encrypt
+- Certificates renew automatically
+- Your app is live and secure
+
+## What You Can Control
+
+### Build Configuration
+
+- **Use Your Dockerfile** - Full control with custom Dockerfiles
+- **Auto-Detection** - Let Temps figure it out automatically
+- **Build Arguments** - Pass custom build-time variables
+- **Build Logs** - See exactly what's happening during build
+
+### Environment Variables
+
+- **Project-Level** - Variables shared across all environments
+- **Environment-Level** - Specific to dev/staging/production
+- **Secrets** - Encrypted storage for passwords and API keys
+- **Override** - Override variables for specific deployments
+
+### Resource Limits
+
+- **Memory** - Set how much RAM your app can use
+- **CPU** - Limit CPU usage
+- **Disk** - Storage limits
+- **Timeouts** - Request timeout settings
+
+### Deployment Settings
+
+- **Port Configuration** - Which port your app listens on
+- **Health Check Path** - Custom health check endpoint
+- **Restart Policy** - Automatic restarts on failure
+- **Rollback** - Instantly revert to previous deployment
+
+## Deployment States
+
+Your deployment goes through these states:
+
+<Mermaid
+  chart={`
+stateDiagram-v2
+    [*] --> PENDING: Deploy Requested
+    PENDING --> BUILDING: Start Build
+    BUILDING --> BUILT: Build Complete
+    BUILDING --> FAILED: Build Error
+    BUILT --> DEPLOYING: Start Container
+    DEPLOYING --> RUNNING: Container Started
+    DEPLOYING --> FAILED: Start Error
+    RUNNING --> ACTIVE: Health Check Passed
+    RUNNING --> FAILED: Health Check Failed
+    ACTIVE --> [*]: Deployment Live
+    FAILED --> [*]: Deployment Failed
+`}
+/>
+
+**PENDING** - Deployment queued
+**BUILDING** - Building your container
+**BUILT** - Container image created
+**DEPLOYING** - Starting the container
+**RUNNING** - Container is running
+**ACTIVE** - Receiving live traffic
+
+If something goes wrong, the state becomes **FAILED** and you'll see error details.
+
+## Rollback
+
+If a deployment has issues:
+
+1. **Previous deployment** is still running
+2. **Switch routing** - Point domain back to previous version
+3. **Zero downtime** - Users see the working version immediately
+4. **Debug** - Investigate the failed deployment
+5. **Delete** - Remove the failed deployment when ready
+
+## Build Failures
+
+### Common Issues and Solutions
+
+**Language Detection Failed**
+
+- **Solution:** Provide a Dockerfile
+- **Why:** Temps couldn't detect your project type
+
+**Dependency Installation Failed**
+
+- **Solution:** Check your package.json, requirements.txt, go.mod, etc.
+- **Why:** Missing or incorrect dependency files
+
+**Port Binding Failed**
+
+- **Solution:** Set PORT environment variable
+- **Why:** App trying to use a port that's already in use
+
+**Memory Exceeded**
+
+- **Solution:** Increase memory limit in deployment settings
+- **Why:** App needs more memory than allocated
+
+## Monitoring Deployments
+
+### Real-Time Information
+
+- **Build Logs** - Watch build progress in real-time
+- **Deployment Logs** - See application startup logs
+- **Health Status** - Know when your app is healthy
+- **Resource Usage** - Monitor CPU, memory, disk usage
+
+### After Deployment
+
+- **Analytics** - Track request volume and performance
+- **Error Tracking** - See errors as they happen
+- **Uptime** - Monitor availability
+- **Performance** - Track response times
+
+## Next Steps
+
+- **[Overview](/docs/overview)** - System capabilities
+- **[Data Flow](/docs/data-flow)** - Analytics and monitoring
+- **[Security Architecture](/docs/security)** - Security features

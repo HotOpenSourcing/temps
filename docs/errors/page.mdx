@@ -1,0 +1,187 @@
+export const metadata = {
+  title: 'Errors',
+  description:
+    'Learn how the Temps API handles errors and returns structured Problem Details responses.',
+  alternates: {
+    canonical: '/docs/errors',
+  },
+}
+
+# Errors
+
+The Temps API uses structured error responses following the RFC 7807 Problem Details specification. Every error includes a machine-readable type, human-readable title, HTTP status code, and a detailed description of what went wrong. {{ className: 'lead' }}
+
+---
+
+## Error Response Format
+
+All error responses use the `application/problem+json` content type and follow this structure:
+
+<Row>
+  <Col>
+
+    Every error response includes these fields:
+
+    <Properties>
+      <Property name="type" type="string">
+        A URI reference that identifies the problem type. Defaults to `about:blank` for standard HTTP errors.
+      </Property>
+      <Property name="title" type="string">
+        A short, human-readable summary of the problem type (e.g., "Not Found", "Validation Error").
+      </Property>
+      <Property name="status" type="integer">
+        The HTTP status code for this occurrence of the problem.
+      </Property>
+      <Property name="detail" type="string">
+        A human-readable explanation specific to this occurrence, including resource IDs and context.
+      </Property>
+      <Property name="instance" type="string">
+        A URI reference that identifies the specific occurrence (usually the request path).
+      </Property>
+    </Properties>
+
+  </Col>
+  <Col>
+
+    ```json {{ title: 'Error response' }}
+    {
+      "type": "about:blank",
+      "title": "Backup Not Found",
+      "status": 404,
+      "detail": "Backup 42 not found in project 7",
+      "instance": "/api/backups/42"
+    }
+    ```
+
+  </Col>
+</Row>
+
+---
+
+## Status Codes
+
+The Temps API returns standard HTTP status codes to indicate the success or failure of a request.
+
+<Properties>
+  <Property name="200 OK">
+    The request succeeded. Response body contains the requested data.
+  </Property>
+  <Property name="201 Created">
+    A new resource was created successfully. Response body contains the created resource.
+  </Property>
+  <Property name="204 No Content">
+    The request succeeded but there is no response body (e.g., after a DELETE).
+  </Property>
+  <Property name="400 Bad Request">
+    The request was invalid. Check the `detail` field for specifics — common causes include missing required fields, invalid values, or malformed JSON.
+  </Property>
+  <Property name="401 Unauthorized">
+    Authentication is required. Provide a valid API key or session token.
+  </Property>
+  <Property name="403 Forbidden">
+    You are authenticated but do not have permission for this operation. Check your role and permissions.
+  </Property>
+  <Property name="404 Not Found">
+    The requested resource does not exist. The `detail` field includes the ID that was searched for.
+  </Property>
+  <Property name="409 Conflict">
+    The request conflicts with the current state of a resource (e.g., trying to delete a service still linked to projects).
+  </Property>
+  <Property name="429 Too Many Requests">
+    Rate limit exceeded. Wait before retrying.
+  </Property>
+  <Property name="500 Internal Server Error">
+    Something went wrong on the server. If this persists, check logs or contact support.
+  </Property>
+</Properties>
+
+---
+
+## Common Error Types
+
+<Row>
+  <Col>
+
+    <Properties>
+      <Property name="Validation Error (400)">
+        Input validation failed. The `detail` field explains which field is invalid and why.
+      </Property>
+      <Property name="Authentication Failed (401)">
+        Missing or invalid API key, expired session, or invalid MFA token.
+      </Property>
+      <Property name="Insufficient Permissions (403)">
+        Your role does not include the required permission (e.g., `BackupsDelete` requires Admin role).
+      </Property>
+      <Property name="Resource Not Found (404)">
+        The specified resource ID does not exist. Error messages always include the ID that was searched.
+      </Property>
+      <Property name="Resource In Use (409)">
+        Cannot modify or delete a resource because it is referenced by other resources.
+      </Property>
+    </Properties>
+
+  </Col>
+  <Col>
+
+    ```json {{ title: 'Validation error' }}
+    {
+      "type": "about:blank",
+      "title": "Validation Error",
+      "status": 400,
+      "detail": "Branch name cannot be empty"
+    }
+    ```
+
+    ```json {{ title: 'Permission error' }}
+    {
+      "type": "about:blank",
+      "title": "Insufficient Permissions",
+      "status": 403,
+      "detail": "Requires BackupsDelete permission"
+    }
+    ```
+
+  </Col>
+</Row>
+
+---
+
+## Handling Errors
+
+We recommend handling errors in your integration code by checking the status code first, then reading the `detail` field for specific information:
+
+<CodeGroup title="Error handling">
+```typescript {{ title: 'Node SDK' }}
+import { TempsClient } from '@temps-sdk/node-sdk';
+
+const client = new TempsClient({
+  baseUrl: 'https://your-temps-instance.com',
+  apiKey: 'your-api-key'
+});
+
+try {
+  const project = await client.projects.get({ path: { id: 999 } });
+} catch (error) {
+  if (error.status === 404) {
+    console.log('Project not found:', error.detail);
+  } else if (error.status === 403) {
+    console.log('Permission denied:', error.detail);
+  } else {
+    console.error('Unexpected error:', error);
+  }
+}
+```
+
+```bash {{ title: 'cURL' }}
+curl -s https://your-temps-instance.com/api/projects/999 \
+  -H "Authorization: Bearer tk_your_api_key" | jq .
+
+# Output:
+# {
+#   "type": "about:blank",
+#   "title": "Project Not Found",
+#   "status": 404,
+#   "detail": "Project 999 does not exist"
+# }
+```
+</CodeGroup>

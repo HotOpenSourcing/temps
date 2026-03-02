@@ -316,16 +316,27 @@ pub async fn verify_mfa_challenge(
 pub struct AuthApiDoc;
 
 pub fn configure_routes() -> Router<Arc<AuthState>> {
-    Router::new()
-        .route("/auth/verify-mfa", post(verify_mfa_challenge))
-        .route("/user/me", get(get_current_user))
-        .route("/logout", post(logout))
+    use crate::rate_limit::{auth_rate_limit_middleware, AuthRateLimitConfig, AuthRateLimiter};
+
+    let rate_limiter = AuthRateLimiter::new(AuthRateLimitConfig::default());
+
+    // Auth-sensitive routes that are rate limited to prevent brute force attacks.
+    // These are the public-facing endpoints that accept credentials or tokens.
+    let rate_limited_auth_routes = Router::new()
         .route("/auth/login", post(login))
-        .route("/auth/email-status", get(email_status))
+        .route("/auth/verify-mfa", post(verify_mfa_challenge))
         .route("/auth/magic-link/request", post(request_magic_link))
         .route("/auth/magic-link/verify", get(verify_magic_link))
         .route("/auth/password-reset/request", post(request_password_reset))
         .route("/auth/password-reset/verify", post(reset_password))
+        .layer(axum::Extension(rate_limiter))
+        .layer(axum::middleware::from_fn(auth_rate_limit_middleware));
+
+    // Non-rate-limited routes (require authentication already)
+    let authenticated_routes = Router::new()
+        .route("/user/me", get(get_current_user))
+        .route("/logout", post(logout))
+        .route("/auth/email-status", get(email_status))
         .route("/auth/verify-email", get(verify_email))
         .route("/users", get(list_users))
         .route("/users", post(create_user))
@@ -337,7 +348,9 @@ pub fn configure_routes() -> Router<Arc<AuthState>> {
         .route("/users/{user_id}", patch(update_user))
         .route("/users/{user_id}/restore", post(restore_user))
         .route("/users/{user_id}/roles", post(assign_role))
-        .route("/users/{user_id}/roles/{role_type}", delete(remove_role))
+        .route("/users/{user_id}/roles/{role_type}", delete(remove_role));
+
+    rate_limited_auth_routes.merge(authenticated_routes)
 }
 
 // Service error conversions will be added as needed

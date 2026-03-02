@@ -302,7 +302,7 @@ export function S3SourcesManagement() {
           </p>
         </div>
         <Button asChild>
-          <Link to="/backups/s3-sources/new">
+          <Link to="/settings/backups/s3-sources/new">
             <Plus className="mr-2 h-4 w-4" />
             Add S3 Source
           </Link>
@@ -336,7 +336,7 @@ export function S3SourcesManagement() {
               description="Add an S3 source to store your backups"
               action={
                 <Button asChild>
-                  <Link to="/backups/s3-sources/new">
+                  <Link to="/settings/backups/s3-sources/new">
                     <Plus className="mr-2 h-4 w-4" />
                     Add S3 Source
                   </Link>
@@ -358,7 +358,7 @@ export function S3SourcesManagement() {
                   <TableRow key={source.id}>
                     <TableCell>
                       <Link
-                        to={`/backups/s3-sources/${source.id}`}
+                        to={`/settings/backups/s3-sources/${source.id}`}
                         className="font-medium hover:underline"
                       >
                         {source.name}

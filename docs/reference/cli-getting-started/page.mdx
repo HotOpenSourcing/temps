@@ -1,0 +1,405 @@
+export const metadata = {
+  title: 'CLI Getting Started',
+  description: 'Install and use the Temps CLI to manage your deployments from the command line.',
+  alternates: {
+    canonical: '/docs/cli-getting-started',
+  },
+}
+
+# CLI Getting Started
+
+The Temps CLI (`@temps-sdk/cli`) lets you manage projects, deployments, environments, and more directly from your terminal. {{ className: 'lead' }}
+
+---
+
+## Installation
+
+You can run the CLI directly using `bunx` or `npx` without installing it globally, or install it as a global package.
+
+### Run Without Installing
+
+<CodeGroup title="Run CLI commands">
+
+```bash {{ title: 'bunx' }}
+bunx @temps-sdk/cli --version
+```
+
+```bash {{ title: 'npx' }}
+npx @temps-sdk/cli --version
+```
+
+</CodeGroup>
+
+### Global Installation
+
+<CodeGroup title="Install globally">
+
+```bash {{ title: 'bun' }}
+bun add -g @temps-sdk/cli
+```
+
+```bash {{ title: 'npm' }}
+npm install -g @temps-sdk/cli
+```
+
+```bash {{ title: 'pnpm' }}
+pnpm add -g @temps-sdk/cli
+```
+
+```bash {{ title: 'yarn' }}
+yarn global add @temps-sdk/cli
+```
+
+</CodeGroup>
+
+After global installation, the `temps` command is available directly:
+
+```bash
+temps --version
+```
+
+---
+
+## Configuration
+
+Before using the CLI, you need to configure it to connect to your Temps instance.
+
+### Login with API Key
+
+<CodeGroup title="Login to Temps">
+
+```bash {{ title: 'bunx' }}
+bunx @temps-sdk/cli login
+```
+
+```bash {{ title: 'npx' }}
+npx @temps-sdk/cli login
+```
+
+```bash {{ title: 'global' }}
+temps login
+```
+
+</CodeGroup>
+
+This will prompt you to enter your Temps server URL and API key. You can generate an API key from the Temps dashboard under **Settings → API Keys**.
+
+### Configure with Wizard
+
+For a guided setup experience:
+
+<CodeGroup title="Run configuration wizard">
+
+```bash {{ title: 'bunx' }}
+bunx @temps-sdk/cli configure
+```
+
+```bash {{ title: 'npx' }}
+npx @temps-sdk/cli configure
+```
+
+```bash {{ title: 'global' }}
+temps configure
+```
+
+</CodeGroup>
+
+---
+
+## Quick Start
+
+Here's a quick workflow to deploy your first project using the CLI.
+
+### 1. List Your Projects
+
+<CodeGroup title="List projects">
+
+```bash {{ title: 'bunx' }}
+bunx @temps-sdk/cli projects list
+```
+
+```bash {{ title: 'npx' }}
+npx @temps-sdk/cli projects list
+```
+
+```bash {{ title: 'global' }}
+temps projects list
+```
+
+</CodeGroup>
+
+### 2. Create a New Project
+
+<CodeGroup title="Create a project">
+
+```bash {{ title: 'bunx' }}
+bunx @temps-sdk/cli projects create \
+  --name my-app \
+  --description "My awesome application" \
+  --repo https://github.com/myuser/my-app
+```
+
+```bash {{ title: 'npx' }}
+npx @temps-sdk/cli projects create \
+  --name my-app \
+  --description "My awesome application" \
+  --repo https://github.com/myuser/my-app
+```
+
+```bash {{ title: 'global' }}
+temps projects create \
+  --name my-app \
+  --description "My awesome application" \
+  --repo https://github.com/myuser/my-app
+```
+
+</CodeGroup>
+
+### 3. Deploy Your Project
+
+<CodeGroup title="Deploy to production">
+
+```bash {{ title: 'bunx' }}
+bunx @temps-sdk/cli deploy --project my-app --environment production
+```
+
+```bash {{ title: 'npx' }}
+npx @temps-sdk/cli deploy --project my-app --environment production
+```
+
+```bash {{ title: 'global' }}
+temps deploy --project my-app --environment production
+```
+
+</CodeGroup>
+
+### 4. View Deployment Logs
+
+<CodeGroup title="Stream logs">
+
+```bash {{ title: 'bunx' }}
+bunx @temps-sdk/cli logs --project my-app --follow
+```
+
+```bash {{ title: 'npx' }}
+npx @temps-sdk/cli logs --project my-app --follow
+```
+
+```bash {{ title: 'global' }}
+temps logs --project my-app --follow
+```
+
+</CodeGroup>
+
+---
+
+## Common Commands
+
+### Managing Projects
+
+<CodeGroup title="Project commands">
+
+```bash {{ title: 'bunx' }}
+# List all projects
+bunx @temps-sdk/cli projects list
+
+# Show project details
+bunx @temps-sdk/cli projects show --project my-app
+
+# Delete a project
+bunx @temps-sdk/cli projects delete --project my-app
+```
+
+```bash {{ title: 'npx' }}
+# List all projects
+npx @temps-sdk/cli projects list
+
+# Show project details
+npx @temps-sdk/cli projects show --project my-app
+
+# Delete a project
+npx @temps-sdk/cli projects delete --project my-app
+```
+
+```bash {{ title: 'global' }}
+# List all projects
+temps projects list
+
+# Show project details
+temps projects show --project my-app
+
+# Delete a project
+temps projects delete --project my-app
+```
+
+</CodeGroup>
+
+### Managing Environment Variables
+
+<CodeGroup title="Environment variable commands">
+
+```bash {{ title: 'bunx' }}
+# List environment variables
+bunx @temps-sdk/cli environments vars list --project my-app
+
+# Set an environment variable
+bunx @temps-sdk/cli environments vars set DATABASE_URL=postgres://... --environments production
+
+# Import from .env file
+bunx @temps-sdk/cli environments vars import .env --environments production
+```
+
+```bash {{ title: 'npx' }}
+# List environment variables
+npx @temps-sdk/cli environments vars list --project my-app
+
+# Set an environment variable
+npx @temps-sdk/cli environments vars set DATABASE_URL=postgres://... --environments production
+
+# Import from .env file
+npx @temps-sdk/cli environments vars import .env --environments production
+```
+
+```bash {{ title: 'global' }}
+# List environment variables
+temps environments vars list --project my-app
+
+# Set an environment variable
+temps environments vars set DATABASE_URL=postgres://... --environments production
+
+# Import from .env file
+temps environments vars import .env --environments production
+```
+
+</CodeGroup>
+
+### Managing Domains
+
+<CodeGroup title="Domain commands">
+
+```bash {{ title: 'bunx' }}
+# List domains
+bunx @temps-sdk/cli domains list
+
+# Add a custom domain
+bunx @temps-sdk/cli domains add --domain app.example.com
+
+# Verify domain and get SSL certificate
+bunx @temps-sdk/cli domains verify --domain app.example.com
+```
+
+```bash {{ title: 'npx' }}
+# List domains
+npx @temps-sdk/cli domains list
+
+# Add a custom domain
+npx @temps-sdk/cli domains add --domain app.example.com
+
+# Verify domain and get SSL certificate
+npx @temps-sdk/cli domains verify --domain app.example.com
+```
+
+```bash {{ title: 'global' }}
+# List domains
+temps domains list
+
+# Add a custom domain
+temps domains add --domain app.example.com
+
+# Verify domain and get SSL certificate
+temps domains verify --domain app.example.com
+```
+
+</CodeGroup>
+
+---
+
+## Environment Variables
+
+The CLI respects the following environment variables for configuration:
+
+| Variable | Description |
+|----------|-------------|
+| `TEMPS_API_URL` | Temps API endpoint URL |
+| `TEMPS_API_TOKEN` | Authentication token |
+| `TEMPS_API_KEY` | API key (alternative to token) |
+| `NO_COLOR` | Disable colored output |
+
+Example:
+
+```bash
+export TEMPS_API_URL=https://temps.example.com
+export TEMPS_API_KEY=your-api-key
+temps projects list
+```
+
+---
+
+## Global Options
+
+All commands support these global options:
+
+| Flag | Description |
+|------|-------------|
+| `-v, --version` | Display CLI version |
+| `--no-color` | Disable colored output |
+| `--debug` | Enable debug logging |
+| `-h, --help` | Show help for a command |
+| `--json` | Output results in JSON format |
+
+---
+
+## JSON Output
+
+Most commands support `--json` flag for scripting and automation:
+
+<CodeGroup title="JSON output">
+
+```bash {{ title: 'bunx' }}
+bunx @temps-sdk/cli projects list --json | jq '.[] | .name'
+```
+
+```bash {{ title: 'npx' }}
+npx @temps-sdk/cli projects list --json | jq '.[] | .name'
+```
+
+```bash {{ title: 'global' }}
+temps projects list --json | jq '.[] | .name'
+```
+
+</CodeGroup>
+
+---
+
+## Configuration Files
+
+The CLI stores configuration in:
+
+- **Config file**: `~/.temps/config.json`
+- **Credentials**: `~/.temps/.secrets`
+
+View your current configuration:
+
+<CodeGroup title="Show configuration">
+
+```bash {{ title: 'bunx' }}
+bunx @temps-sdk/cli configure show
+```
+
+```bash {{ title: 'npx' }}
+npx @temps-sdk/cli configure show
+```
+
+```bash {{ title: 'global' }}
+temps configure show
+```
+
+</CodeGroup>
+
+---
+
+## Next Steps
+
+- [CLI Reference](/docs/cli) - Complete command reference with all options
+- [API Reference](/docs/api) - Use the REST API directly
+- [Environment Variables Reference](/docs/environment-variables) - All configuration options

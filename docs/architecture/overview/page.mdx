@@ -1,0 +1,157 @@
+export const metadata = {
+  title: 'Architecture Overview',
+  description: 'Learn what Temps can do for you and how it helps you deploy and manage applications.',
+  alternates: {
+    canonical: '/docs/overview',
+  },
+}
+
+# Architecture Overview
+
+## What Temps Does For You
+
+Temps is a self-hosted deployment platform that gives you everything you need to deploy, monitor, and manage applications from Git repositories. You get built-in analytics, error tracking, monitoring, and security features—all in one platform.
+
+<Mermaid chart={`
+graph TB
+    subgraph "Your Applications"
+        App1[App 1]
+        App2[App 2]
+        App3[App 3]
+    end
+
+    subgraph "Temps Platform"
+        LB[Load Balancer<br/>SSL & Routing]
+        Deploy[Deployment<br/>Engine]
+        Analytics[Analytics<br/>& Monitoring]
+        Errors[Error<br/>Tracking]
+        Security[Security<br/>& Access Control]
+    end
+
+    subgraph "Data Storage"
+        DB[(PostgreSQL<br/>+ TimescaleDB)]
+    end
+
+    subgraph "Git Providers"
+        GitHub[GitHub]
+        GitLab[GitLab]
+    end
+
+    GitHub --> Deploy
+    GitLab --> Deploy
+    Deploy --> App1
+    Deploy --> App2
+    Deploy --> App3
+    App1 --> LB
+    App2 --> LB
+    App3 --> LB
+    LB --> Analytics
+    LB --> Errors
+    LB --> Security
+    Analytics --> DB
+    Errors --> DB
+    Security --> DB
+`} />
+
+## Core Capabilities
+
+### Deploy Any Application
+- **From Git** - Connect GitHub, GitLab, or any Git repository
+- **Auto-Detection** - Automatically detects your language and framework
+- **Zero Configuration** - Works out of the box for most applications
+- **Custom Dockerfiles** - Full support for custom build configurations
+
+### Automatic SSL Certificates
+- **Let's Encrypt Integration** - Free SSL certificates automatically
+- **Auto-Renewal** - Certificates renew automatically before expiration
+- **Multiple Domains** - Support for unlimited custom domains
+- **Wildcard Domains** - Deploy to subdomains automatically
+
+### Built-in Analytics
+- **Real-Time Tracking** - See visitor activity as it happens
+- **Page Views & Sessions** - Understand user behavior
+- **Performance Metrics** - Track response times and errors
+- **Custom Events** - Track any user action in your app
+
+### Error Tracking
+- **Automatic Capture** - Errors captured automatically from your apps
+- **Error Grouping** - Similar errors grouped together
+- **Stack Traces** - Full error details with source code context
+- **Notifications** - Get alerted when errors occur
+
+### Security Features
+- **IP Access Control** - Allow or block specific IP addresses
+- **CAPTCHA Protection** - Bot protection when needed
+- **Role-Based Access** - Control who can access what
+- **API Keys** - Secure API access for automation
+- **Two-Factor Authentication** - Extra security for your account
+
+### Monitoring & Observability
+- **Uptime Monitoring** - Know when your apps are down
+- **Performance Tracking** - Monitor response times
+- **Resource Usage** - Track CPU, memory, and disk usage
+- **Log Streaming** - View application logs in real-time
+
+## How Deployments Work
+
+When you deploy an application:
+
+1. **Connect Repository** - Link your Git repository
+2. **Auto-Detect** - Temps detects your language and framework
+3. **Build** - Your app is built into a container
+4. **Deploy** - Container starts with your environment variables
+5. **SSL** - Automatic SSL certificate is issued
+6. **Go Live** - Your app is accessible at your domain
+
+**Learn more:** [Deployment Pipeline](/docs/deployment)
+
+## Data & Analytics
+
+### What Gets Tracked
+- **Every Request** - All HTTP requests to your apps
+- **User Sessions** - Visitor and session tracking
+- **Errors** - All application errors with context
+- **Performance** - Response times and metrics
+
+### Analytics Dashboard
+- **Real-Time Views** - See activity as it happens
+- **Historical Data** - Analyze trends over time
+- **Funnel Analysis** - Track user conversion paths
+- **Custom Reports** - Build reports for your needs
+
+**Learn more:** [Data Flow](/docs/data-flow)
+
+## Security & Privacy
+
+### Your Data, Your Control
+- **Self-Hosted** - All data stays on your infrastructure
+- **Encrypted Storage** - Sensitive data encrypted at rest
+- **Secure Transport** - TLS 1.3 for all connections
+- **Access Control** - Fine-grained permissions
+
+### Security Features You Can Use
+- **IP Whitelisting** - Restrict access to specific IPs
+- **CAPTCHA** - Protect against bots
+- **Rate Limiting** - Prevent abuse
+- **Security Headers** - Automatic security headers on responses
+
+**Learn more:** [Security Architecture](/docs/security)
+
+## What You Can Deploy
+
+Temps supports any application that runs in a container:
+
+| Type | Examples |
+|------|----------|
+| **Frontend Apps** | React, Next.js, Vue, Svelte, Angular |
+| **Backend APIs** | Node.js, Python, Go, Rust, Ruby, PHP |
+| **Static Sites** | Hugo, Jekyll, Gatsby, plain HTML |
+| **Full-Stack** | Next.js, Nuxt, SvelteKit, Remix |
+| **Databases** | PostgreSQL, Redis, MySQL (as managed services) |
+| **Custom Apps** | Anything with a Dockerfile |
+
+## Next Steps
+
+- **[Deployment Pipeline](/docs/deployment)** - Learn how deployments work
+- **[Data Flow](/docs/data-flow)** - Understand analytics and monitoring
+- **[Security Architecture](/docs/security)** - Security features available to you

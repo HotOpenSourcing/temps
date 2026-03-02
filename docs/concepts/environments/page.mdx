@@ -1,0 +1,163 @@
+export const metadata = {
+  title: 'Environments',
+  description:
+    'Understand how environments provide isolation between production, staging, and preview deployments within a single project.',
+  alternates: {
+    canonical: '/docs/environments',
+  },
+}
+
+export const sections = [
+  { title: 'What is an environment', id: 'what-is-an-environment' },
+  { title: 'Environment types', id: 'environment-types' },
+  { title: 'How isolation works', id: 'how-isolation-works' },
+  { title: 'Environment configuration', id: 'environment-configuration' },
+  { title: 'Branch-to-environment mapping', id: 'branch-to-environment-mapping' },
+  { title: 'Lifecycle', id: 'lifecycle' },
+]
+
+# Environments
+
+An environment is an isolated instance of your project with its own containers, domains, database, and configuration. Every project has at least one environment (production). Additional environments let you test changes safely before they affect real users. {{ className: 'lead' }}
+
+---
+
+## What is an environment {{ anchor: true, id: 'what-is-an-environment' }}
+
+An environment is the combination of:
+
+- **Running containers** — One or more Docker containers serving your application
+- **A domain** — An auto-assigned subdomain plus optional custom domains
+- **Environment variables** — Configuration values specific to this environment
+- **A deployment config** — CPU limits, memory limits, replica count, and exposed port
+- **Its own database** — When linked to a managed service, each environment gets an isolated database (e.g. `my_app_production` vs `my_app_staging`)
+
+Environments within the same project share the Git repository, the project settings, and the linked managed services. But each environment runs its own containers with its own configuration.
+
+---
+
+## Environment types {{ anchor: true, id: 'environment-types' }}
+
+| Type | Created by | Typical use |
+|------|-----------|------------|
+| **Production** | Automatically when the project is created | The live application. Pushes to the main branch deploy here. |
+| **Staging** | Manually by the user | A pre-production environment for testing. Can track a `staging` or `develop` branch. |
+| **Preview** | Automatically when a branch is pushed (if preview environments are enabled) | Temporary environments for code review. One per feature branch. |
+
+### Production environment
+
+Every project has exactly one production environment. It is created when the project is created and cannot be deleted. The production environment:
+
+- Receives deployments when the project's main branch (usually `main`) is pushed
+- Is the default target for custom domains
+- Has its own deployment config that can differ from other environments
+
+### Preview environments
+
+When `enable_preview_environments` is turned on for a project, pushing to any non-main branch automatically creates a preview environment. The environment is named after the branch.
+
+Preview environments:
+
+- Are marked with `is_preview: true`
+- Get a URL in the format `{project}-{branch-slug}.{preview-domain}`
+- Respect the `include_in_preview` flag on environment variables
+- Get their own isolated database within linked services
+- Are soft-deleted when removed (and restored if the same branch is pushed again)
+
+---
+
+## How isolation works {{ anchor: true, id: 'how-isolation-works' }}
+
+Each environment is fully isolated from the others:
+
+### Containers
+
+Each environment runs its own set of Docker containers. A production deployment and a staging deployment are separate containers running different versions of the code (or the same code with different configuration).
+
+### Databases
+
+When a managed PostgreSQL service is linked to a project, each environment gets a dedicated database:
+
+```
+postgres-my-db
+  ├── my_app_production     (production environment)
+  ├── my_app_staging         (staging environment)
+  └── my_app_feature_login   (preview environment)
+```
+
+For Redis, each environment gets a dedicated database number (0-15). For S3/RustFS, each environment gets a dedicated bucket.
+
+### Environment variables
+
+Variables can be scoped to specific environments. A variable set only for production is not visible in staging or previews. Auto-injected service variables (like `POSTGRES_URL`) use the environment-specific database name.
+
+### Domains
+
+Each environment has its own auto-assigned subdomain. Custom domains are added per environment. SSL certificates are provisioned independently.
+
+---
+
+## Environment configuration {{ anchor: true, id: 'environment-configuration' }}
+
+Each environment has its own deployment configuration:
+
+<Properties>
+  <Property name="CPU Request / Limit">
+    Minimum and maximum CPU allocation in millicores. Environment-level settings override the project defaults.
+  </Property>
+  <Property name="Memory Request / Limit">
+    Minimum and maximum memory in MB.
+  </Property>
+  <Property name="Replicas">
+    Number of container instances. Default: 1. Production might use 3 replicas while staging uses 1.
+  </Property>
+  <Property name="Exposed Port">
+    The port your application listens on. Overrides the project-level setting for this environment.
+  </Property>
+  <Property name="Branch">
+    The Git branch this environment tracks. Pushes to this branch trigger a deployment to this environment.
+  </Property>
+</Properties>
+
+Settings are updated at `PUT /projects/{id}/environments/{id}/settings` or via the dashboard under the environment's **Settings** tab.
+
+---
+
+## Branch-to-environment mapping {{ anchor: true, id: 'branch-to-environment-mapping' }}
+
+Temps maps Git branches to environments:
+
+| Branch | Environment | Condition |
+|--------|-------------|-----------|
+| Project's main branch (e.g. `main`) | Production | Always |
+| Any other branch | Preview environment with matching name | Only if `enable_preview_environments` is on |
+| A branch tracked by a manually created environment | That specific environment | Branch set in environment config |
+
+Each branch can only be tracked by one active environment per project. If you create a staging environment tracking the `develop` branch, pushes to `develop` deploy to staging (not production).
+
+---
+
+## Lifecycle {{ anchor: true, id: 'lifecycle' }}
+
+### Creation
+
+- **Production**: Created automatically when the project is created
+- **Manual environments**: Created via the dashboard or API
+- **Preview environments**: Created automatically on first push to a non-main branch
+
+### Soft deletion
+
+When you delete an environment:
+
+1. Running containers are stopped and removed
+2. The environment record is marked with a `deleted_at` timestamp (soft delete)
+3. Data in linked services (database, cache) is not deleted
+4. If the same branch is pushed again, the environment is restored
+
+### Protection
+
+The production environment cannot be deleted. This is enforced at the system level regardless of user role or permissions. Other environments can be deleted by users with the appropriate role.
+
+### Cleanup
+
+Preview environments accumulate as branches are created. Clean them up manually from the **Environments** page or by using the **Teardown** action on individual deployments to free containers while keeping the environment record.

@@ -3,7 +3,7 @@ name = "temps-example-plugin"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "Example external plugin for Temps - demonstrates the plugin SDK"
+description = "SEO Analyzer plugin for Temps - crawls deployed sites and generates technical SEO reports"
 
 [[bin]]
 name = "temps-example-plugin"
@@ -13,8 +13,19 @@ path = "src/main.rs"
 temps-plugin-sdk = { path = "../../crates/temps-plugin-sdk" }
 
 axum = { version = "0.8" }
+sea-orm = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+scraper = "0.25"
+url = "2.5"
+uuid = { version = "1", features = ["v4"] }
+include_dir = "0.7"
+mime_guess = "2.0"
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

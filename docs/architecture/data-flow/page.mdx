@@ -1,0 +1,461 @@
+export const metadata = {
+  title: 'Analytics & Data',
+  description: 'Learn what analytics and monitoring data Temps collects and how to integrate with React/Next.js.',
+  alternates: {
+    canonical: '/docs/data-flow',
+  },
+}
+
+# Analytics & Data
+
+Temps automatically tracks and analyzes data from your applications, giving you insights into user behavior, performance, and errors. Here's what gets tracked and how to integrate with your React or Next.js application.
+
+<Mermaid chart={`
+sequenceDiagram
+    participant User
+    participant App
+    participant SDK
+    participant Temps
+    participant Database
+    participant Dashboard
+
+    User->>App: Visits Page
+    App->>SDK: Track Page View
+    SDK->>SDK: Collect Metrics
+    Note over SDK: Performance, Device,<br/>Session Data
+    SDK->>Temps: Send Event
+    Temps->>Database: Store Event
+    Database-->>Dashboard: Query Events
+    Dashboard-->>User: View Analytics
+
+    User->>App: Error Occurs
+    App->>SDK: Capture Error
+    SDK->>Temps: Send Error Event
+    Temps->>Database: Store Error
+    Temps->>Dashboard: Alert User
+`} />
+
+## Data Structures
+
+### Analytics Events
+
+Every page view and user interaction is tracked with the following data structure:
+
+```typescript
+interface AnalyticsEvent {
+  // Identifiers
+  id: number;
+  timestamp: Date;
+  project_id: number;
+  environment_id?: number;
+  deployment_id?: number;
+
+  // Session Tracking
+  session_id?: string;
+  visitor_id?: number;
+
+  // Page Data
+  hostname: string;
+  pathname: string;
+  page_path: string;        // For analytics grouping
+  href: string;
+  querystring?: string;
+  page_title?: string;
+  referrer?: string;
+  referrer_hostname?: string;
+
+  // Session Flow
+  is_entry: boolean;        // First page in session
+  is_exit: boolean;         // Last page in session
+  is_bounce: boolean;       // Single-page session
+  time_on_page?: number;    // Seconds on page
+  session_page_number?: number;
+
+  // User Interactions
+  scroll_depth?: number;    // Percentage scrolled
+  clicks?: number;          // Click count on page
+  custom_properties?: Record<string, any>;
+
+  // Performance Metrics (Core Web Vitals)
+  lcp?: number;             // Largest Contentful Paint
+  cls?: number;             // Cumulative Layout Shift
+  inp?: number;             // Interaction to Next Paint
+  fcp?: number;             // First Contentful Paint
+  ttfb?: number;            // Time to First Byte
+  fid?: number;             // First Input Delay
+
+  // Device & Browser
+  browser?: string;
+  browser_version?: string;
+  operating_system?: string;
+  operating_system_version?: string;
+  device_type?: string;     // mobile, desktop, tablet
+  screen_width?: number;
+  screen_height?: number;
+  viewport_width?: number;
+  viewport_height?: number;
+
+  // Geography (cached)
+  ip_geolocation_id?: number;
+
+  // Traffic Source
+  channel?: string;         // organic, direct, referral, etc.
+  utm_source?: string;
+  utm_medium?: string;
+  utm_campaign?: string;
+  utm_term?: string;
+  utm_content?: string;
+
+  // Event Details
+  event_type: string;       // page_view, custom_event, etc.
+  event_name?: string;      // For custom events
+  props?: Record<string, any>; // Custom event properties
+
+  // Metadata
+  user_agent?: string;
+  is_crawler: boolean;
+  crawler_name?: string;
+  language?: string;
+}
+```
+
+### Error Events
+
+Errors are tracked with comprehensive context:
+
+```typescript
+interface ErrorEvent {
+  id: number;
+  error_group_id: number;
+  project_id: number;
+  environment_id?: number;
+  deployment_id?: number;
+  visitor_id?: number;
+  timestamp: Date;
+
+  // Error Details
+  exception_type: string;      // Error, TypeError, etc.
+  exception_value?: string;     // Error message
+  fingerprint_hash: string;     // For grouping similar errors
+  source?: string;              // sentry, custom, etc.
+
+  // Structured Context
+  data?: {
+    // User Context
+    user?: {
+      user_id?: string;
+      email?: string;
+      username?: string;
+      ip_address?: string;
+      segment?: string;
+      session_id?: string;
+      custom?: Record<string, any>;
+    };
+
+    // Device Context
+    device?: {
+      browser?: string;
+      browser_version?: string;
+      os?: string;
+      os_version?: string;
+      device_type?: string;
+      screen_width?: number;
+      screen_height?: number;
+      viewport_width?: number;
+      viewport_height?: number;
+      locale?: string;
+      timezone?: string;
+    };
+
+    // Request Context
+    request?: {
+      url?: string;
+      method?: string;
+      headers?: Record<string, string>;
+      query_string?: string;
+      cookies?: Record<string, string>;
+    };
+
+    // Stack Trace
+    stack_trace?: Array<{
+      filename?: string;
+      function?: string;
+      lineno?: number;
+      colno?: number;
+      in_app?: boolean;
+    }>;
+
+    // Environment
+    environment?: {
+      sdk_name?: string;
+      sdk_version?: string;
+      release?: string;
+      dist?: string;
+    };
+  };
+}
+```
+
+## React/Next.js Integration
+
+### Installation
+
+```bash
+npm install @temps-sdk/react-analytics
+```
+
+### Next.js App Router (13+)
+
+```tsx
+// app/layout.tsx
+import { TempsAnalyticsProvider } from '@temps-sdk/react-analytics';
+import type { Metadata } from "next";
+
+export const metadata: Metadata = {
+  title: "Your App",
+  description: "Your app description",
+};
+
+export default function RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode;
+}>) {
+  return (
+    <html lang="en">
+      <body>
+        <TempsAnalyticsProvider basePath="/api/_temps">
+          {children}
+        </TempsAnalyticsProvider>
+      </body>
+    </html>
+  );
+}
+```
+
+**API Route** (for Next.js App Router):
+
+```tsx
+// app/api/_temps/[...path]/route.ts
+import { NextRequest, NextResponse } from 'next/server';
+
+export async function POST(
+  request: NextRequest,
+  { params }: { params: { path: string[] } }
+) {
+  const body = await request.json();
+
+  // Forward to Temps API
+  const response = await fetch(
+    `${process.env.NEXT_PUBLIC_TEMPS_API_URL}/api/analytics/${process.env.NEXT_PUBLIC_PROJECT_SLUG}/events`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.TEMPS_API_KEY}`,
+      },
+      body: JSON.stringify(body),
+    }
+  );
+
+  if (!response.ok) {
+    return NextResponse.json(
+      { error: 'Failed to send analytics' },
+      { status: response.status }
+    );
+  }
+
+  return NextResponse.json({ success: true });
+}
+```
+
+### Next.js Pages Router
+
+```tsx
+// pages/_app.tsx
+import { TempsAnalyticsProvider } from '@temps-sdk/react-analytics';
+import type { AppProps } from 'next/app';
+
+function MyApp({ Component, pageProps }: AppProps) {
+  return (
+    <TempsAnalyticsProvider basePath="/api/_temps">
+      <Component {...pageProps} />
+    </TempsAnalyticsProvider>
+  );
+}
+
+export default MyApp;
+```
+
+**API Route** (for Next.js Pages Router):
+
+```tsx
+// pages/api/_temps/[...path].ts
+import type { NextApiRequest, NextApiResponse } from 'next';
+
+export default async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse
+) {
+  if (req.method === 'POST') {
+    const response = await fetch(
+      `${process.env.NEXT_PUBLIC_TEMPS_API_URL}/api/analytics/${process.env.NEXT_PUBLIC_PROJECT_SLUG}/events`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${process.env.TEMPS_API_KEY}`,
+        },
+        body: JSON.stringify(req.body),
+      }
+    );
+
+    if (!response.ok) {
+      return res.status(response.status).json({ error: 'Failed to send analytics' });
+    }
+
+    return res.status(200).json({ success: true });
+  }
+
+  if (req.method === 'GET') {
+    return res.status(200).json({ status: 'ok' });
+  }
+
+  return res.status(405).json({ error: 'Method not allowed' });
+}
+```
+
+### React (Vite/CRA)
+
+```tsx
+// src/main.tsx or src/index.tsx
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import { TempsAnalyticsProvider } from '@temps-sdk/react-analytics';
+import App from './App';
+
+ReactDOM.createRoot(document.getElementById('root')!).render(
+  <React.StrictMode>
+    <TempsAnalyticsProvider>
+      <App />
+    </TempsAnalyticsProvider>
+  </React.StrictMode>
+);
+```
+
+### Environment Variables
+
+Add these to your `.env.local` or `.env`:
+
+```bash
+# Required
+TEMPS_API_KEY=your_api_key_here
+NEXT_PUBLIC_PROJECT_SLUG=your-project-slug
+NEXT_PUBLIC_TEMPS_API_URL=https://your-temps-instance.com
+```
+
+## Tracking Custom Events
+
+Use the `useAnalytics` hook to track custom events:
+
+```tsx
+import { useAnalytics } from '@temps-sdk/react-analytics';
+
+function MyComponent() {
+  const { track } = useAnalytics();
+
+  const handleClick = () => {
+    track('button_click', {
+      button_id: 'subscribe',
+      page: '/pricing',
+      plan: 'premium'
+    });
+  };
+
+  return (
+    <button onClick={handleClick}>
+      Subscribe Now
+    </button>
+  );
+}
+```
+
+## Identifying Users
+
+Associate analytics with specific users:
+
+```tsx
+import { useAnalytics } from '@temps-sdk/react-analytics';
+import { useEffect } from 'react';
+
+function UserProfile({ user }) {
+  const { identify } = useAnalytics();
+
+  useEffect(() => {
+    if (user) {
+      identify(user.id, {
+        email: user.email,
+        name: user.name,
+        plan: user.subscription.plan
+      });
+    }
+  }, [user]);
+
+  return <div>...</div>;
+}
+```
+
+## What Gets Tracked Automatically
+
+Once integrated, Temps automatically tracks:
+
+- **Page Views** - Every route change
+- **Session Tracking** - Visitor and session IDs
+- **Performance Metrics** - Core Web Vitals (LCP, CLS, INP, FCP, TTFB, FID)
+- **User Interactions** - Scroll depth, clicks
+- **Device Information** - Browser, OS, screen size
+- **Traffic Sources** - UTM parameters, referrer
+- **Geographic Data** - Location based on IP (cached)
+
+## What You Can Do With This Data
+
+### Analytics Dashboard
+- **Real-Time Views** - See activity as it happens
+- **Historical Analysis** - Analyze trends over days, weeks, months
+- **Visitor Insights** - Understand who your users are
+- **Page Performance** - Identify slow pages
+- **Traffic Sources** - See where visitors come from
+
+### Error Management
+- **Error Groups** - Similar errors automatically grouped
+- **Stack Traces** - Full error details with source code context
+- **Error Trends** - See if errors are increasing or decreasing
+- **Notifications** - Get alerted when new errors occur
+- **Resolution Tracking** - Mark errors as resolved
+
+### Performance Monitoring
+- **Performance Trends** - Track performance over time
+- **Slow Page Detection** - Automatically identify slow pages
+- **Device Comparison** - Performance by device type
+- **Browser Comparison** - Performance by browser
+- **Alerts** - Get notified when performance degrades
+
+## Data Privacy & Control
+
+### Your Data, Your Control
+- **Self-Hosted** - All data stays on your infrastructure
+- **Data Retention** - Configure how long to keep data
+- **Data Export** - Export your data anytime
+- **Data Deletion** - Delete specific events or all data
+
+### Privacy Features
+- **IP Anonymization** - Option to anonymize IP addresses
+- **PII Protection** - Control what personal data is collected
+- **GDPR Compliant** - Tools to comply with privacy regulations
+- **User Consent** - Integrate consent management
+
+## Next Steps
+
+- **[Overview](/docs/overview)** - System capabilities
+- **[Deployment Pipeline](/docs/deployment)** - How deployments work
+- **[Security Architecture](/docs/security)** - Security features

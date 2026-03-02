@@ -1,0 +1,667 @@
+export const metadata = {
+  title: 'Cron Jobs & Scheduled Tasks',
+  description: 'Schedule recurring tasks by defining cron jobs in your repository. Invoke HTTP endpoints on a schedule—per environment, with full logging and error handling.',
+  alternates: {
+    canonical: '/docs/cron-jobs',
+  },
+}
+
+export const sections = [
+  { title: 'Quick Start', id: 'quick-start' },
+  { title: 'Configuration File', id: 'configuration-file' },
+  { title: 'Cron Expression Syntax', id: 'cron-expression-syntax' },
+  { title: 'Endpoint Invocation', id: 'endpoint-invocation' },
+  { title: 'Per-Environment Scheduling', id: 'per-environment-scheduling' },
+  { title: 'Common Use Cases', id: 'common-use-cases' },
+  { title: 'Monitoring & Logs', id: 'monitoring-logs' },
+  { title: 'Error Handling', id: 'error-handling' },
+  { title: 'Best Practices', id: 'best-practices' },
+  { title: 'Troubleshooting', id: 'troubleshooting' },
+]
+
+# Cron Jobs & Scheduled Tasks
+
+Temps includes a built-in cron scheduler that lets you run recurring tasks by invoking HTTP endpoints on a schedule. Define your cron jobs in your repository's `.temps.yaml` file—no external services needed. {{ className: 'lead' }}
+
+<Note>
+**Competitive Advantage**: While platforms like Vercel require separate services (Vercel Cron requires Pro plan), Temps includes unlimited scheduled tasks on every project and environment.
+</Note>
+
+---
+
+## Quick Start {{ anchor: true, id: 'quick-start' }}
+
+### Step 1: Create `.temps.yaml` File
+
+Create a `.temps.yaml` file in your repository root:
+
+```yaml
+cron:
+  - path: "/api/cleanup"
+    schedule: "0 * * * *"
+    name: "Hourly Cleanup"
+```
+
+### Step 2: Deploy Your Application
+
+When you deploy, Temps automatically:
+- Reads your `.temps.yaml` file
+- Configures the cron jobs
+- Starts scheduling them
+
+### Step 3: Create Your Endpoint
+
+Create the endpoint that will be invoked:
+
+```typescript
+// app/api/cleanup/route.ts (Next.js)
+import { NextResponse } from 'next/server';
+
+export async function GET(request: Request) {
+  // Verify cron secret (recommended)
+  const authHeader = request.headers.get('authorization');
+  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
+  // Perform cleanup task
+  await cleanupOldRecords();
+  await archiveExpiredSessions();
+
+  return NextResponse.json({
+    success: true,
+    message: 'Cleanup completed',
+    timestamp: new Date().toISOString()
+  });
+}
+```
+
+That's it! Your cron job will run automatically on the schedule you defined.
+
+---
+
+## Configuration File {{ anchor: true, id: 'configuration-file' }}
+
+Cron jobs are defined in a `.temps.yaml` file in your project directory.
+
+### File Location
+
+The `.temps.yaml` file should be placed in your project's root directory. For most projects, this is the repository root:
+
+```
+your-repo/
+  ├── .temps.yaml          ← Place here (repository root)
+  ├── src/
+  ├── package.json
+  └── ...
+```
+
+**For monorepos**, if your project is in a subdirectory, place `.temps.yaml` in that subdirectory:
+
+```
+monorepo/
+  ├── apps/
+  │   └── my-app/
+  │       ├── .temps.yaml  ← Place here (project directory)
+  │       ├── src/
+  │       └── package.json
+  └── packages/
+```
+
+The file location matches your project's configured directory in Temps.
+
+### Basic Format
+
+```yaml
+cron:
+  - path: "/api/cleanup"
+    schedule: "0 * * * *"
+    name: "Hourly Cleanup"  # Optional: descriptive name
+```
+
+### Multiple Cron Jobs
+
+```yaml
+cron:
+  - path: "/api/cleanup"
+    schedule: "0 * * * *"
+    name: "Hourly Cleanup"
+
+  - path: "/api/backup"
+    schedule: "0 2 * * *"
+    name: "Daily Backup"
+
+  - path: "/api/digest"
+    schedule: "0 9 * * *"
+    name: "Daily Email Digest"
+```
+
+### Full Configuration Example
+
+```yaml
+# .temps.yaml
+cron:
+  - path: "/api/cleanup"
+    schedule: "0 * * * *"
+    name: "Hourly Cleanup"
+
+  - path: "/api/backup"
+    schedule: "0 2 * * *"
+    name: "Daily Backup at 2 AM"
+
+  - path: "/api/weekly-report"
+    schedule: "0 9 * * 1"
+    name: "Weekly Report on Mondays"
+
+# Other configuration options
+build:
+  dockerfile: Dockerfile
+
+env:
+  NODE_ENV: production
+```
+
+### How It Works
+
+1. **Add `.temps.yaml`** to your project directory (repository root or subdirectory for monorepos)
+2. **Commit and push** to Git
+3. **Deploy** your application
+4. **After deployment completes**, Temps reads the `.temps.yaml` file
+5. **Cron jobs are configured** automatically for that environment
+6. **Jobs run** on the specified schedule
+
+<Note>
+**Timing**: Cron jobs are configured after your deployment is live. The configuration job runs automatically as part of the deployment workflow.
+</Note>
+
+---
+
+## Cron Expression Syntax {{ anchor: true, id: 'cron-expression-syntax' }}
+
+Temps uses standard cron expression format with 5 fields:
+
+```
+┌───────────── minute (0 - 59)
+│ ┌───────────── hour (0 - 23)
+│ │ ┌───────────── day of month (1 - 31)
+│ │ │ ┌───────────── month (1 - 12)
+│ │ │ │ ┌───────────── day of week (0 - 6) (Sunday to Saturday)
+│ │ │ │ │
+│ │ │ │ │
+* * * * *
+```
+
+### Common Schedules
+
+<Properties>
+  <Property name="Every 5 minutes">
+    ```yaml
+    schedule: "*/5 * * * *"
+    ```
+  </Property>
+  <Property name="Every hour at minute 0">
+    ```yaml
+    schedule: "0 * * * *"
+    ```
+  </Property>
+  <Property name="Daily at 2:30 AM">
+    ```yaml
+    schedule: "30 2 * * *"
+    ```
+  </Property>
+  <Property name="Weekly on Monday at 9 AM">
+    ```yaml
+    schedule: "0 9 * * 1"
+    ```
+  </Property>
+  <Property name="Monthly on the 1st at midnight">
+    ```yaml
+    schedule: "0 0 1 * *"
+    ```
+  </Property>
+  <Property name="Every weekday at 8 AM">
+    ```yaml
+    schedule: "0 8 * * 1-5"
+    ```
+  </Property>
+  <Property name="Twice daily (6 AM and 6 PM)">
+    ```yaml
+    schedule: "0 6,18 * * *"
+    ```
+  </Property>
+</Properties>
+
+<Note>
+Use [crontab.guru](https://crontab.guru) to validate your cron expressions and see human-readable descriptions.
+</Note>
+
+---
+
+## Endpoint Invocation {{ anchor: true, id: 'endpoint-invocation' }}
+
+### HTTP Method
+
+Temps invokes your endpoints using **GET** requests by default.
+
+### Authentication
+
+Temps automatically includes an `Authorization` header when invoking cron endpoints:
+
+```
+Authorization: Bearer <TEMPS_CRON_SECRET>
+```
+
+**Set your cron secret as an environment variable:**
+
+```bash
+# In Temps dashboard: Project Settings > Environment Variables
+CRON_SECRET=your-secret-key-here
+```
+
+**Verify in your endpoint:**
+
+<CodeGroup title="Verify Cron Secret">
+```typescript {{ title: 'Next.js API Route' }}
+// app/api/cleanup/route.ts
+import { NextResponse } from 'next/server';
+
+export async function GET(request: Request) {
+  // Verify cron secret
+  const authHeader = request.headers.get('authorization');
+  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
+  // Perform cleanup task
+  await cleanupOldRecords();
+
+  return NextResponse.json({ success: true });
+}
+```
+
+```javascript {{ title: 'Express.js Endpoint' }}
+// routes/cron.js
+const express = require('express');
+const router = express.Router();
+
+router.get('/cleanup', async (req, res) => {
+  // Verify cron secret
+  const authHeader = req.headers.authorization;
+  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  // Perform task
+  await cleanupOldRecords();
+
+  res.json({ success: true });
+});
+
+module.exports = router;
+```
+
+```python {{ title: 'FastAPI Endpoint' }}
+from fastapi import FastAPI, Header, HTTPException
+import os
+
+app = FastAPI()
+
+@app.get("/api/cleanup")
+async def cleanup_cron(authorization: str = Header(None)):
+    # Verify cron secret
+    expected_auth = f"Bearer {os.environ['CRON_SECRET']}"
+    if authorization != expected_auth:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # Perform cleanup
+    await cleanup_old_records()
+
+    return {"success": True}
+```
+</CodeGroup>
+
+<Note>
+**Security**: Always validate the `Authorization` header in your cron endpoints to prevent unauthorized invocations.
+</Note>
+
+---
+
+## Per-Environment Scheduling {{ anchor: true, id: 'per-environment-scheduling' }}
+
+Cron jobs defined in `.temps.yaml` are configured **per environment** when you deploy. This means:
+
+- **Same `.temps.yaml` file** - The file is shared across all environments
+- **Environment-specific execution** - Each environment (dev, staging, production) runs its own cron jobs
+- **Isolated execution** - Production and staging crons don't interfere with each other
+- **Configured after deployment** - Cron jobs are set up automatically after each deployment completes
+
+### Example: Different Behavior Per Environment
+
+While the schedule is the same, you can make your endpoint behave differently based on environment:
+
+```typescript
+// app/api/backup/route.ts
+export async function GET(request: Request) {
+  const env = process.env.NODE_ENV;
+
+  if (env === 'production') {
+    // Production: Full backup every 6 hours
+    await performFullBackup();
+  } else {
+    // Staging: Lightweight backup daily
+    await performLightBackup();
+  }
+
+  return Response.json({ success: true });
+}
+```
+
+```yaml
+# .temps.yaml
+cron:
+  - path: "/api/backup"
+    schedule: "0 */6 * * *"  # Every 6 hours (production will do full backup)
+    name: "Database Backup"
+```
+
+---
+
+## Common Use Cases {{ anchor: true, id: 'common-use-cases' }}
+
+### 1. Database Backups
+
+Schedule regular database backups:
+
+```yaml
+# .temps.yaml
+cron:
+  - path: "/api/backup"
+    schedule: "0 2 * * *"  # Daily at 2 AM
+    name: "Database Backup"
+```
+
+```typescript
+// app/api/backup/route.ts
+export async function GET(request: Request) {
+  // Verify auth...
+
+  const { S3Client, PutObjectCommand } = await import('@aws-sdk/client-s3');
+
+  // Dump database
+  const dump = await dumpDatabase();
+
+  // Upload to S3
+  const s3 = new S3Client({ /* config */ });
+  await s3.send(new PutObjectCommand({
+    Bucket: 'backups',
+    Key: `database-${Date.now()}.sql`,
+    Body: dump
+  }));
+
+  return Response.json({ success: true });
+}
+```
+
+### 2. Data Cleanup
+
+Remove old records, expired sessions, or temporary files:
+
+```yaml
+# .temps.yaml
+cron:
+  - path: "/api/cleanup"
+    schedule: "0 3 * * *"  # Daily at 3 AM
+    name: "Daily Cleanup"
+```
+
+```typescript
+// app/api/cleanup/route.ts
+export async function GET(request: Request) {
+  // Verify auth...
+
+  const sevenDaysAgo = new Date();
+  sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+  // Delete expired sessions
+  await db.session.deleteMany({
+    where: { expiresAt: { lt: sevenDaysAgo } }
+  });
+
+  return Response.json({ success: true });
+}
+```
+
+### 3. Email Digests
+
+Send daily/weekly email summaries:
+
+```yaml
+# .temps.yaml
+cron:
+  - path: "/api/digest"
+    schedule: "0 9 * * *"  # Daily at 9 AM
+    name: "Daily Email Digest"
+```
+
+### 4. Cache Warming
+
+Pre-populate caches before peak traffic:
+
+```yaml
+# .temps.yaml
+cron:
+  - path: "/api/warm-cache"
+    schedule: "0 6 * * *"  # Daily at 6 AM
+    name: "Cache Warming"
+```
+
+### 5. API Sync
+
+Synchronize data from external APIs:
+
+```yaml
+# .temps.yaml
+cron:
+  - path: "/api/sync"
+    schedule: "*/15 * * * *"  # Every 15 minutes
+    name: "External API Sync"
+```
+
+---
+
+## Monitoring & Logs {{ anchor: true, id: 'monitoring-logs' }}
+
+### View Cron Jobs
+
+In the Temps dashboard:
+1. Go to **Project Settings** → **Cron Jobs**
+2. See all configured cron jobs
+3. View execution history
+4. Check success/failure rates
+
+### Execution Details
+
+Each execution includes:
+- **Start Time** - When the job began
+- **Duration** - How long it took
+- **Status** - Success, Failed, or Timeout
+- **HTTP Status** - Response code from endpoint
+- **Response Body** - Endpoint response (first 1KB)
+- **Error Message** - If the job failed
+
+### View Logs
+
+Check your application logs to see cron job execution:
+
+```bash
+# View deployment logs
+temps logs --project my-app --environment production
+
+# Filter for cron-related logs
+temps logs --project my-app | grep "cron"
+```
+
+---
+
+## Error Handling {{ anchor: true, id: 'error-handling' }}
+
+### Retries
+
+Failed cron jobs are automatically retried:
+- **1st retry**: After 1 minute
+- **2nd retry**: After 5 minutes
+- **3rd retry**: After 15 minutes
+
+After 3 failed attempts, the job is marked as failed.
+
+### Handling Failures in Code
+
+Return appropriate status codes:
+
+```typescript
+// app/api/cron/task/route.ts
+export async function GET(request: Request) {
+  try {
+    await performTask();
+    return Response.json({ success: true }, { status: 200 });
+  } catch (error) {
+    if (error instanceof TransientError) {
+      // Will be retried (5xx errors)
+      return Response.json({ error: error.message }, { status: 500 });
+    } else {
+      // Won't be retried (4xx errors)
+      return Response.json({ error: error.message }, { status: 400 });
+    }
+  }
+}
+```
+
+<Note>
+**Retry Logic**: Only `5xx` server errors trigger retries. `4xx` client errors are not retried.
+</Note>
+
+### Timeout
+
+Cron jobs have a default timeout of **5 minutes**. If your job takes longer, it will be terminated.
+
+For long-running tasks, consider:
+- Breaking them into smaller jobs
+- Using background job queues
+- Processing in batches
+
+---
+
+## Best Practices {{ anchor: true, id: 'best-practices' }}
+
+<Properties>
+  <Property name="Idempotency">
+    Design cron jobs to be idempotent—running them multiple times should produce the same result:
+
+    ```typescript
+    // ✅ Good: Idempotent
+    await db.session.deleteMany({
+      where: { expiresAt: { lt: sevenDaysAgo } }
+    });
+
+    // ❌ Bad: Not idempotent
+    await db.user.updateMany({
+      data: { credits: { increment: 10 } }
+    });
+    ```
+  </Property>
+  <Property name="Use Locking">
+    Prevent concurrent executions with distributed locks:
+
+    ```typescript
+    import { redis } from '@/lib/redis';
+
+    const lockKey = 'cron:backup:lock';
+    const acquired = await redis.set(lockKey, '1', 'EX', 3600, 'NX');
+
+    if (!acquired) {
+      return Response.json({ error: 'Already running' }, { status: 409 });
+    }
+
+    try {
+      await performBackup();
+    } finally {
+      await redis.del(lockKey);
+    }
+    ```
+  </Property>
+  <Property name="Monitor Duration">
+    Track how long jobs take and log if they exceed expected duration:
+
+    ```typescript
+    const start = Date.now();
+    await performTask();
+    const duration = Date.now() - start;
+
+    if (duration > 5 * 60 * 1000) { // 5 minutes
+      console.warn(`Job took ${duration}ms`);
+    }
+    ```
+  </Property>
+  <Property name="Test Locally">
+    Test cron endpoints locally before deploying:
+
+    ```bash
+    # Invoke endpoint manually
+    curl http://localhost:3000/api/cleanup \
+      -H "Authorization: Bearer your-cron-secret"
+    ```
+  </Property>
+</Properties>
+
+---
+
+## Troubleshooting {{ anchor: true, id: 'troubleshooting' }}
+
+<Properties>
+  <Property name="Cron not executing">
+    **Possible causes:**
+    - Invalid cron expression (use [crontab.guru](https://crontab.guru))
+    - `.temps.yaml` file not in correct location (should match project directory)
+    - Endpoint path doesn't match
+    - Environment not deployed
+    - YAML syntax error in `.temps.yaml`
+
+    **Solution:**
+    - Verify `.temps.yaml` is in your project directory (check project settings for directory path)
+    - Check YAML syntax is valid
+    - Check cron syntax with [crontab.guru](https://crontab.guru)
+    - Ensure your endpoint path matches exactly (including leading slash)
+    - Redeploy your application (cron configuration happens after deployment)
+    - Check deployment logs for cron configuration messages
+  </Property>
+  <Property name="401 Unauthorized errors">
+    **Cause:** Missing or incorrect `CRON_SECRET` environment variable.
+
+    **Solution:**
+    - Set `CRON_SECRET` in your environment variables
+    - Verify it matches what your endpoint expects
+    - Check the Authorization header format
+  </Property>
+  <Property name="Timeout errors">
+    **Cause:** Job takes longer than 5-minute default timeout.
+
+    **Solution:**
+    - Break long-running tasks into smaller jobs
+    - Use background job queues for heavy processing
+    - Process data in batches
+  </Property>
+  <Property name="Jobs running multiple times">
+    **Cause:** Multiple environments deployed with same schedule.
+
+    **Solution:** This is expected behavior—each environment runs its own cron jobs. Use locking (see Best Practices) if you need to prevent concurrent execution.
+  </Property>
+</Properties>
+
+---
+
+## Next Steps
+
+- **[Environment Variables](/docs/environment-variables)** - Store cron secrets securely
+- **[Monitoring](/docs/monitoring)** - Track cron job health
+- **[Error Tracking](/docs/error-tracking)** - Catch cron endpoint errors
+- **[Logs](/docs/logs)** - Debug failed executions

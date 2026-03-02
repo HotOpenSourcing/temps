@@ -75,11 +75,11 @@ export default function ApiKeys() {
 
   // Handlers
   const handleView = (key: ApiKeyResponse) => {
-    navigate(`/keys/${key.id}`)
+    navigate(`/settings/keys/${key.id}`)
   }
 
   const handleEdit = (key: ApiKeyResponse) => {
-    navigate(`/keys/${key.id}/edit`)
+    navigate(`/settings/keys/${key.id}/edit`)
   }
 
   const handleDelete = (key: ApiKeyResponse) => {
@@ -92,11 +92,11 @@ export default function ApiKeys() {
   }
 
   const handleCreateClick = () => {
-    navigate('/keys/new')
+    navigate('/settings/keys/new')
   }
 
   // Keyboard shortcut: N to create new API key
-  useKeyboardShortcut({ key: 'n', path: '/keys/new' })
+  useKeyboardShortcut({ key: 'n', path: '/settings/keys/new' })
 
   return (
     <div className="container mx-auto py-6 space-y-6">

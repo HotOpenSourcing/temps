@@ -1,0 +1,268 @@
+export const metadata = {
+  title: 'Scale Your Application',
+  description: 'Scale your Temps deployment with replicas, vertical scaling, and performance optimization.',
+  alternates: {
+    canonical: '/docs/scaling',
+  },
+}
+
+# Scale Your Application
+
+Temps runs your application in Docker containers on your own server. Scaling means giving those containers more resources or running more of them. This guide covers when and how to scale, and what to optimize before adding hardware. {{ className: 'lead' }}
+
+---
+
+## Scaling options {{ anchor: true, id: 'overview' }}
+
+<Row>
+  <Col>
+    **Vertical scaling (bigger server)**
+    - More CPU cores and RAM
+    - Simplest change — upgrade your VPS
+    - No application changes needed
+    - Best for database-heavy workloads
+  </Col>
+  <Col>
+    **Horizontal scaling (more replicas)**
+    - Multiple container instances per environment
+    - Built-in to Temps via replica configuration
+    - Requires stateless application design
+    - Best for CPU-bound web traffic
+  </Col>
+</Row>
+
+Before scaling, check whether optimization can solve the problem for free. A slow database query or missing index can make an application feel overloaded when the server has plenty of capacity.
+
+---
+
+## When to scale {{ anchor: true, id: 'when-to-scale' }}
+
+Signs your application needs more resources:
+
+| Symptom | Likely bottleneck | First action |
+|---------|------------------|-------------|
+| Response times increasing gradually | CPU or memory pressure | Check resource usage in dashboard |
+| Occasional timeouts under load | Too few connections or CPU saturation | Add replicas or optimize queries |
+| Out-of-memory errors | Container memory limit | Increase memory limit or optimize memory usage |
+| Build times increasing | Build-time CPU/memory | Upgrade server for faster builds |
+| Database queries slow | Database, not app server | Optimize queries, add indexes, connection pooling |
+
+---
+
+## Replicas {{ anchor: true, id: 'replicas' }}
+
+Temps supports running multiple container instances (replicas) for each environment. Traffic is distributed across all healthy replicas.
+
+### Configuring replicas
+
+Set the replica count at the project or environment level:
+
+**Project-level** (applies to all environments by default):
+1. Go to your project > **Settings** > **Deployment Config**
+2. Set **Replicas** to the desired number
+
+**Environment-level** (overrides project default):
+1. Go to your project > **Environments** > select environment > **Settings**
+2. Set **Replicas** to the desired number
+
+The environment setting takes priority over the project setting.
+
+### How replicas work
+
+When you deploy with multiple replicas:
+
+1. Temps creates N containers (e.g. `myapp-1`, `myapp-2`, `myapp-3`)
+2. Each container gets its own host port
+3. All containers run the same image with the same environment variables
+4. The proxy distributes incoming requests across all healthy replicas
+5. Health checks run independently per replica
+6. If any replica fails during deployment, all replicas are cleaned up and the deployment fails
+
+### Requirements for replicas
+
+Your application must be **stateless** — it cannot rely on local files, in-memory sessions, or container-local state that is not shared:
+
+- **Sessions**: Store in Redis or a database, not in memory
+- **File uploads**: Store in S3 or blob storage, not the local filesystem
+- **Cache**: Use Redis or an external cache, not in-process memory
+- **WebSocket connections**: Each client connects to one replica — use a pub/sub system (Redis) if clients need to communicate across replicas
+
+```javascript {{ title: 'Stateless session example' }}
+import session from 'express-session';
+import RedisStore from 'connect-redis';
+import { createClient } from 'redis';
+
+const redisClient = createClient({ url: process.env.REDIS_URL });
+await redisClient.connect();
+
+app.use(session({
+  store: new RedisStore({ client: redisClient }),
+  secret: process.env.SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+}));
+```
+
+---
+
+## Resource limits {{ anchor: true, id: 'resource-limits' }}
+
+Each container runs with configurable CPU and memory limits:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| CPU request | 100m | Minimum guaranteed CPU (0.1 cores) |
+| CPU limit | 1000m | Maximum CPU (1 core) |
+| Memory request | 128Mi | Minimum guaranteed memory |
+| Memory limit | 512Mi | Maximum memory |
+
+Configure these per environment in **Environment Settings**:
+
+<Properties>
+  <Property name="cpu_limit" type="string">
+    Maximum CPU allocation. `1000m` = 1 full CPU core. `500m` = half a core.
+  </Property>
+  <Property name="memory_limit" type="string">
+    Maximum memory allocation. `512Mi` = 512 MB. `1024Mi` = 1 GB.
+  </Property>
+  <Property name="cpu_request" type="string">
+    Minimum guaranteed CPU. Used for scheduling decisions.
+  </Property>
+  <Property name="memory_request" type="string">
+    Minimum guaranteed memory.
+  </Property>
+</Properties>
+
+If your container exceeds its memory limit, Docker kills it and Temps restarts it (restart policy is `always`). If this happens repeatedly, increase the memory limit or investigate memory leaks.
+
+---
+
+## Vertical scaling {{ anchor: true, id: 'vertical-scaling' }}
+
+Upgrade your VPS to get more CPU and RAM. This gives more resources to all containers.
+
+### Steps
+
+1. **Check current usage** — Look at CPU and memory utilization in the Temps dashboard or via `htop` on the server
+2. **Upgrade the VPS** — Use your provider's upgrade option (DigitalOcean, Hetzner, Linode, AWS, etc.)
+3. **Temps continues running** — Most VPS upgrades preserve the disk. Temps and your containers restart automatically after the server reboots
+
+### Recommended server sizes
+
+| Traffic level | Server spec | Monthly cost (approx) |
+|---------------|-------------|----------------------|
+| Hobby / side project | 2 CPU, 4 GB RAM | $5-10 |
+| Small production app | 4 CPU, 8 GB RAM | $20-40 |
+| Medium traffic | 8 CPU, 16 GB RAM | $40-80 |
+| High traffic | 16+ CPU, 32+ GB RAM | $80-160+ |
+
+These are rough guidelines. Actual needs depend on your application — a database-heavy app needs more RAM; a compute-heavy app needs more CPU.
+
+---
+
+## Optimize before scaling {{ anchor: true, id: 'optimize' }}
+
+Optimization is free and often more effective than adding resources:
+
+### Database queries
+
+The most common performance bottleneck. Check for:
+
+- **N+1 queries** — Loading related data in a loop instead of a JOIN
+- **Missing indexes** — Add indexes on columns used in WHERE, JOIN, and ORDER BY clauses
+- **Expensive queries** — Use `EXPLAIN ANALYZE` to find slow queries
+- **Connection pooling** — Set appropriate pool sizes (20-50 connections per container)
+
+### Caching
+
+Add caching for data that does not change on every request:
+
+```javascript
+import { createClient } from 'redis';
+
+const redis = createClient({ url: process.env.REDIS_URL });
+
+async function getUsers() {
+  const cached = await redis.get('users');
+  if (cached) return JSON.parse(cached);
+
+  const users = await db.query('SELECT * FROM users');
+  await redis.set('users', JSON.stringify(users), { EX: 300 }); // 5 min cache
+  return users;
+}
+```
+
+### Frontend performance
+
+For static sites and SPAs deployed on Temps:
+
+- Temps already applies gzip compression, cache headers, and ETags automatically
+- Use code splitting to reduce initial bundle size
+- Lazy load routes and heavy components
+- Optimize images (use modern formats like WebP/AVIF)
+
+### Application profiling
+
+Profile your application to find hotspots before guessing:
+
+- **Node.js**: `node --inspect` or `clinic.js`
+- **Python**: `cProfile` or `py-spy`
+- **Go**: `pprof`
+- **Rust**: `flamegraph`
+
+---
+
+## Monitoring {{ anchor: true, id: 'monitoring' }}
+
+Track these metrics to know when scaling is needed:
+
+- **Response time** — Increasing trend means the server is under pressure
+- **CPU usage** — Sustained >80% means CPU-bound; add replicas or upgrade
+- **Memory usage** — Approaching the limit means containers may get killed
+- **Error rate** — Spikes correlate with resource exhaustion
+
+Temps includes built-in analytics and monitoring. For server-level metrics, use standard tools:
+
+```bash
+# Real-time resource usage
+htop
+
+# Container-level stats
+docker stats
+
+# Disk usage
+df -h
+```
+
+For application-level monitoring, add OpenTelemetry tracing — Temps injects `OTEL_*` environment variables automatically. See the [observability tutorial](/docs/add-observability) for setup instructions.
+
+---
+
+## Troubleshooting {{ anchor: true, id: 'troubleshooting' }}
+
+### Container keeps restarting
+
+The container is hitting its memory limit and being killed by Docker. Check the container logs for OOM (out of memory) errors. Increase the memory limit or fix memory leaks in your application.
+
+### Adding replicas does not help
+
+Not all performance problems are solved by more replicas:
+- **Database bottleneck** — All replicas share the same database. More replicas means more database connections but the same query performance.
+- **External API rate limits** — More replicas make more requests to external APIs. You may hit rate limits faster.
+- **Single-threaded applications** — Node.js runs on a single thread. Each replica uses one CPU core. If your server has 4 cores, 4 replicas fully utilize the CPU. Beyond that, you need a bigger server.
+
+### Deployment is slow
+
+Build time is separate from runtime performance. If builds are slow:
+- Use multi-stage Docker builds to cache dependency installation
+- Use `.dockerignore` to reduce build context size
+- Upgrade the server for faster builds (builds use half of available CPU and memory)
+
+---
+
+## What to explore next {{ anchor: true, id: 'next-steps' }}
+
+<Button href="/docs/add-observability">Add monitoring and tracing</Button>
+<Button href="/docs/ci-cd-setup">Set up CI/CD</Button>
+<Button href="/docs/analytics">Analytics</Button>
+<Button href="/docs/docker-containers">Optimize Docker builds</Button>

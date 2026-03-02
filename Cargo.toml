@@ -59,6 +59,9 @@ members = [
     "crates/temps-plugin-sdk",
     "crates/temps-external-plugins",
     "examples/example-plugin",
+    "examples/lighthouse-plugin",
+    "examples/indexnow-plugin",
+    "examples/google-indexing-plugin",
 ]
 
 [workspace.package]
@@ -241,6 +244,7 @@ clap = { version = "4.4", features = ["derive", "env"] }
 # System & Utilities
 # ============================================================================
 bytes = "1.11.1"
+libc = "0.2"
 rand = "0.8"
 sysinfo = "0.29.0"
 tempfile = "3.12.0"

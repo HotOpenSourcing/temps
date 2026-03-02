@@ -168,7 +168,7 @@ export function GitSources() {
   }, [setBreadcrumbs])
 
   // Keyboard shortcut: N to add new git provider
-  useKeyboardShortcut({ key: 'n', path: '/git-sources/add' })
+  useKeyboardShortcut({ key: 'n', path: '/git-providers/add' })
 
   usePageTitle('Git Providers')
 
@@ -187,7 +187,7 @@ export function GitSources() {
               <RefreshCw className="mr-2 h-4 w-4" />
               Refresh
             </Button>
-            <Button onClick={() => navigate('/git-sources/add')}>
+            <Button onClick={() => navigate('/git-providers/add')}>
               <Plus className="mr-2 h-4 w-4" />
               Add Git Provider
               <KbdBadge keys="N" className="ml-2" />
@@ -243,7 +243,7 @@ export function GitSources() {
                   title="No git providers found"
                   description="Get started by setting up a Git provider like GitHub or GitLab"
                 >
-                  <Button onClick={() => navigate('/git-sources/add')}>
+                  <Button onClick={() => navigate('/git-providers/add')}>
                     <Plus className="mr-2 h-4 w-4" />
                     Add Git Provider
                   </Button>

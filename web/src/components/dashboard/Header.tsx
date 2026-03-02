@@ -38,11 +38,11 @@ export function Header() {
   }
 
   const handleCreateApiKey = () => {
-    navigate('/keys/new')
+    navigate('/settings/keys/new')
   }
 
   const handleAddGitProvider = () => {
-    navigate('/git-sources/add')
+    navigate('/git-providers/add')
   }
 
   return (

@@ -105,7 +105,7 @@ export default function ApiKeyDetail() {
     },
     onSuccess: () => {
       toast.success('API key deleted successfully')
-      navigate('/keys')
+      navigate('/settings/keys')
     },
   })
 
@@ -146,7 +146,7 @@ export default function ApiKeyDetail() {
       <div className="container max-w-4xl mx-auto py-6">
         <div className="text-center py-8">
           <p>API key not found</p>
-          <Button onClick={() => navigate('/keys')} className="mt-4">
+          <Button onClick={() => navigate('/settings/keys')} className="mt-4">
             Back to API Keys
           </Button>
         </div>
@@ -159,7 +159,7 @@ export default function ApiKeyDetail() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4">
-          <Button variant="ghost" size="icon" onClick={() => navigate('/keys')}>
+          <Button variant="ghost" size="icon" onClick={() => navigate('/settings/keys')}>
             <ArrowLeft className="h-4 w-4" />
           </Button>
           <div>

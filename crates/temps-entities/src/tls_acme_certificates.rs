@@ -9,6 +9,7 @@ pub struct Model {
     pub id: i32,
     pub domain: String,
     pub certificate: String,
+    #[serde(skip_serializing)]
     pub private_key: String,
     pub expires_at: DBDateTime,
     pub issued_at: DBDateTime,

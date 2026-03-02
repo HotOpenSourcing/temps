@@ -384,10 +384,22 @@ fn create_swagger_router(plugin_manager: &PluginManager) -> anyhow::Result<Route
 
 /// Static file handler for embedded website
 async fn serve_static_file(req: Request) -> Response {
-    let path = req.uri().path();
+    let raw_path = req.uri().path();
+
+    // Never serve the SPA for /api/ paths — those should 404 if unmatched
+    // by any API router (including external plugin proxies).
+    if raw_path.starts_with("/api/") {
+        return Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"status":404,"title":"Not Found","detail":"No API route matched"}"#,
+            ))
+            .unwrap();
+    }
 
     // Remove leading slash
-    let path = path.strip_prefix('/').unwrap_or(path);
+    let path = raw_path.strip_prefix('/').unwrap_or(raw_path);
 
     // Default to index.html for directory requests or root
     let path = if path.is_empty() || path.ends_with('/') {
@@ -479,16 +491,33 @@ fn validate_geolite2_database(default_db_path: &Path) -> anyhow::Result<()> {
     ))
 }
 
+/// Parameters for starting the console API server.
+///
+/// Groups the dependencies needed by [`start_console_api`] to keep the
+/// function signature under clippy's argument limit.
+pub struct ConsoleApiParams {
+    pub db: Arc<DbConnection>,
+    pub config: Arc<ServerConfig>,
+    pub cookie_crypto: Arc<CookieCrypto>,
+    pub encryption_service: Arc<EncryptionService>,
+    pub route_table: Arc<temps_proxy::CachedPeerTable>,
+    pub queue: Arc<dyn temps_core::JobQueue>,
+    pub ready_signal: Option<tokio::sync::oneshot::Sender<()>>,
+    pub additional_templates: Vec<std::path::PathBuf>,
+}
+
 /// Initialize and start the console API server
-pub async fn start_console_api(
-    db: Arc<DbConnection>,
-    config: Arc<ServerConfig>,
-    cookie_crypto: Arc<CookieCrypto>,
-    encryption_service: Arc<EncryptionService>,
-    route_table: Arc<temps_proxy::CachedPeerTable>,
-    ready_signal: Option<tokio::sync::oneshot::Sender<()>>,
-    additional_templates: Vec<std::path::PathBuf>,
-) -> anyhow::Result<()> {
+pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
+    let ConsoleApiParams {
+        db,
+        config,
+        cookie_crypto,
+        encryption_service,
+        route_table,
+        queue,
+        ready_signal,
+        additional_templates,
+    } = params;
     // PRE-VALIDATE all plugin dependencies BEFORE initializing plugin manager
     // This ensures clear error messages if any critical resources are missing
     debug!("Pre-validating plugin dependencies...");
@@ -595,9 +624,9 @@ pub async fn start_console_api(
     let config_plugin = Box::new(ConfigPlugin::new(config.clone()));
     plugin_manager.register_plugin(config_plugin);
 
-    // 2. QueuePlugin - provides job queue services
+    // 2. QueuePlugin - registers the pre-created job queue into the service context
     debug!("Registering QueuePlugin");
-    let queue_plugin = Box::new(QueuePlugin::with_default_capacity());
+    let queue_plugin = Box::new(QueuePlugin::new(queue));
     plugin_manager.register_plugin(queue_plugin);
 
     // 2.5. LogsPlugin - provides logging services (no dependencies)
@@ -983,8 +1012,9 @@ pub async fn start_console_api(
     let app = plugin_manager
         .build_application()
         .map_err(|e| anyhow::anyhow!("Failed to build application: {}", e))?
-        .merge(create_swagger_router(&plugin_manager)?)
-        .fallback(serve_static_file);
+        .merge(create_swagger_router(&plugin_manager)?);
+
+    let app = app.fallback(serve_static_file);
 
     info!("Plugin system initialized successfully with static file serving");
 

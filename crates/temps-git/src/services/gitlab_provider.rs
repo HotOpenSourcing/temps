@@ -934,6 +934,10 @@ impl GitProviderService for GitLabProvider {
         let mut cmd = Command::new("git");
         cmd.arg("clone");
 
+        // Use -- separator to prevent user-controlled URLs from being
+        // interpreted as git options (e.g., --upload-pack=malicious)
+        cmd.arg("--");
+
         if let Some(token) = access_token {
             // For GitLab, insert token in URL
             let authenticated_url = if clone_url.starts_with("https://") {

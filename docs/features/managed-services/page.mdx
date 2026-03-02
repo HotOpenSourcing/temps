@@ -1,0 +1,530 @@
+export const metadata = {
+  title: 'Managed Services',
+  description: 'Provision and manage PostgreSQL, Redis, and S3 storage directly within Temps—no third-party services required.',
+  alternates: {
+    canonical: '/docs/managed-services',
+  },
+}
+
+export const sections = [
+  { title: 'Available Services', id: 'available-services' },
+  { title: 'PostgreSQL Database', id: 'postgresql-database' },
+  { title: 'Redis Caching', id: 'redis-caching' },
+  { title: 'S3 Object Storage', id: 's3-object-storage' },
+  { title: 'Service Management', id: 'service-management' },
+  { title: 'Security Best Practices', id: 'security-best-practices' },
+  { title: 'Pricing & Resource Limits', id: 'pricing-resource-limits' },
+  { title: 'Comparison with Other Platforms', id: 'comparison-with-other-platforms' },
+]
+
+# Managed Services
+
+Temps provides fully managed database and storage services that you can provision and link to your projects in seconds. Unlike platforms like Vercel that require external services, Temps includes everything you need. {{ className: 'lead' }}
+
+<Note>
+**Competitive Advantage**: While platforms like Vercel require third-party database providers (Vercel Postgres, Vercel KV), Temps includes managed PostgreSQL, Redis, and S3 storage out of the box—no additional accounts or billing required.
+</Note>
+
+---
+
+## Available Services {{ anchor: true, id: 'available-services' }}
+
+<Row>
+  <Col>
+    Temps offers three types of managed services that integrate seamlessly with your projects:
+
+    - **PostgreSQL** — Production-ready relational database
+    - **Redis** — High-performance caching and pub/sub
+    - **S3 Storage** — Object storage compatible with MinIO and AWS S3
+
+    All services are provisioned on your infrastructure, giving you complete control over your data.
+  </Col>
+  <Col>
+    ```bash {{ title: 'Quick provision via CLI' }}
+    # Create a PostgreSQL database
+    temps service create postgres my-db \
+      --version 16 \
+      --storage 10GB
+
+    # Create a Redis instance
+    temps service create redis my-cache \
+      --version 7 \
+      --memory 512MB
+
+    # Create S3 storage
+    temps service create s3 my-storage \
+      --size 50GB
+    ```
+  </Col>
+</Row>
+
+---
+
+## PostgreSQL Database {{ anchor: true, id: 'postgresql-database' }}
+
+### Creating a PostgreSQL Instance
+
+Provision a production-ready PostgreSQL database with automatic backups and high availability:
+
+<Row>
+  <Col>
+    **Via Dashboard:**
+    1. Navigate to **Services** → **Create Service**
+    2. Select **PostgreSQL**
+    3. Choose version (13, 14, 15, or 16)
+    4. Configure storage size and instance resources
+    5. Click **Create Database**
+
+    **Via CLI:**
+    ```bash
+    temps service create postgres production-db \
+      --version 16 \
+      --storage 20GB \
+      --memory 2GB \
+      --replicas 2
+    ```
+  </Col>
+  <Col>
+    **Configuration Options:**
+
+    | Option | Description | Default |
+    |--------|-------------|---------|
+    | `version` | PostgreSQL version (13-16) | 16 |
+    | `storage` | Disk space allocation | 10GB |
+    | `memory` | RAM allocation | 1GB |
+    | `replicas` | Number of read replicas | 1 |
+    | `backups` | Automatic daily backups | Enabled |
+  </Col>
+</Row>
+
+### Connecting to PostgreSQL
+
+Once created, Temps generates a connection string you can use in your applications:
+
+```javascript {{ title: 'Node.js/TypeScript' }}
+import { Pool } from 'pg';
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: true
+  }
+});
+
+// Query example
+const result = await pool.query('SELECT * FROM users WHERE id = $1', [userId]);
+```
+
+```python {{ title: 'Python' }}
+import psycopg2
+
+conn = psycopg2.connect(
+    os.environ['DATABASE_URL'],
+    sslmode='require'
+)
+
+cursor = conn.cursor()
+cursor.execute('SELECT * FROM users WHERE id = %s', (user_id,))
+```
+
+<Note>
+**Connection String Format**: `postgresql://username:password@host:5432/database?sslmode=require`
+
+The connection string is automatically injected as `DATABASE_URL` when you link the service to a project.
+</Note>
+
+### Linking to Projects
+
+Link your PostgreSQL database to one or more projects:
+
+<CodeGroup title="Link database to project">
+```bash {{ title: 'CLI' }}
+# Link database to project
+temps service link production-db --project my-app
+
+# Link to specific environment
+temps service link production-db \
+  --project my-app \
+  --environment production
+```
+
+```javascript {{ title: 'Access in your app' }}
+// Automatically available as environment variable
+const databaseUrl = process.env.DATABASE_URL;
+
+// Connection is injected when linked via dashboard or CLI
+const db = new Database(databaseUrl);
+```
+</CodeGroup>
+
+### Database Migrations
+
+Run migrations during deployment by configuring build hooks:
+
+```json {{ title: 'temps.json' }}
+{
+  "build": {
+    "command": "npm run build",
+    "beforeDeploy": [
+      "npm run db:migrate"
+    ]
+  }
+}
+```
+
+---
+
+## Redis Caching {{ anchor: true, id: 'redis-caching' }}
+
+### Creating a Redis Instance
+
+Provision a high-performance Redis instance for caching, sessions, or pub/sub:
+
+<Row>
+  <Col>
+    **Via Dashboard:**
+    1. Navigate to **Services** → **Create Service**
+    2. Select **Redis**
+    3. Choose version (6 or 7)
+    4. Configure memory allocation
+    5. Click **Create Cache**
+
+    **Via CLI:**
+    ```bash
+    temps service create redis session-store \
+      --version 7 \
+      --memory 1GB \
+      --persistence enabled
+    ```
+  </Col>
+  <Col>
+    **Configuration Options:**
+
+    | Option | Description | Default |
+    |--------|-------------|---------|
+    | `version` | Redis version (6-7) | 7 |
+    | `memory` | RAM allocation | 512MB |
+    | `persistence` | Enable RDB/AOF | Disabled |
+    | `eviction` | Eviction policy | allkeys-lru |
+    | `maxclients` | Max connections | 10000 |
+  </Col>
+</Row>
+
+### Connecting to Redis
+
+```javascript {{ title: 'Node.js with ioredis' }}
+import Redis from 'ioredis';
+
+const redis = new Redis(process.env.REDIS_URL);
+
+// Set a value
+await redis.set('session:123', JSON.stringify(sessionData), 'EX', 3600);
+
+// Get a value
+const data = await redis.get('session:123');
+```
+
+```python {{ title: 'Python with redis-py' }}
+import redis
+import os
+
+r = redis.from_url(os.environ['REDIS_URL'])
+
+# Set with expiration
+r.setex('session:123', 3600, json.dumps(session_data))
+
+# Get value
+data = r.get('session:123')
+```
+
+<Note>
+**Connection String Format**: `redis://username:password@host:6379/0`
+
+When linked to a project, Redis connection details are available as `REDIS_URL`, `REDIS_HOST`, `REDIS_PORT`, and `REDIS_PASSWORD`.
+</Note>
+
+### Common Use Cases
+
+<Properties>
+  <Property name="Session Storage">
+    Store user sessions with automatic expiration:
+    ```javascript
+    await redis.set(`session:${userId}`, sessionData, 'EX', 86400); // 24 hours
+    ```
+  </Property>
+  <Property name="Rate Limiting">
+    Implement rate limiting with Redis counters:
+    ```javascript
+    const count = await redis.incr(`rate:${ipAddress}`);
+    if (count === 1) await redis.expire(`rate:${ipAddress}`, 60); // 60 seconds
+    if (count > 100) throw new Error('Rate limit exceeded');
+    ```
+  </Property>
+  <Property name="Caching">
+    Cache expensive queries or API responses:
+    ```javascript
+    const cached = await redis.get(`cache:${key}`);
+    if (cached) return JSON.parse(cached);
+
+    const data = await fetchExpensiveData();
+    await redis.set(`cache:${key}`, JSON.stringify(data), 'EX', 300); // 5 minutes
+    ```
+  </Property>
+  <Property name="Pub/Sub">
+    Real-time messaging between services:
+    ```javascript
+    // Publisher
+    await redis.publish('notifications', JSON.stringify(message));
+
+    // Subscriber
+    redis.subscribe('notifications', (message) => {
+      console.log('Received:', JSON.parse(message));
+    });
+    ```
+  </Property>
+</Properties>
+
+---
+
+## S3 Object Storage {{ anchor: true, id: 's3-object-storage' }}
+
+### Creating S3 Storage
+
+Provision MinIO-compatible object storage for files, backups, and assets:
+
+<Row>
+  <Col>
+    **Via Dashboard:**
+    1. Navigate to **Services** → **Create Service**
+    2. Select **S3 Storage**
+    3. Configure storage size
+    4. Set bucket policy (private/public)
+    5. Click **Create Storage**
+
+    **Via CLI:**
+    ```bash
+    temps service create s3 media-storage \
+      --size 100GB \
+      --public-read false
+    ```
+  </Col>
+  <Col>
+    **Configuration Options:**
+
+    | Option | Description | Default |
+    |--------|-------------|---------|
+    | `size` | Storage allocation | 50GB |
+    | `public-read` | Public read access | false |
+    | `versioning` | Object versioning | Disabled |
+    | `lifecycle` | Auto-delete rules | None |
+  </Col>
+</Row>
+
+### Connecting to S3
+
+Temps S3 is compatible with AWS S3 SDKs:
+
+```javascript {{ title: 'Node.js with AWS SDK v3' }}
+import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+
+const s3 = new S3Client({
+  endpoint: process.env.S3_ENDPOINT,
+  region: 'us-east-1',
+  credentials: {
+    accessKeyId: process.env.S3_ACCESS_KEY,
+    secretAccessKey: process.env.S3_SECRET_KEY,
+  },
+});
+
+// Upload a file
+await s3.send(new PutObjectCommand({
+  Bucket: 'media-storage',
+  Key: 'uploads/image.jpg',
+  Body: fileBuffer,
+  ContentType: 'image/jpeg',
+}));
+
+// Download a file
+const response = await s3.send(new GetObjectCommand({
+  Bucket: 'media-storage',
+  Key: 'uploads/image.jpg',
+}));
+```
+
+```python {{ title: 'Python with boto3' }}
+import boto3
+import os
+
+s3 = boto3.client(
+    's3',
+    endpoint_url=os.environ['S3_ENDPOINT'],
+    aws_access_key_id=os.environ['S3_ACCESS_KEY'],
+    aws_secret_access_key=os.environ['S3_SECRET_KEY'],
+)
+
+# Upload file
+s3.upload_file('local-file.jpg', 'media-storage', 'uploads/image.jpg')
+
+# Download file
+s3.download_file('media-storage', 'uploads/image.jpg', 'downloaded.jpg')
+```
+
+### Public URLs
+
+Generate pre-signed URLs for temporary access:
+
+
+```javascript
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+
+const command = new GetObjectCommand({
+  Bucket: 'media-storage',
+  Key: 'uploads/private-document.pdf',
+});
+
+// URL expires in 1 hour
+const url = await getSignedUrl(s3, command, { expiresIn: 3600 });
+```
+
+---
+
+## Service Management {{ anchor: true, id: 'service-management' }}
+
+### Monitoring Service Health
+
+<Row>
+  <Col>
+    View service metrics and health status in the dashboard:
+
+    - **CPU & Memory Usage**: Real-time resource consumption
+    - **Connection Count**: Active database/cache connections
+    - **Storage Usage**: Disk space utilization
+    - **Uptime**: Service availability percentage
+    - **Query Performance**: Slow query detection (PostgreSQL)
+  </Col>
+  <Col>
+    ```bash {{ title: 'CLI monitoring' }}
+    # View service status
+    temps service status production-db
+
+    # View service logs
+    temps service logs production-db --tail 100
+
+    # View connection count
+    temps service stats production-db
+    ```
+  </Col>
+</Row>
+
+### Backups
+
+All services include automatic daily backups retained for 7 days (configurable up to 90 days):
+
+
+```bash {{ title: 'Backup management' }}
+# List backups
+temps service backup list production-db
+
+# Create manual backup
+temps service backup create production-db --name "pre-migration"
+
+# Restore from backup
+temps service restore production-db --backup backup-20240115-120000
+
+# Download backup
+temps service backup download production-db \
+  --backup backup-20240115-120000 \
+  --output backup.sql.gz
+```
+
+### Scaling Services
+
+Scale your services as your needs grow:
+
+
+```bash {{ title: 'Scale services' }}
+# Scale PostgreSQL storage
+temps service scale production-db --storage 50GB
+
+# Scale Redis memory
+temps service scale session-store --memory 2GB
+
+# Add read replicas
+temps service scale production-db --replicas 3
+```
+
+<Note>
+Scaling operations are performed with zero downtime. Your applications remain connected during the scaling process.
+</Note>
+
+---
+
+## Security Best Practices {{ anchor: true, id: 'security-best-practices' }}
+
+<Properties>
+  <Property name="Connection Security">
+    - Always use SSL/TLS connections (`sslmode=require` for PostgreSQL)
+    - Store credentials in environment variables, never in code
+    - Use the Temps-provided connection strings (automatically secured)
+  </Property>
+  <Property name="Network Access">
+    - Services are only accessible from projects within your Temps instance
+    - Configure IP allowlists for external access if needed
+    - Use private networking for service-to-service communication
+  </Property>
+  <Property name="Credential Rotation">
+    ```bash
+    # Rotate database password
+    temps service rotate-password production-db
+
+    # Rotate S3 access keys
+    temps service rotate-keys media-storage
+    ```
+    Connection strings are automatically updated in linked projects.
+  </Property>
+  <Property name="Audit Logging">
+    All service access is logged for security auditing:
+    - Connection attempts (successful/failed)
+    - Query execution (optional for PostgreSQL)
+    - Object access (S3 operations)
+    - Configuration changes
+  </Property>
+</Properties>
+
+---
+
+## Pricing & Resource Limits {{ anchor: true, id: 'pricing-resource-limits' }}
+
+<Note>
+**Self-Hosted Advantage**: Since Temps is self-hosted, managed services run on your infrastructure. There are no per-GB storage charges, no connection limits, and no metered bandwidth fees like other platforms.
+</Note>
+
+**Recommended Resource Allocation:**
+
+| Use Case | PostgreSQL | Redis | S3 Storage |
+|----------|-----------|-------|------------|
+| **Small Project** | 1GB RAM, 10GB storage | 256MB | 10GB |
+| **Medium Project** | 2GB RAM, 50GB storage | 1GB | 100GB |
+| **Large Project** | 4GB+ RAM, 200GB+ storage | 4GB+ | 500GB+ |
+
+---
+
+## Comparison with Other Platforms {{ anchor: true, id: 'comparison-with-other-platforms' }}
+
+| Feature | Temps | Vercel | Netlify | Railway |
+|---------|-------|--------|---------|---------|
+| **PostgreSQL** | ✅ Built-in | ⚠️ Vercel Postgres (extra) | ❌ External only | ✅ Built-in |
+| **Redis** | ✅ Built-in | ⚠️ Vercel KV (extra) | ❌ External only | ✅ Built-in |
+| **S3 Storage** | ✅ MinIO-compatible | ⚠️ Vercel Blob (extra) | ❌ External only | ❌ External only |
+| **Connection Limits** | ❌ No limits | ✅ Metered/capped | ✅ Metered/capped | ⚠️ Plan-based |
+| **Storage Cost** | ❌ Your infrastructure | ✅ $0.15/GB/month | ✅ $0.10/GB/month | ✅ Pay per GB |
+| **Backups** | ✅ Automatic | ⚠️ Enterprise only | ⚠️ Add-on | ✅ Automatic |
+
+---
+
+## Next Steps
+
+- [Configure Environment Variables](/docs/environment-variables) to inject service credentials
+- [Set up Resource Limits](/docs/resources) to allocate CPU and memory
+- [Enable Monitoring](/docs/monitoring) to track service health
+- [Configure Backups](/docs/backups) to customize backup retention

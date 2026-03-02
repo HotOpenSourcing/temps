@@ -1,0 +1,479 @@
+export const metadata = {
+  title: 'Add Observability',
+  description:
+    'Add analytics, error tracking, session replay, and performance monitoring to your Temps application. Replace Plausible, Sentry, and FullStory with a single self-hosted stack.',
+  alternates: {
+    canonical: '/docs/add-observability',
+  },
+}
+
+export const sections = [
+  { title: 'What you will build', id: 'what-you-will-build' },
+  { title: 'Prerequisites', id: 'prerequisites' },
+  { title: 'Install the React SDK', id: 'install-the-react-sdk' },
+  { title: 'Enable automatic page views', id: 'enable-automatic-page-views' },
+  { title: 'Track a custom event', id: 'track-a-custom-event' },
+  { title: 'Enable error tracking', id: 'enable-error-tracking' },
+  { title: 'Enable session replay', id: 'enable-session-replay' },
+  { title: 'Check your Web Vitals', id: 'check-your-web-vitals' },
+  { title: 'What you have accomplished', id: 'what-you-have-accomplished' },
+]
+
+# Add Observability
+
+This tutorial adds analytics, error tracking, session replay, and performance monitoring to an application deployed on Temps. You will go from zero observability to a full stack that replaces Plausible, Sentry, and FullStory — all running on your own infrastructure. {{ className: 'lead' }}
+
+---
+
+## What you will build {{ anchor: true, id: 'what-you-will-build' }}
+
+By the end of this tutorial, your application will:
+
+- Track page views and unique visitors automatically
+- Record custom events (button clicks, form submissions, etc.)
+- Capture JavaScript errors with full stack traces (Sentry-compatible)
+- Record user sessions for visual replay
+- Collect Core Web Vitals (LCP, FID, CLS, TTFB, FCP, INP)
+
+All data stays on your server. There are no third-party services, no usage limits, and no monthly fees.
+
+**Time required:** approximately 10 minutes.
+
+---
+
+## Prerequisites {{ anchor: true, id: 'prerequisites' }}
+
+You need:
+
+- A **deployed application on Temps** (if you have not deployed yet, complete [Your First Deployment](/docs/your-first-deployment) first)
+- A **React or Next.js application** — this tutorial uses the React SDK. If your app uses a different framework, see [Analytics & Observability](/docs/analytics) for vanilla JS instructions.
+- **Access to your codebase** — you will add a package and modify a few files
+
+---
+
+## Install the React SDK {{ anchor: true, id: 'install-the-react-sdk' }}
+
+In your project directory, install the Temps analytics SDK:
+
+<CodeGroup>
+
+```bash {{ title: 'npm' }}
+npm install @temps-sdk/react-analytics
+```
+
+```bash {{ title: 'yarn' }}
+yarn add @temps-sdk/react-analytics
+```
+
+```bash {{ title: 'pnpm' }}
+pnpm add @temps-sdk/react-analytics
+```
+
+```bash {{ title: 'bun' }}
+bun add @temps-sdk/react-analytics
+```
+
+</CodeGroup>
+
+This package provides the `TempsAnalyticsProvider` component and hooks for tracking events, page views, and user identification.
+
+---
+
+## Enable automatic page views {{ anchor: true, id: 'enable-automatic-page-views' }}
+
+Wrap your application with `TempsAnalyticsProvider`. This is the only setup required for automatic page view tracking.
+
+<CodeGroup title="Add the provider">
+
+```typescript {{ title: 'Next.js App Router (app/layout.tsx)' }}
+import { TempsAnalyticsProvider } from '@temps-sdk/react-analytics';
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en">
+      <body>
+        <TempsAnalyticsProvider basePath="/api/_temps">
+          {children}
+        </TempsAnalyticsProvider>
+      </body>
+    </html>
+  );
+}
+```
+
+```typescript {{ title: 'Next.js Pages Router (pages/_app.tsx)' }}
+import { TempsAnalyticsProvider } from '@temps-sdk/react-analytics';
+import type { AppProps } from 'next/app';
+
+export default function App({ Component, pageProps }: AppProps) {
+  return (
+    <TempsAnalyticsProvider basePath="/api/_temps">
+      <Component {...pageProps} />
+    </TempsAnalyticsProvider>
+  );
+}
+```
+
+```typescript {{ title: 'Vite / Create React App (src/main.tsx)' }}
+import { TempsAnalyticsProvider } from '@temps-sdk/react-analytics';
+import { createRoot } from 'react-dom/client';
+import App from './App';
+
+createRoot(document.getElementById('root')!).render(
+  <TempsAnalyticsProvider domain="your-app.yourdomain.com">
+    <App />
+  </TempsAnalyticsProvider>
+);
+```
+
+</CodeGroup>
+
+<Note>
+**How the `basePath` works:** When your app is deployed on Temps, the proxy automatically handles analytics requests at `/api/_temps`. This means analytics data is sent through your own domain — no third-party requests, no CORS issues, no ad-blocker interference.
+
+For apps not hosted on Temps (or running locally), use the `domain` prop instead to point at your Temps instance directly.
+</Note>
+
+### Deploy and verify
+
+Commit your changes, push to your repository, and let Temps deploy:
+
+```bash
+git add .
+git commit -m "feat: add Temps analytics"
+git push
+```
+
+After the deployment completes, visit your application and navigate through a few pages. Then open the Temps dashboard:
+
+1. Go to your project
+2. Click **Analytics** in the sidebar
+3. Select the **Overview** tab
+
+You should see your page views appearing within seconds. The Analytics section also includes:
+
+- **Visitors** — unique visitor details with session history
+- **Pages** — top pages ranked by views
+- **Live** — real-time visitor activity
+- **Globe** — geographic distribution of visitors
+- **Journey** — page-to-page navigation flow
+
+---
+
+## Track a custom event {{ anchor: true, id: 'track-a-custom-event' }}
+
+Page views are tracked automatically. To track specific user actions like button clicks, form submissions, or feature usage, use the `useAnalytics` hook.
+
+Add event tracking to any component:
+
+```typescript {{ title: 'components/SignupButton.tsx' }}
+import { useAnalytics } from '@temps-sdk/react-analytics';
+
+export function SignupButton() {
+  const { track } = useAnalytics();
+
+  const handleClick = () => {
+    track('signup_started', {
+      source: 'hero',
+      plan: 'pro',
+    });
+
+    // Your signup logic here
+  };
+
+  return <button onClick={handleClick}>Start Free Trial</button>;
+}
+```
+
+The first argument is the event name (a string you define). The second argument is an optional properties object — use it to attach metadata like which button was clicked, what page the user was on, or which plan they selected.
+
+### Declarative tracking (no code required)
+
+For simple click tracking, you can use data attributes instead of writing JavaScript:
+
+```html
+<button data-temps-event="cta_click" data-temps-location="hero">
+  Get Started
+</button>
+
+<a href="/pricing" data-temps-event="link_click" data-temps-destination="pricing">
+  View Pricing
+</a>
+```
+
+Any element with a `data-temps-event` attribute will automatically fire a tracking event when clicked.
+
+### Deploy and verify
+
+Push your changes and deploy. After clicking the tracked element in your app, go to the **Analytics > Overview** tab in the dashboard. Your custom events will appear in the events breakdown.
+
+---
+
+## Enable error tracking {{ anchor: true, id: 'enable-error-tracking' }}
+
+Temps includes a Sentry-compatible error tracking system. Errors from your application are captured automatically and grouped by type with full stack traces.
+
+### Step 1: Get your DSN
+
+Each project has a unique DSN (Data Source Name) that identifies where to send errors:
+
+1. Open your project in the Temps dashboard
+2. Click **Error Tracking** in the sidebar
+3. Click the **DSN & Setup** tab
+4. Copy the DSN string (it looks like `https://key@your-temps-server/project-id`)
+
+### Step 2: Install the Node SDK
+
+The error tracking client is included in the Node SDK:
+
+<CodeGroup>
+
+```bash {{ title: 'npm' }}
+npm install @temps-sdk/node-sdk
+```
+
+```bash {{ title: 'bun' }}
+bun add @temps-sdk/node-sdk
+```
+
+</CodeGroup>
+
+### Step 3: Initialize error tracking
+
+Create an instrumentation file that runs before your application starts:
+
+<CodeGroup title="Set up error tracking">
+
+```typescript {{ title: 'Next.js (instrumentation.ts)' }}
+// instrumentation.ts (in your project root)
+import * as Sentry from '@temps-sdk/node-sdk';
+
+export function register() {
+  Sentry.init({
+    dsn: process.env.TEMPS_ERROR_DSN,
+    tracesSampleRate: 1.0,
+  });
+}
+```
+
+```typescript {{ title: 'Node.js / Express' }}
+// At the very top of your entry file (index.ts / server.ts)
+import * as Sentry from '@temps-sdk/node-sdk';
+
+Sentry.init({
+  dsn: process.env.TEMPS_ERROR_DSN,
+  tracesSampleRate: 1.0,
+});
+
+// Your app code follows...
+import express from 'express';
+const app = express();
+```
+
+</CodeGroup>
+
+### Step 4: Add the DSN as an environment variable
+
+In the Temps dashboard:
+
+1. Go to your project
+2. Click **Environment Variables** in the sidebar
+3. Add a new variable:
+   - **Key:** `TEMPS_ERROR_DSN`
+   - **Value:** the DSN you copied in Step 1
+4. Select the environments to apply it to (e.g. production)
+
+Alternatively, use the CLI:
+
+```bash
+bunx @temps-sdk/cli environments vars set TEMPS_ERROR_DSN "your-dsn-here" \
+  --project my-app \
+  --environments production
+```
+
+### Step 5: Test it
+
+Deploy your changes, then trigger a test error in your application. The simplest way is to add a temporary button:
+
+```typescript
+function TestErrorButton() {
+  return (
+    <button onClick={() => { throw new Error('Test error from Temps tutorial'); }}>
+      Trigger Test Error
+    </button>
+  );
+}
+```
+
+After clicking the button, go to **Error Tracking** in the sidebar. Within a few seconds, you should see the error appear with:
+
+- The error message and type
+- A full stack trace
+- The browser and OS that triggered it
+- A timestamp and occurrence count
+
+Remove the test button after verifying.
+
+<Note>
+**Sentry compatibility:** The Temps error tracking client uses the same API as Sentry. If you are already using `@sentry/node` or `@sentry/nextjs`, you can switch by changing the import and the DSN. Your existing `Sentry.captureException()` calls will continue to work.
+</Note>
+
+---
+
+## Enable session replay {{ anchor: true, id: 'enable-session-replay' }}
+
+Session replay records user interactions as DOM snapshots, so you can watch exactly what a user did — clicks, scrolls, navigation, and errors. This replaces tools like FullStory or Hotjar.
+
+Add `enableSessionRecording` to your analytics provider:
+
+```typescript {{ title: 'app/layout.tsx (updated)' }}
+import { TempsAnalyticsProvider } from '@temps-sdk/react-analytics';
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en">
+      <body>
+        <TempsAnalyticsProvider
+          basePath="/api/_temps"
+          enableSessionRecording={true}
+          sessionRecordingConfig={{
+            sessionSampleRate: 0.1, // Record 10% of sessions
+            maskAllInputs: false,
+            blockClass: 'sensitive-data',
+          }}
+        >
+          {children}
+        </TempsAnalyticsProvider>
+      </body>
+    </html>
+  );
+}
+```
+
+### Configuration options
+
+<Properties>
+  <Property name="sessionSampleRate">
+    A number between 0 and 1. `0.1` means 10% of sessions are recorded. Use `1.0` for development, `0.05`–`0.2` for production. Default: `0.1`.
+  </Property>
+  <Property name="maskAllInputs">
+    When `true`, all form inputs are replaced with asterisks in the recording. Password fields are always masked regardless of this setting. Default: `false`.
+  </Property>
+  <Property name="blockClass">
+    Any element with this CSS class will be hidden in recordings. Use it for sensitive content like account numbers or personal data.
+  </Property>
+</Properties>
+
+### Deploy and verify
+
+Push your changes and deploy. Browse your application for a minute or two. Then:
+
+1. Go to your project in the dashboard
+2. Click **Analytics** in the sidebar
+3. Select the **Replays** tab
+
+You will see recorded sessions listed with their duration, page count, and start time. Click on a session to open the replay player, which includes:
+
+- Playback controls (play, pause, speed)
+- A timeline scrubber with event markers
+- Click and scroll visualizations
+- Console log panel
+- Device viewport emulation
+
+<Note>
+**Privacy:** Password inputs are always masked. Session recordings are stored on your server and are never sent to third parties. Use `blockClass` and `maskAllInputs` to control what is captured. See [Privacy & Compliance](/docs/analytics#privacy) for GDPR configuration.
+</Note>
+
+---
+
+## Check your Web Vitals {{ anchor: true, id: 'check-your-web-vitals' }}
+
+Core Web Vitals measure your application's real-world performance as experienced by users. Temps tracks all six metrics:
+
+| Metric | Measures | Target |
+|--------|----------|--------|
+| **LCP** (Largest Contentful Paint) | Loading performance | < 2.5s |
+| **FID** (First Input Delay) | Interactivity | < 100ms |
+| **CLS** (Cumulative Layout Shift) | Visual stability | < 0.1 |
+| **FCP** (First Contentful Paint) | First render | < 1.8s |
+| **TTFB** (Time to First Byte) | Server response | < 600ms |
+| **INP** (Interaction to Next Paint) | Responsiveness | < 200ms |
+
+Enable Web Vitals collection by adding `autoTrackSpeedAnalytics` to your provider:
+
+```typescript {{ title: 'app/layout.tsx (final version)' }}
+import { TempsAnalyticsProvider } from '@temps-sdk/react-analytics';
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en">
+      <body>
+        <TempsAnalyticsProvider
+          basePath="/api/_temps"
+          autoTrackSpeedAnalytics={true}
+          enableSessionRecording={true}
+          sessionRecordingConfig={{
+            sessionSampleRate: 0.1,
+          }}
+        >
+          {children}
+        </TempsAnalyticsProvider>
+      </body>
+    </html>
+  );
+}
+```
+
+After deploying, view your performance data at **Analytics > Speed Insights** in the sidebar. The dashboard shows:
+
+- Percentile distributions (P50, P75, P95, P99) for each metric
+- Historical trends over time
+- Breakdown by page, device type, and browser
+- Color-coded scoring (green = good, orange = needs improvement, red = poor)
+
+---
+
+## What you have accomplished {{ anchor: true, id: 'what-you-have-accomplished' }}
+
+Your application now has a complete observability stack:
+
+| Feature | Replaces | Status |
+|---------|----------|--------|
+| Page view analytics | Plausible / Google Analytics | Active |
+| Custom event tracking | Mixpanel / Amplitude | Active |
+| Error tracking with stack traces | Sentry | Active |
+| Session replay | FullStory / Hotjar | Active |
+| Core Web Vitals monitoring | PageSpeed Insights | Active |
+
+All of this runs on your own infrastructure with no usage limits and no monthly fees.
+
+---
+
+## What to explore next
+
+<div className="not-prose">
+  <Button href="/docs/set-up-backups-and-monitoring" variant="text" arrow="right">
+    Set up automated backups and uptime monitoring
+  </Button>
+  <Button href="/docs/analytics#funnel-analysis" variant="text" arrow="right">
+    Create conversion funnels to track user journeys
+  </Button>
+  <Button href="/docs/analytics#enrich-visitors" variant="text" arrow="right">
+    Enrich visitor data from your backend
+  </Button>
+  <Button href="/docs/deployments" variant="text" arrow="right">
+    Understand how the deployment pipeline works
+  </Button>
+</div>

@@ -1,0 +1,166 @@
+export const metadata = {
+  title: 'Domains & SSL',
+  description:
+    'How Temps assigns subdomains, provisions SSL certificates via Let\'s Encrypt, and routes traffic through the Pingora reverse proxy.',
+  alternates: {
+    canonical: '/docs/domains-ssl',
+  },
+}
+
+export const sections = [
+  { title: 'How domain routing works', id: 'how-domain-routing-works' },
+  { title: 'Auto-assigned subdomains', id: 'auto-assigned-subdomains' },
+  { title: 'Custom domains', id: 'custom-domains' },
+  { title: 'SSL certificate lifecycle', id: 'ssl-certificate-lifecycle' },
+  { title: 'DNS providers', id: 'dns-providers' },
+  { title: 'The reverse proxy', id: 'the-reverse-proxy' },
+]
+
+# Domains & SSL
+
+Every application deployed on Temps gets a URL with automatic HTTPS. This page explains how Temps assigns domains, provisions SSL certificates, and routes traffic from the internet to the correct container. {{ className: 'lead' }}
+
+---
+
+## How domain routing works {{ anchor: true, id: 'how-domain-routing-works' }}
+
+When a request arrives at your server, Temps' reverse proxy (built on Pingora) examines the `Host` header and routes the request to the correct container:
+
+```
+User's browser
+  → DNS resolves to your server IP
+    → Pingora proxy (ports 80/443)
+      → TLS termination (presents the correct certificate)
+        → Routes to the container matching the hostname
+```
+
+Each environment has one or more domain entries in the `environment_domains` table. The proxy uses this table to determine which container should handle each request.
+
+---
+
+## Auto-assigned subdomains {{ anchor: true, id: 'auto-assigned-subdomains' }}
+
+When you create a project, Temps automatically assigns a subdomain:
+
+```
+{project-slug}.{your-base-domain}
+```
+
+For example, if your Temps instance is at `yourdomain.com` and you create a project called "My App":
+
+| Environment | URL |
+|-------------|-----|
+| Production | `my-app.yourdomain.com` |
+| Staging | `my-app-staging.yourdomain.com` |
+| Preview (feature/login branch) | `my-app-feature-login.yourdomain.com` |
+
+Individual deployments also get unique URLs:
+
+```
+{deployment-slug}.{your-base-domain}
+```
+
+This lets you share a link to a specific deployment for review, even after a newer deployment has replaced it.
+
+### How subdomains work
+
+During installation, you configure a base domain and a wildcard DNS record:
+
+```
+*.yourdomain.com  →  A  →  YOUR_SERVER_IP
+```
+
+This single wildcard record routes all subdomains to your server, where Pingora resolves them to the correct container. You do not need to add a new DNS record for each project.
+
+---
+
+## Custom domains {{ anchor: true, id: 'custom-domains' }}
+
+In addition to the auto-assigned subdomain, you can add custom domains to any environment:
+
+- `app.yourdomain.com` → routes to production environment
+- `staging.yourdomain.com` → routes to staging environment
+- `yourdomain.com` → routes to production (root domain)
+
+Custom domains require:
+
+1. A DNS A record pointing to your server's IP address
+2. SSL certificate provisioning (automatic via Let's Encrypt)
+
+A single environment can have multiple custom domains. For example, both `app.example.com` and `www.example.com` can point to the same production environment.
+
+---
+
+## SSL certificate lifecycle {{ anchor: true, id: 'ssl-certificate-lifecycle' }}
+
+Temps provisions SSL certificates from Let's Encrypt automatically. The lifecycle:
+
+### Provisioning
+
+When you add a domain, Temps starts the ACME (Automated Certificate Management Environment) flow:
+
+1. Temps requests a certificate from Let's Encrypt
+2. Let's Encrypt issues a challenge to verify domain ownership
+3. Temps responds to the challenge (HTTP-01 or DNS-01)
+4. Let's Encrypt issues the certificate
+5. The certificate is stored and loaded into the proxy
+
+### Challenge types
+
+| Challenge | How it works | When to use |
+|-----------|-------------|-------------|
+| **HTTP-01** | Let's Encrypt makes an HTTP request to `/.well-known/acme-challenge/{token}` on your domain (port 80). Temps responds automatically. | Standard domains. Requires port 80 to be open. |
+| **DNS-01** | Let's Encrypt checks for a specific TXT record in your domain's DNS. Temps creates and removes this record via the DNS provider API. | Wildcard domains (`*.example.com`). Requires a DNS provider configured in Temps. |
+
+HTTP-01 is the default and works for most cases. DNS-01 is required for wildcard certificates because Let's Encrypt cannot verify wildcard domains via HTTP.
+
+### Renewal
+
+Certificates are valid for 90 days. Temps renews them automatically before expiration. You receive a notification 30 days before expiration as an extra safeguard.
+
+If renewal fails (port 80 blocked, DNS credentials expired), the certificate eventually expires and browsers show a security warning. Temps sends escalating notifications to prompt you to fix the issue.
+
+### Validation
+
+When verifying DNS challenges, Temps uses Cloudflare's public DNS (1.1.1.1) as the resolver. This ensures consistent DNS resolution regardless of your server's local DNS configuration.
+
+---
+
+## DNS providers {{ anchor: true, id: 'dns-providers' }}
+
+For DNS-01 challenges and wildcard certificates, Temps needs API access to your DNS provider. Supported providers:
+
+| Provider | What you need |
+|----------|--------------|
+| **Cloudflare** | API token with Zone:DNS:Edit permission |
+| **AWS Route 53** | Access key with Route 53 permissions |
+| **DigitalOcean** | API token |
+| **Azure DNS** | Service principal credentials |
+| **Google Cloud DNS** | Service account key |
+
+Configure DNS providers in **Settings > DNS Providers**. Once configured, Temps can automatically create and remove TXT records for certificate validation.
+
+---
+
+## The reverse proxy {{ anchor: true, id: 'the-reverse-proxy' }}
+
+Temps uses [Pingora](https://github.com/cloudflare/pingora) (created by Cloudflare) as its reverse proxy. Pingora is a Rust-based proxy framework optimized for high-throughput, low-latency HTTP traffic.
+
+The proxy handles:
+
+- **TLS termination** — Decrypts HTTPS traffic and presents the correct certificate based on the SNI (Server Name Indication) header
+- **Request routing** — Maps the `Host` header to the correct container
+- **Load balancing** — Distributes requests across replicas when multiple containers run for the same environment
+- **HTTP/2 and WebSocket support** — Passes through long-lived connections for real-time features
+
+The proxy runs as a separate process (`temps proxy`) managed by systemd. It operates independently from the API server, so the dashboard can be restarted without affecting live traffic to deployed applications.
+
+### Port allocation
+
+| Port | Purpose |
+|------|---------|
+| 80 | HTTP (redirects to HTTPS, handles ACME challenges) |
+| 443 | HTTPS (TLS-terminated traffic to applications) |
+| 3000 (default) | Temps dashboard and API |
+
+The dashboard port is configurable via the `TEMPS_ADDRESS` environment variable.

@@ -1,0 +1,200 @@
+export const metadata = {
+  title: 'Manage Environment Variables',
+  description:
+    'Add, update, and scope environment variables to specific environments. Control which variables are available in preview deployments.',
+  alternates: {
+    canonical: '/docs/manage-environment-variables',
+  },
+}
+
+export const sections = [
+  { title: 'Add a variable', id: 'add-a-variable' },
+  { title: 'Scope variables to environments', id: 'scope-variables-to-environments' },
+  { title: 'Preview environment controls', id: 'preview-environment-controls' },
+  { title: 'Auto-injected variables', id: 'auto-injected-variables' },
+  { title: 'Use the API', id: 'use-the-api' },
+  { title: 'Variable interpolation', id: 'variable-interpolation' },
+]
+
+# Manage Environment Variables
+
+Environment variables let you pass configuration to your application without hardcoding values. Temps lets you scope variables to specific environments, control their visibility in previews, and automatically injects variables for linked services. {{ className: 'lead' }}
+
+---
+
+## Add a variable {{ anchor: true, id: 'add-a-variable' }}
+
+1. Open your project in the dashboard
+2. Click **Environment Variables** in the sidebar
+3. Click **Add Variable**
+4. Enter the key and value
+5. Select which environments this variable applies to (e.g. production, staging, or all)
+6. Click **Save**
+
+The variable takes effect on the next deployment. Existing running containers are not updated — you need to redeploy for changes to take effect.
+
+<Note>
+**Sensitive values:** Environment variables are stored in the database. For secrets like API keys and database passwords, use Temps' managed services where possible — they handle credential generation and injection automatically. For other secrets, consider that anyone with dashboard access to your project can view these values.
+</Note>
+
+---
+
+## Scope variables to environments {{ anchor: true, id: 'scope-variables-to-environments' }}
+
+Each variable can be assigned to one or more environments. This is how you use different configurations across production, staging, and development.
+
+Common pattern:
+
+| Key | Production | Staging |
+|-----|-----------|---------|
+| `API_URL` | `https://api.yourapp.com` | `https://api-staging.yourapp.com` |
+| `LOG_LEVEL` | `warn` | `debug` |
+| `ENABLE_DEBUG` | (not set) | `true` |
+
+To set a variable for a specific environment:
+
+1. When adding or editing a variable, select only the environments you want it applied to
+2. Create separate variables with the same key but different values for different environments
+
+If the same key exists for multiple environments, each environment gets its own value. There is no inheritance — a variable scoped to production does not automatically appear in staging.
+
+---
+
+## Preview environment controls {{ anchor: true, id: 'preview-environment-controls' }}
+
+Each variable has an **Include in Preview** toggle. When disabled, the variable is not injected into preview environments.
+
+Use this to:
+
+- Keep production API keys out of preview branches
+- Exclude payment processor credentials from temporary environments
+- Control feature flags per environment type
+
+To change this setting:
+
+1. Go to **Environment Variables** in your project
+2. Find the variable you want to adjust
+3. Toggle **Include in Preview** on or off
+
+Variables from linked managed services (like `POSTGRES_URL`) are always included in all environments, including previews. Each preview gets its own isolated database.
+
+---
+
+## Auto-injected variables {{ anchor: true, id: 'auto-injected-variables' }}
+
+Temps automatically injects several variables at deploy time. You do not need to set these manually.
+
+### Always injected
+
+| Variable | Value | Description |
+|----------|-------|-------------|
+| `HOST` | `0.0.0.0` | Bind address for the application |
+| `PORT` | Detected from Dockerfile/config or `3000` | The port your application should listen on |
+| `TEMPS_API_URL` | `https://your-temps-instance/api` | Temps API endpoint (for SDK callbacks) |
+| `TEMPS_API_TOKEN` | Auto-generated | A per-environment deployment token for API access |
+
+### When managed services are linked
+
+| Variable | Source |
+|----------|--------|
+| `POSTGRES_URL`, `POSTGRES_HOST`, etc. | Linked PostgreSQL service |
+| `REDIS_URL`, `REDIS_HOST`, etc. | Linked Redis service |
+| `MONGODB_URL`, `MONGODB_HOST`, etc. | Linked MongoDB service |
+| `S3_BUCKET`, `S3_ENDPOINT`, etc. | Linked S3/RustFS service |
+
+See [Deploy with a Database](/docs/deploy-with-database#understand-the-injected-environment-variables) for the full list.
+
+### When error tracking is configured
+
+| Variable | Value |
+|----------|-------|
+| `SENTRY_DSN` | Your project's error tracking DSN |
+| `NEXT_PUBLIC_SENTRY_DSN` | Same DSN (for Next.js client-side) |
+| `VITE_PUBLIC_SENTRY_DSN` | Same DSN (for Vite client-side) |
+| `SENTRY_RELEASE` | The deployment commit SHA |
+
+### When OpenTelemetry is enabled
+
+| Variable | Description |
+|----------|-------------|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Temps OTLP endpoint |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | Protocol (e.g. `http/protobuf`) |
+| `OTEL_EXPORTER_OTLP_HEADERS` | Authentication headers |
+| `OTEL_SERVICE_NAME` | Service name for tracing |
+| `OTEL_SERVICE_VERSION` | Service version (from commit) |
+
+### Port resolution order
+
+Temps determines the `PORT` value in this order of priority:
+
+1. `EXPOSE` directive in your Dockerfile
+2. `exposed_port` setting on the environment
+3. `exposed_port` setting on the project
+4. Default: `3000`
+
+---
+
+## Use the API {{ anchor: true, id: 'use-the-api' }}
+
+### List variables
+
+```bash
+curl "https://your-temps-instance/api/projects/{project_id}/env-vars?environment_id={env_id}" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+### Create a variable
+
+```bash
+curl -X POST "https://your-temps-instance/api/projects/{project_id}/env-vars" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "key": "API_KEY",
+    "value": "your-api-key",
+    "environment_ids": [1, 2],
+    "include_in_preview": false
+  }'
+```
+
+### Update a variable
+
+```bash
+curl -X PUT "https://your-temps-instance/api/projects/{project_id}/env-vars/{var_id}" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "key": "API_KEY",
+    "value": "new-value",
+    "environment_ids": [1, 2],
+    "include_in_preview": false
+  }'
+```
+
+### Delete a variable
+
+```bash
+curl -X DELETE "https://your-temps-instance/api/projects/{project_id}/env-vars/{var_id}" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+### Get a single value
+
+```bash
+curl "https://your-temps-instance/api/projects/{project_id}/env-vars/{key}/value" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+---
+
+## Variable interpolation {{ anchor: true, id: 'variable-interpolation' }}
+
+You can reference other variables using `$VARIABLE_NAME` syntax. This is useful for composing values from auto-injected variables.
+
+Common use case — creating a `DATABASE_URL` alias for frameworks that expect it:
+
+| Key | Value |
+|-----|-------|
+| `DATABASE_URL` | `$POSTGRES_URL` |
+
+The interpolation happens at deploy time. The deployed container receives the fully expanded value.

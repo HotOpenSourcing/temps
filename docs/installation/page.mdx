@@ -1,0 +1,386 @@
+export const metadata = {
+  title: "Installation",
+  description:
+    "Complete guide to installing Temps on your VPS or cloud provider. Supports Ubuntu, Debian, and major cloud platforms with one-command setup.",
+  alternates: {
+    canonical: "/docs/installation",
+  },
+};
+
+# Installation
+
+This guide covers all installation methods and production configuration options for Temps. For a quick trial, see the [Quickstart](/docs/quickstart) guide instead. {{ className: 'lead' }}
+
+---
+
+## System Requirements
+
+### Minimum Specs (Development/Testing)
+
+| Resource | Requirement |
+| -------- | ----------- |
+| **CPU**  | 2 cores     |
+| **RAM**  | 4GB         |
+| **Disk** | 20GB        |
+
+### Recommended Specs (Production)
+
+| Resource | Requirement |
+| -------- | ----------- |
+| **CPU**  | 4+ cores    |
+| **RAM**  | 8GB+        |
+| **Disk** | 40GB+ SSD   |
+
+### Supported Operating Systems
+
+- **Linux** (Ubuntu 20.04+, Debian 11+, RHEL 8+, Amazon Linux 2)
+- **macOS** (Intel and Apple Silicon)
+
+### Required Ports
+
+| Port     | Service                  | Required                |
+| -------- | ------------------------ | ----------------------- |
+| **80**   | HTTP                     | Yes (for Let's Encrypt) |
+| **443**  | HTTPS                    | Yes                     |
+| **8080** | Temps API (configurable) | Yes                     |
+| **5432** | PostgreSQL               | Internal only           |
+
+---
+
+## Database Setup
+
+Temps requires **PostgreSQL with TimescaleDB**. Choose one of these options:
+
+### Option 1: Docker (Recommended)
+
+The easiest way to run PostgreSQL with TimescaleDB:
+
+```bash
+# Create a persistent volume
+docker volume create temps-postgres
+
+# Start TimescaleDB on port 16432 (avoids conflicts with existing PostgreSQL)
+docker run -d \
+  --name temps-postgres \
+  --restart unless-stopped \
+  -v temps-postgres:/var/lib/postgresql/data \
+  -e POSTGRES_USER=postgres \
+  -e POSTGRES_PASSWORD=temps \
+  -e POSTGRES_DB=temps \
+  -p 16432:5432 \
+  timescale/timescaledb-ha:pg16
+
+# Verify it's running
+docker ps | grep temps-postgres
+```
+
+### Option 2: Native Installation
+
+If you need native PostgreSQL, you must install TimescaleDB separately:
+
+<CodeGroup>
+
+```bash {{ title: 'Ubuntu/Debian' }}
+# Add PostgreSQL repository
+sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+
+# Add TimescaleDB repository
+sudo sh -c "echo 'deb https://packagecloud.io/timescale/timescaledb/ubuntu/ $(lsb_release -c -s) main' > /etc/apt/sources.list.d/timescaledb.list"
+wget --quiet -O - https://packagecloud.io/timescale/timescaledb/gpgkey | sudo apt-key add -
+
+# Install PostgreSQL and TimescaleDB
+sudo apt-get update
+sudo apt-get install -y postgresql-15 timescaledb-postgresql-15
+
+# Configure TimescaleDB
+sudo timescaledb-tune --quiet --yes
+sudo systemctl restart postgresql
+
+# Create database and enable extension
+sudo -u postgres createdb temps
+sudo -u postgres psql temps -c "CREATE EXTENSION IF NOT EXISTS timescaledb;"
+```
+
+```bash {{ title: 'macOS (Homebrew)' }}
+# Install PostgreSQL and TimescaleDB
+brew install postgresql@15
+brew install timescaledb
+
+# Configure TimescaleDB
+timescaledb-tune --quiet --yes
+
+# Restart PostgreSQL
+brew services restart postgresql@15
+
+# Create database and enable extension
+createdb temps
+psql temps -c "CREATE EXTENSION IF NOT EXISTS timescaledb;"
+```
+
+</CodeGroup>
+
+---
+
+## Installing Temps
+
+### Quick Install (Recommended)
+
+Install Temps with a single command:
+
+```bash
+curl -fsSL https://temps.sh/deploy.sh | bash
+```
+
+The installer will:
+
+- Detect your platform (Linux/macOS, AMD64/ARM64)
+- Download the appropriate binary
+- Install to `~/.temps/bin/`
+- Add to your PATH
+
+After installation, restart your shell or run:
+
+```bash
+source ~/.zshrc  # or ~/.bashrc
+temps --version
+```
+
+### Homebrew (macOS)
+
+```bash
+# Add the Temps tap
+brew tap gotempsh/tap
+
+# Install Temps
+brew install temps
+
+# Verify installation
+temps --version
+
+# Upgrade to latest version
+brew upgrade temps
+```
+
+### Manual Installation
+
+<CodeGroup>
+
+```bash {{ title: 'Linux AMD64' }}
+curl -LO https://github.com/gotempsh/temps/releases/latest/download/temps-linux-amd64.tar.gz
+tar -xzf temps-linux-amd64.tar.gz
+sudo mv temps /usr/local/bin/temps
+temps --version
+```
+
+```bash {{ title: 'macOS Intel' }}
+curl -LO https://github.com/gotempsh/temps/releases/latest/download/temps-darwin-amd64.tar.gz
+tar -xzf temps-darwin-amd64.tar.gz
+sudo mv temps /usr/local/bin/temps
+temps --version
+```
+
+```bash {{ title: 'macOS Apple Silicon' }}
+curl -LO https://github.com/gotempsh/temps/releases/latest/download/temps-darwin-arm64.tar.gz
+tar -xzf temps-darwin-arm64.tar.gz
+sudo mv temps /usr/local/bin/temps
+temps --version
+```
+
+</CodeGroup>
+
+### Build from Source
+
+```bash
+# Clone the repository
+git clone https://github.com/gotempsh/temps.git
+cd temps
+
+# Build release binary (includes web UI)
+cargo build --release
+
+# Install
+sudo cp target/release/temps /usr/local/bin/
+temps --version
+```
+
+---
+
+## Running Temps
+
+### Basic Usage
+
+```bash
+temps serve \
+  --address 0.0.0.0:8080 \
+  --database-url postgresql://postgres:temps@localhost:16432/temps
+```
+
+### Using Environment Variables
+
+```bash
+export TEMPS_ADDRESS=0.0.0.0:8080
+export TEMPS_DATABASE_URL=postgresql://postgres:temps@localhost:16432/temps
+
+temps serve
+```
+
+### Configuration Options
+
+| Environment Variable    | CLI Flag            | Default          | Description                                 |
+| ----------------------- | ------------------- | ---------------- | ------------------------------------------- |
+| `TEMPS_ADDRESS`         | `--address`         | `127.0.0.1:3000` | HTTP server address                         |
+| `TEMPS_DATABASE_URL`    | `--database-url`    | (required)       | PostgreSQL connection string                |
+| `TEMPS_TLS_ADDRESS`     | `--tls-address`     | (optional)       | HTTPS server address                        |
+| `TEMPS_DATA_DIR`        | `--data-dir`        | `~/.temps`       | Data directory for keys/config              |
+| `TEMPS_LOG_LEVEL`       | `--log-level`       | `info`           | Log level (trace, debug, info, warn, error) |
+| `TEMPS_CONSOLE_ADDRESS` | `--console-address` | (optional)       | Admin console address                       |
+
+---
+
+## First Run
+
+On first run, Temps automatically:
+
+1. Creates data directory at `~/.temps`
+2. Generates encryption keys and auth secrets
+3. Runs all database migrations
+4. Creates the default admin user
+
+**Save your credentials!** The first login credentials are displayed in the console output.
+
+---
+
+## Production Deployment
+
+### Systemd Service
+
+Create a systemd service for production:
+
+```bash
+sudo tee /etc/systemd/system/temps.service > /dev/null <<EOF
+[Unit]
+Description=Temps Platform
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=temps
+WorkingDirectory=/opt/temps
+Environment="TEMPS_DATABASE_URL=postgresql://temps:password@localhost/temps"
+Environment="TEMPS_ADDRESS=0.0.0.0:8080"
+Environment="TEMPS_TLS_ADDRESS=0.0.0.0:8443"
+ExecStart=/usr/local/bin/temps serve
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Enable and start
+sudo systemctl daemon-reload
+sudo systemctl enable temps
+sudo systemctl start temps
+
+# Check status
+sudo systemctl status temps
+```
+
+### Reverse Proxy (nginx)
+
+If you're running behind nginx:
+
+```nginx
+server {
+    listen 80;
+    server_name temps.yourdomain.com;
+
+    location / {
+        proxy_pass http://localhost:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+    }
+}
+```
+
+---
+
+## Data Directory
+
+Temps stores sensitive data in `~/.temps` by default:
+
+```
+~/.temps/
+├── encryption_key    # AES-256 encryption key (auto-generated)
+└── auth_secret       # Session authentication secret (auto-generated)
+```
+
+These files are **automatically backed up** by Temps when you configure S3 backup storage. You can also manually back them up for extra safety.
+
+---
+
+## Troubleshooting
+
+### Database Connection Error
+
+```bash
+# If using Docker
+docker ps | grep temps-postgres  # Ensure container is running
+docker logs temps-postgres       # Check for errors
+
+# Test connection
+psql postgresql://postgres:temps@localhost:16432/temps
+```
+
+### TimescaleDB Extension Not Found
+
+This error means TimescaleDB is not installed:
+
+```
+extension "timescaledb" is not available
+```
+
+**Solution:** Use the Docker method (easiest) or install the TimescaleDB package for your PostgreSQL version.
+
+### Port Already in Use
+
+```bash
+# Find process using port
+lsof -i :8080
+
+# Use different port
+temps serve --address 0.0.0.0:9000
+```
+
+### Permission Denied
+
+```bash
+# Check data directory permissions
+ls -la ~/.temps/
+
+# Fix permissions
+chmod 700 ~/.temps/
+chmod 600 ~/.temps/encryption_key
+chmod 600 ~/.temps/auth_secret
+```
+
+---
+
+## Next Steps
+
+After installation:
+
+1. **Complete the onboarding wizard** at your Temps URL
+2. **Connect your Git provider** (GitHub or GitLab)
+3. **Deploy your first application**
+4. **Configure email notifications** for alerts
+5. **Set up backups** for your data
+
+Return to the [Quickstart](/docs/quickstart) guide to deploy your first application.

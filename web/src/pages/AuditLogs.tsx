@@ -87,7 +87,6 @@ export function AuditLogs() {
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: 'Settings', href: '/settings' },
       { label: 'Audit Logs' },
     ])
   }, [setBreadcrumbs])

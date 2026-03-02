@@ -1,0 +1,378 @@
+export const metadata = {
+  title: "AI Skills",
+  description:
+    "Install Temps skills to give AI coding agents step-by-step knowledge about deploying, configuring, and integrating with the Temps platform.",
+  alternates: {
+    canonical: "/docs/skills",
+  },
+};
+
+export const sections = [
+  { title: "Overview", id: "overview" },
+  { title: "Installation", id: "installation" },
+  { title: "Install All Skills", id: "install-all" },
+  { title: "Install a Specific Skill", id: "install-specific" },
+  { title: "Available Skills", id: "available-skills" },
+  { title: "deploy-to-temps", id: "deploy-to-temps" },
+  { title: "temps-cli", id: "temps-cli" },
+  { title: "temps-platform-setup", id: "temps-platform-setup" },
+  { title: "temps-mcp-setup", id: "temps-mcp-setup" },
+  { title: "add-react-analytics", id: "add-react-analytics" },
+  { title: "add-session-recording", id: "add-session-recording" },
+  { title: "add-node-sdk", id: "add-node-sdk" },
+  { title: "add-custom-domain", id: "add-custom-domain" },
+];
+
+# AI Skills
+
+Give your AI coding agent deep knowledge about Temps. Skills are structured guides that teach AI assistants how to deploy, configure, and integrate with the platform -- no copy-pasting docs required. {{ className: 'lead' }}
+
+---
+
+## Overview {{ anchor: true, id: 'overview' }}
+
+Temps ships with **8 skills** that work with AI coding tools like Claude Code, Cursor, Windsurf, Cline, and any agent that supports the skills protocol. Each skill is a curated set of instructions, code examples, and reference material that the AI loads when it recognizes a relevant task.
+
+For example, if you tell your AI agent "deploy my app to Temps", and the `deploy-to-temps` skill is installed, the agent already knows the exact CLI commands, framework detection logic, Dockerfile patterns, and troubleshooting steps -- without you having to explain anything.
+
+<Row>
+  <Col>
+    **What Skills Provide** - Step-by-step workflows for common tasks -
+    Framework-specific code examples - CLI command reference with flags and
+    options - Troubleshooting guides for common errors - Configuration templates
+    and best practices
+  </Col>
+  <Col>
+    **Supported AI Tools** - Claude Code - Cursor - Windsurf - Cline (VS Code) -
+    OpenCode - Any agent supporting the skills protocol
+  </Col>
+</Row>
+
+---
+
+## Installation {{ anchor: true, id: 'installation' }}
+
+Skills are installed using the `npx skills` CLI. You can install all Temps skills at once, or pick individual ones.
+
+### Install All Skills {{ anchor: true, id: 'install-all' }}
+
+To install every available Temps skill:
+
+```bash
+npx skills add gotempsh/temps
+```
+
+This launches an interactive selector where you can toggle which skills to install:
+
+```
+Select skills to install (space to toggle)
+  ◻ add-custom-domain
+  ◻ add-node-sdk
+  ◻ add-react-analytics
+  ◻ add-session-recording
+  ◻ deploy-to-temps
+  ◻ temps-cli
+  ◻ temps-mcp-setup
+  ◻ temps-platform-setup
+```
+
+Press **space** to toggle individual skills, then **enter** to install your selection.
+
+### Install a Specific Skill {{ anchor: true, id: 'install-specific' }}
+
+To install a single skill directly (skipping the interactive selector):
+
+```bash
+npx skills add gotempsh/temps --skill deploy-to-temps
+```
+
+Replace `deploy-to-temps` with any skill name from the list below.
+
+<Note>
+  Skills are installed into your project and become available to your AI agent
+  automatically. No additional configuration is needed after installation.
+</Note>
+
+---
+
+## Available Skills {{ anchor: true, id: 'available-skills' }}
+
+| Skill                                             | Description                                                   | Triggers on                           |
+| ------------------------------------------------- | ------------------------------------------------------------- | ------------------------------------- |
+| [`deploy-to-temps`](#deploy-to-temps)             | Deploy applications with auto-detection and CI/CD             | "deploy to temps", "temps deployment" |
+| [`temps-cli`](#temps-cli)                         | Complete reference for all 54+ CLI commands                   | "temps cli", "temps command"          |
+| [`temps-platform-setup`](#temps-platform-setup)   | Install and configure Temps on a server                       | "install temps", "setup temps"        |
+| [`temps-mcp-setup`](#temps-mcp-setup)             | Configure the MCP server for AI agents                        | "temps mcp", "add temps to claude"    |
+| [`add-react-analytics`](#add-react-analytics)     | Add analytics, events, and Web Vitals to React apps           | "add analytics", "track events"       |
+| [`add-session-recording`](#add-session-recording) | Add privacy-aware session recording with rrweb                | "session recording", "session replay" |
+| [`add-node-sdk`](#add-node-sdk)                   | Integrate KV storage, blob storage, and server-side analytics | "temps node sdk", "temps kv"          |
+| [`add-custom-domain`](#add-custom-domain)         | Configure domains with automatic SSL/TLS                      | "custom domain", "ssl certificate"    |
+
+---
+
+## deploy-to-temps {{ anchor: true, id: 'deploy-to-temps' }}
+
+Deploy applications to Temps with automatic framework detection, Dockerfile generation, and container orchestration.
+
+```bash
+npx skills add gotempsh/temps --skill deploy-to-temps
+```
+
+<Properties>
+  <Property name="Framework Detection">
+    Auto-detects Next.js, Vite, Astro, Nuxt, Remix, NestJS, Express, Python, Go,
+    Rust, Java, and generates optimized multi-stage Dockerfiles.
+  </Property>
+  <Property name="CLI & Git Deployments">
+    Deploy from the terminal with `bunx @temps-sdk/cli deploy`, or configure
+    auto-deploy on `git push` with preview deployments per PR.
+  </Property>
+  <Property name="Configuration">
+    Covers `temps.json` build config, environment variables, health checks,
+    resource limits, replicas, and rollback commands.
+  </Property>
+  <Property name="Troubleshooting">
+    Build failures, container startup issues, stuck deployments.
+  </Property>
+</Properties>
+
+---
+
+## temps-cli {{ anchor: true, id: 'temps-cli' }}
+
+Complete command-line reference covering all 54+ CLI commands. This is the most comprehensive skill (2,000+ lines of documentation).
+
+```bash
+npx skills add gotempsh/temps --skill temps-cli
+```
+
+<Properties>
+  <Property name="Projects & Deployments">
+    Create, deploy, rollback, cancel, pause/resume deployments. View logs and
+    status.
+  </Property>
+  <Property name="Services & Infrastructure">
+    Provision PostgreSQL, Redis, MongoDB, and S3. Link services to projects with
+    auto-injected connection strings.
+  </Property>
+  <Property name="Domains & TLS">
+    Custom domains, wildcard certificates, DNS providers (Cloudflare, Route53,
+    DigitalOcean), ACME challenges.
+  </Property>
+  <Property name="Monitoring & Security">
+    Uptime monitors, incidents, vulnerability scanning, error tracking, audit
+    logs, proxy logs.
+  </Property>
+  <Property name="Email & Notifications">
+    Email providers (SES, Scaleway), DKIM domain verification,
+    Slack/email/webhook notification providers.
+  </Property>
+  <Property name="CI/CD Automation">
+    Non-interactive mode (`-y` flag), JSON output for scripting, environment
+    variable auth, common automation patterns.
+  </Property>
+</Properties>
+
+---
+
+## temps-platform-setup {{ anchor: true, id: 'temps-platform-setup' }}
+
+Install, configure, and manage a self-hosted Temps instance from scratch.
+
+```bash
+npx skills add gotempsh/temps --skill temps-platform-setup
+```
+
+<Properties>
+  <Property name="Installation Methods">
+    Install script (`curl -fsSL https://temps.sh/deploy.sh | bash`), Docker
+    Compose (production), or build from source (Rust 1.70+).
+  </Property>
+  <Property name="Initial Setup">
+    Database migrations, TimescaleDB extension, admin user creation, DNS
+    provider config, Let's Encrypt ACME account, encryption keys.
+  </Property>
+  <Property name="Platform Administration">
+    User management (Admin/User/Viewer roles), API keys, service provisioning,
+    backups, monitoring, and logs.
+  </Property>
+  <Property name="DNS & TLS">
+    Cloudflare, AWS Route53, and DigitalOcean integration. Custom and wildcard
+    domains, automatic certificate provisioning.
+  </Property>
+  <Property name="Troubleshooting">
+    Database connection, port conflicts, TLS issues, deployment failures,
+    GeoLite2 setup for IP geolocation.
+  </Property>
+</Properties>
+
+---
+
+## temps-mcp-setup {{ anchor: true, id: 'temps-mcp-setup' }}
+
+Configure the Temps MCP server so AI assistants can manage your infrastructure through natural language.
+
+```bash
+npx skills add gotempsh/temps --skill temps-mcp-setup
+```
+
+<Properties>
+  <Property name="Client Configuration">
+    Step-by-step setup for Claude Desktop (macOS/Windows) and Claude Code (VS
+    Code).
+  </Property>
+  <Property name="Available Tools">
+    `list_projects`, `get_project`, `list_deployments` -- query your Temps
+    platform directly from an AI chat.
+  </Property>
+  <Property name="Prompts">
+    Includes the `add_react_analytics` prompt for guided analytics setup across
+    frameworks.
+  </Property>
+  <Property name="Verification & Troubleshooting">
+    How to verify the connection works, fix tools not appearing, resolve
+    permission errors.
+  </Property>
+</Properties>
+
+<Note>
+  For a more comprehensive MCP reference covering all 158 tools and setup for 7+
+  AI clients, see the [MCP Server documentation](/docs/mcp).
+</Note>
+
+---
+
+## add-react-analytics {{ anchor: true, id: 'add-react-analytics' }}
+
+Add Temps analytics to React applications with tracking for page views, custom events, scroll depth, engagement, session recording, and Web Vitals.
+
+```bash
+npx skills add gotempsh/temps --skill add-react-analytics
+```
+
+<Properties>
+  <Property name="Framework Support">
+    Next.js App Router, Next.js Pages Router, Vite, Create React App, and Remix
+    -- with framework-specific provider setup.
+  </Property>
+  <Property name="7 React Hooks">
+    `useTrackEvent`, `useAnalytics`, `useScrollVisibility`, `usePageLeave`,
+    `useEngagementTracking`, `useSpeedAnalytics`, `useTrackPageview`.
+  </Property>
+  <Property name="Session Recording">
+    rrweb-based recording with privacy controls (masking, blocking, GDPR consent
+    flow).
+  </Property>
+  <Property name="Bundled References">
+    Includes detailed hook API reference and session recording guide as
+    additional reference files.
+  </Property>
+</Properties>
+
+---
+
+## add-session-recording {{ anchor: true, id: 'add-session-recording' }}
+
+Add privacy-aware session recording and replay using rrweb. Focused specifically on the recording feature with detailed privacy controls.
+
+```bash
+npx skills add gotempsh/temps --skill add-session-recording
+```
+
+<Properties>
+  <Property name="Quick Setup">
+    Wrap your app with `TempsAnalyticsProvider` + `SessionRecordingProvider` and
+    recording starts automatically.
+  </Property>
+  <Property name="Privacy Controls">
+    Block elements by CSS class (`sensitive`), mask text with `data-rr-mask`,
+    block entire elements with `data-rr-block`. Patterns for payment forms,
+    personal data, medical records.
+  </Property>
+  <Property name="Programmatic Control">
+    `useSessionRecordingControl` hook to start, stop, and toggle recording at
+    runtime.
+  </Property>
+  <Property name="GDPR Compliance">
+    Full consent flow implementation with localStorage persistence and
+    conditional recording by environment, user plan, or page.
+  </Property>
+</Properties>
+
+---
+
+## add-node-sdk {{ anchor: true, id: 'add-node-sdk' }}
+
+Integrate the Temps Node.js SDK for server-side analytics, KV storage, blob storage, and platform API access.
+
+```bash
+npx skills add gotempsh/temps --skill add-node-sdk
+```
+
+<Properties>
+  <Property name="Server-Side Tracking">
+    `temps.track()` and `temps.identify()` for backend event tracking, plus
+    Express middleware for auto-tracking API requests.
+  </Property>
+  <Property name="KV Storage">
+    Redis-like key-value store with JSON serialization, TTL support, metadata,
+    and prefix-based listing via `@temps-sdk/kv`.
+  </Property>
+  <Property name="Blob Storage">
+    File upload/download, stream support, signed URLs, and presigned upload URLs
+    via `@temps-sdk/blob`.
+  </Property>
+  <Property name="Error Handling">
+    Typed errors (`TempsError`, `RateLimitError`, `NotFoundError`) with retry
+    logic and full TypeScript generics support.
+  </Property>
+</Properties>
+
+---
+
+## add-custom-domain {{ anchor: true, id: 'add-custom-domain' }}
+
+Configure custom domains for Temps deployments with automatic SSL/TLS via Let's Encrypt.
+
+```bash
+npx skills add gotempsh/temps --skill add-custom-domain
+```
+
+<Properties>
+  <Property name="DNS Configuration">
+    CNAME records for subdomains, A records for apex domains, wildcard support.
+    Includes exact DNS record values.
+  </Property>
+  <Property name="TLS Challenges">
+    HTTP-01 (standard, automatic) and DNS-01 (for wildcards, requires Cloudflare
+    integration).
+  </Property>
+  <Property name="Certificate Management">
+    Automatic renewal 30 days before expiration, status monitoring, force
+    renewal. Multiple domains per project.
+  </Property>
+  <Property name="Cloudflare Integration">
+    API token setup (Zone:DNS:Edit permission), Zone ID configuration, wildcard
+    domain provisioning.
+  </Property>
+</Properties>
+
+---
+
+## Additional Resources
+
+<div className="not-prose">
+  <Button href="/docs/mcp" variant="text" arrow="right">
+    MCP Server Setup
+  </Button>
+  <Button href="/docs/sdks" variant="text" arrow="right">
+    Temps SDKs
+  </Button>
+  <Button
+    href="/docs/cli-getting-started"
+    variant="text"
+    arrow="right"
+  >
+    CLI Getting Started
+  </Button>
+</div>

@@ -880,7 +880,7 @@ impl ContainerDeployer for DockerRuntime {
             let container_port_key =
                 format!("{}/{}", port_mapping.container_port, port_mapping.protocol);
             let host_port_binding = bollard::models::PortBinding {
-                host_ip: Some("0.0.0.0".to_string()),
+                host_ip: Some("127.0.0.1".to_string()),
                 host_port: Some(port_mapping.host_port.to_string()),
             };
 
@@ -910,6 +910,14 @@ impl ContainerDeployer for DockerRuntime {
                 .cpu_limit
                 .map(|cores| (cores * 1_000_000_000.0) as i64),
             log_config,
+            // Security hardening: drop all Linux capabilities by default
+            cap_drop: Some(vec!["ALL".to_string()]),
+            // Security hardening: prevent privilege escalation via setuid/setgid
+            security_opt: Some(vec!["no-new-privileges:true".to_string()]),
+            // Security hardening: limit number of processes to prevent fork bombs
+            pids_limit: Some(512),
+            // Security hardening: use init process for proper signal handling and zombie reaping
+            init: Some(true),
             ..Default::default()
         };
 

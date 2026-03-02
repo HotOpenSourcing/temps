@@ -1,0 +1,165 @@
+export const metadata = {
+  title: 'Single-Binary Architecture',
+  description:
+    'Why Temps ships as a single Rust binary that replaces six separate SaaS tools, and how the internal architecture makes this possible.',
+  alternates: {
+    canonical: '/docs/single-binary-architecture',
+  },
+}
+
+export const sections = [
+  { title: 'The problem with tool sprawl', id: 'the-problem-with-tool-sprawl' },
+  { title: 'What one binary replaces', id: 'what-one-binary-replaces' },
+  { title: 'How it works internally', id: 'how-it-works-internally' },
+  { title: 'The plugin system', id: 'the-plugin-system' },
+  { title: 'Why Rust', id: 'why-rust' },
+  { title: 'Trade-offs', id: 'trade-offs' },
+]
+
+# Single-Binary Architecture
+
+Temps is a single Rust binary that provides deployment, analytics, error tracking, session replay, uptime monitoring, managed databases, and more. This page explains why it is built this way and how the internal architecture supports it. {{ className: 'lead' }}
+
+---
+
+## The problem with tool sprawl {{ anchor: true, id: 'the-problem-with-tool-sprawl' }}
+
+A typical indie developer or small team deploying a web application needs:
+
+1. A **deployment platform** (Vercel, Railway, Render) — $20-100/month
+2. **Analytics** (Plausible, PostHog, Google Analytics) — $0-100/month
+3. **Error tracking** (Sentry) — $0-26/month
+4. **Session replay** (FullStory, Hotjar) — $0-150/month
+5. **Uptime monitoring** (Pingdom, UptimeRobot) — $0-50/month
+6. **Managed databases** (PlanetScale, Neon, Supabase) — $0-50/month
+
+That is 6+ accounts, 6+ billing relationships, data spread across 6+ providers, and 6+ privacy policies governing your users' data. Each tool has its own pricing tiers, usage limits, and lock-in mechanisms.
+
+Temps consolidates all of these into a single self-hosted binary running on a server you control.
+
+---
+
+## What one binary replaces {{ anchor: true, id: 'what-one-binary-replaces' }}
+
+| Capability | Third-party equivalent | Temps component |
+|------------|----------------------|-----------------|
+| Git-push deployments | Vercel, Netlify, Railway | Deployment pipeline (Nixpacks + Docker) |
+| Reverse proxy with SSL | nginx + certbot, Caddy | Pingora-based proxy with Let's Encrypt |
+| Web analytics | Plausible, PostHog | Built-in analytics with TimescaleDB |
+| Error tracking | Sentry | Sentry-compatible error ingestion |
+| Session replay | FullStory, Hotjar | rrweb-based recording and playback |
+| Uptime monitoring | Pingdom, UptimeRobot | Health check service with incidents |
+| Managed PostgreSQL | Neon, Supabase, RDS | Docker-managed PostgreSQL with WAL-G |
+| Managed Redis | Upstash, ElastiCache | Docker-managed Redis |
+| S3 storage | AWS S3, Cloudflare R2 | Docker-managed RustFS |
+| KV storage | Vercel KV, Upstash | Redis-backed KV via SDK |
+| Blob storage | Vercel Blob, S3 | RustFS-backed blob via SDK |
+| Performance monitoring | PageSpeed Insights | Core Web Vitals collection |
+
+All of this runs on one server, shares one PostgreSQL database (with TimescaleDB for time-series data), and is managed through one dashboard.
+
+---
+
+## How it works internally {{ anchor: true, id: 'how-it-works-internally' }}
+
+Temps is organized as a Rust workspace with 51 crates, each responsible for a specific domain:
+
+```
+temps (binary)
+├── temps-core          # Shared types, error handling, retry logic
+├── temps-config        # Configuration management
+├── temps-database      # PostgreSQL/Sea-ORM connection and migrations
+├── temps-entities      # Database models
+├── temps-routes        # HTTP router (Axum)
+├── temps-auth          # Authentication, permissions, API keys
+├── temps-proxy         # Pingora reverse proxy
+├── temps-deployments   # Deployment pipeline and job execution
+├── temps-deployer      # Docker container management
+├── temps-environments  # Environment and env var management
+├── temps-providers     # Managed services (PostgreSQL, Redis, etc.)
+├── temps-domains       # Domain management and TLS/ACME
+├── temps-analytics     # Page views, visitors, events
+├── temps-error-tracking# Sentry-compatible error ingestion
+├── temps-monitoring    # Outage detection, disk space monitoring
+├── temps-status-page   # Health checks, incidents, monitors
+├── temps-backup        # S3 backups, schedules, restore
+├── temps-notifications # Email, Slack, webhook alerts
+├── temps-logs          # Structured deployment logging
+├── temps-git           # Git provider integration
+├── temps-queue         # Background job processing
+├── ...                 # And more
+```
+
+At startup, the binary:
+
+1. Reads configuration from environment variables
+2. Connects to PostgreSQL and runs pending migrations
+3. Initializes the plugin system — each crate registers its services
+4. Starts the HTTP server (Axum) for the API and dashboard
+5. Starts the reverse proxy (Pingora) for routing traffic to deployed containers
+6. Starts background workers for health checks, backups, and notifications
+
+### Two processes
+
+In production, Temps runs as two processes:
+
+- **`temps serve`** — The API server, dashboard, background workers, and all application logic
+- **`temps proxy`** — The Pingora-based reverse proxy that routes external traffic to the correct container
+
+The proxy runs as a separate process because Pingora manages its own event loop and worker threads. Both processes read from the same database and share configuration.
+
+---
+
+## The plugin system {{ anchor: true, id: 'the-plugin-system' }}
+
+Each domain crate registers its services through a type-safe plugin system:
+
+```rust
+impl TempsPlugin for BackupPlugin {
+    fn register_services(&self, ctx: &ServiceRegistrationContext) -> Result<()> {
+        let db = ctx.require_service::<Arc<DatabaseConnection>>();
+        let encryption = ctx.require_service::<Arc<EncryptionService>>();
+        ctx.register_service(Arc::new(BackupService::new(db, encryption)));
+        Ok(())
+    }
+}
+```
+
+This pattern means:
+
+- Each crate is self-contained with its own service layer, error types, and API handlers
+- Dependencies between crates are explicit — a backup service depends on the database and encryption service, not on the deployment service
+- Services are initialized in two phases: registration (declare what you provide) then initialization (resolve dependencies)
+- New features can be added as new crates without modifying existing ones
+
+---
+
+## Why Rust {{ anchor: true, id: 'why-rust' }}
+
+Rust is chosen for specific technical reasons:
+
+- **Memory safety without garbage collection** — The proxy handles thousands of concurrent connections. GC pauses would introduce latency spikes.
+- **Single static binary** — The entire platform compiles to one binary with no runtime dependencies (no JVM, no Node.js, no Python). This simplifies deployment to: download binary, run it.
+- **Compile-time error checking** — The typed error system (thiserror + RFC 7807 Problem Details) catches error handling mistakes at compile time, not in production.
+- **Performance** — Analytics ingestion, log streaming, and proxy routing are all hot paths where microseconds matter.
+- **Ecosystem** — Sea-ORM for database, Axum for HTTP, Pingora for proxying, Bollard for Docker — all mature Rust libraries.
+
+---
+
+## Trade-offs {{ anchor: true, id: 'trade-offs' }}
+
+The single-binary approach has deliberate trade-offs:
+
+**Advantages:**
+- One thing to install, update, and monitor
+- No inter-service networking to configure
+- All data in one database (simpler backups, simpler queries)
+- No vendor lock-in — you own the server and the data
+
+**Disadvantages:**
+- Runs on one server (not distributed across a fleet by default)
+- All features share server resources (a CPU-heavy build affects analytics ingestion)
+- Scaling requires a bigger server rather than adding more nodes
+- Feature set is fixed to what Temps implements (you cannot swap in a different analytics engine)
+
+For the target audience — solo developers and small teams running 1-10 applications on a single VPS — these trade-offs strongly favor simplicity. If you outgrow a single server, the database (PostgreSQL with TimescaleDB) can be moved to a managed instance, and the binary can run on a larger machine.

@@ -1,0 +1,295 @@
+export const metadata = {
+  title: "Introduction to Temps",
+  description:
+    "Get started with Temps - the self-hosted deployment platform. Install on Ubuntu in minutes.",
+  alternates: {
+    canonical: "/docs/introduction",
+  },
+};
+
+# Introduction to Temps
+
+Temps is your **self-hosted deployment platform** that makes it effortless to deploy and manage ANY application - from React frontends to Node.js APIs, Python backends, static sites, and everything in between. {{ className: 'lead' }}
+
+---
+
+## Quick Start
+
+Get Temps up and running with a single command. The provisioning wizard handles everything: Docker, database, SSL certificates, DNS, and the Temps binary.
+
+```bash
+curl -fsSL https://temps.sh/deploy.sh | bash
+```
+
+The wizard walks you through each step interactively:
+
+1. **Docker** - Installs and verifies Docker Engine
+2. **Database** - Sets up TimescaleDB (PostgreSQL) in a Docker container
+3. **Domain & SSL** - Provisions your domain and TLS certificates (via Temps Cloud auto-subdomain or your own domain with Let's Encrypt)
+4. **Temps binary** - Downloads and configures the Temps server
+5. **Background service** - Creates a systemd service so Temps starts on boot
+6. **Verification** - Generates an API key and confirms the console is reachable
+
+<Note>
+  The wizard supports both Linux (Ubuntu, Debian, RHEL) and macOS. It is
+  idempotent — you can re-run it safely if something fails.
+</Note>
+
+Once complete, open the console URL shown at the end and you're ready to deploy.
+
+---
+
+## Manual Setup (Step by Step)
+
+If you prefer full control, you can install each component yourself.
+
+### Prerequisites
+
+- **Ubuntu 20.04+** (or any Linux with Docker support)
+- **Docker** installed and running
+- **A domain** pointed to your server (for SSL certificates)
+- **GitHub token** (for deploying from repositories)
+- **Cloudflare token** (optional, for automatic DNS management)
+
+<Note>
+  If you don't have Docker installed, run: `curl -fsSL https://get.docker.com |
+  sh`
+</Note>
+
+### Step 1: Start TimescaleDB
+
+Temps requires PostgreSQL with TimescaleDB for analytics. Start it with Docker:
+
+```bash
+# Create a persistent volume for your database
+docker volume create temps-postgres
+
+# Start TimescaleDB (runs on port 16432 to avoid conflicts)
+docker run -d \
+  --name temps-postgres \
+  --restart unless-stopped \
+  -v temps-postgres:/var/lib/postgresql/data \
+  -e POSTGRES_USER=postgres \
+  -e POSTGRES_PASSWORD=temps \
+  -e POSTGRES_DB=temps \
+  -p 16432:5432 \
+  timescale/timescaledb:latest-pg18
+```
+
+Wait a few seconds for the database to initialize, then verify it's running:
+
+```bash
+docker logs temps-postgres
+```
+
+### Step 2: Download Temps
+
+<CodeGroup title="Install Temps">
+
+```bash {{ title: 'Linux (x86_64)' }}
+curl -LO https://github.com/gotempsh/temps/releases/latest/download/temps-linux-amd64.tar.gz
+tar -xzf temps-linux-amd64.tar.gz
+sudo mv temps /usr/local/bin/temps
+temps --version
+```
+
+```bash {{ title: 'macOS (Homebrew)' }}
+brew tap gotempsh/tap && brew install temps
+temps --version
+```
+
+```bash {{ title: 'macOS (Apple Silicon)' }}
+curl -LO https://github.com/gotempsh/temps/releases/latest/download/temps-darwin-arm64.tar.gz
+tar -xzf temps-darwin-arm64.tar.gz
+sudo mv temps /usr/local/bin/temps
+temps --version
+```
+
+</CodeGroup>
+
+### Step 3: Run Setup
+
+The setup command configures Temps with your credentials and generates the necessary certificates:
+
+```bash
+temps setup \
+  --database-url "postgresql://postgres:temps@localhost:16432/temps" \
+  --admin-email "your-email@example.com" \
+  --wildcard-domain "*.yourdomain.com" \
+  --github-token "ghp_xxxxxxxxxxxx" \
+  --dns-provider "cloudflare" \
+  --cloudflare-token "your-cloudflare-api-token"
+```
+
+<Properties>
+  <Property name="--database-url">
+    PostgreSQL connection string. Temps requires PostgreSQL 14+ with TimescaleDB
+    for analytics.
+  </Property>
+  <Property name="--admin-email">
+    Email for the admin account and Let's Encrypt certificate notifications.
+  </Property>
+  <Property name="--wildcard-domain">
+    Wildcard domain for your deployments (e.g., `*.temps.yourdomain.com`). Each
+    app gets a subdomain automatically.
+  </Property>
+  <Property name="--github-token">
+    GitHub personal access token with `repo` scope for cloning repositories.
+  </Property>
+  <Property name="--dns-provider">
+    DNS provider for automatic certificate validation. Supported: `cloudflare`,
+    `route53`, `digitalocean`, `manual`.
+  </Property>
+  <Property name="--cloudflare-token">
+    Cloudflare API token with Zone:DNS:Edit permissions (only needed if using
+    Cloudflare DNS).
+  </Property>
+</Properties>
+
+### Step 4: Start Temps
+
+Start the Temps server:
+
+```bash
+temps serve \
+  --database-url "postgresql://postgres:temps@localhost:16432/temps" \
+  --address 0.0.0.0:80 \
+  --tls-address 0.0.0.0:443 \
+  --console-address 0.0.0.0:8081
+```
+
+<Properties>
+  <Property name="--database-url">
+    PostgreSQL connection string. Must match the database URL used in setup.
+  </Property>
+  <Property name="--address">
+    HTTP address for redirects and health checks. Default: `0.0.0.0:80`
+  </Property>
+  <Property name="--tls-address">
+    HTTPS address for secure TLS/SSL traffic. Required for production
+    deployments.
+  </Property>
+  <Property name="--console-address">
+    Admin console address. Access the Temps dashboard at this port.
+  </Property>
+</Properties>
+
+That's it! Open `https://temps.yourdomain.com` to access the Temps console.
+
+### Step 5: Run as a Service (Optional)
+
+To keep Temps running after you log out, create a systemd service:
+
+```bash
+sudo tee /etc/systemd/system/temps.service > /dev/null <<EOF
+[Unit]
+Description=Temps Platform
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/temps serve \
+  --database-url "postgresql://postgres:temps@localhost:16432/temps" \
+  --address 0.0.0.0:80 \
+  --tls-address 0.0.0.0:443 \
+  --console-address 0.0.0.0:8081
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now temps
+```
+
+---
+
+## Troubleshooting
+
+### Server hangs on startup
+
+If Temps hangs during startup, it's likely waiting for the screenshot provider to initialize. Disable it with:
+
+```bash
+export TEMPS_SCREENSHOT_PROVIDER=noop
+temps serve --database-url "..." --address 0.0.0.0:80
+```
+
+### Database connection issues
+
+Make sure PostgreSQL is running and accessible:
+
+```bash
+# Test connection
+psql "postgresql://postgres:temps@localhost:16432/temps" -c "SELECT 1"
+```
+
+### Port already in use
+
+If ports 80 or 443 are already in use (e.g., by nginx or Apache), either stop those services or use different ports:
+
+```bash
+temps serve \
+  --database-url "..." \
+  --address 0.0.0.0:8080 \
+  --tls-address 0.0.0.0:8443 \
+  --console-address 0.0.0.0:8081
+```
+
+---
+
+## What Can You Deploy?
+
+Temps supports **any application that can run in a container**:
+
+| Application Type  | Examples                             | Support             |
+| ----------------- | ------------------------------------ | ------------------- |
+| **Frontend Apps** | React, Next.js, Vue, Svelte, Angular | Zero-config         |
+| **Backend APIs**  | Node.js, Python, Go, Rust, Ruby, PHP | Auto-detected       |
+| **Static Sites**  | Hugo, Jekyll, Gatsby, plain HTML     | Optimized serving   |
+| **Full-Stack**    | Next.js, Nuxt, SvelteKit, Remix      | SSR supported       |
+| **Databases**     | PostgreSQL, Redis, MySQL             | Managed services    |
+| **Custom Apps**   | Anything with a Dockerfile           | Full Docker support |
+
+---
+
+## Why Temps?
+
+<Row>
+  <Col>
+    **Self-Hosted** - Run on your own infrastructure - Complete data ownership -
+    No vendor lock-in - No usage limits
+  </Col>
+  <Col>
+    **All-in-One** - Analytics built-in - Error tracking (Sentry-compatible) -
+    Session replay - Uptime monitoring
+  </Col>
+</Row>
+
+### Cost Comparison
+
+Running 5 apps with analytics, error tracking, and monitoring:
+
+| Platform                    | Monthly Cost    |
+| --------------------------- | --------------- |
+| **Temps** (self-hosted)     | ~$50 (VPS only) |
+| Vercel + Sentry + Analytics | ~$500+          |
+| AWS + third-party tools     | ~$800+          |
+
+---
+
+## Next Steps
+
+<div className="not-prose">
+  <Button href="/docs/quickstart" variant="text" arrow="right">
+    Deploy your first app
+  </Button>
+  <Button href="/docs/installation" variant="text" arrow="right">
+    Detailed installation guide
+  </Button>
+  <Button href="/docs/cli" variant="text" arrow="right">
+    CLI reference
+  </Button>
+</div>

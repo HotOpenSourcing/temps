@@ -1,0 +1,196 @@
+export const metadata = {
+  title: 'Debug a Failed Deployment',
+  description:
+    'Diagnose why a deployment failed using build logs, job statuses, and container logs. Fix common issues and redeploy.',
+  alternates: {
+    canonical: '/docs/debug-a-failed-deployment',
+  },
+}
+
+export const sections = [
+  { title: 'Check the deployment status', id: 'check-the-deployment-status' },
+  { title: 'Read the build logs', id: 'read-the-build-logs' },
+  { title: 'Check individual job statuses', id: 'check-individual-job-statuses' },
+  { title: 'View container logs', id: 'view-container-logs' },
+  { title: 'Common failures and fixes', id: 'common-failures-and-fixes' },
+  { title: 'Redeploy', id: 'redeploy' },
+]
+
+# Debug a Failed Deployment
+
+When a deployment fails, Temps records the exact step that broke and preserves the logs. This guide walks you through finding the failure, understanding it, and fixing it. {{ className: 'lead' }}
+
+---
+
+## Check the deployment status {{ anchor: true, id: 'check-the-deployment-status' }}
+
+1. Open your project in the dashboard
+2. Click **Deployments** in the sidebar
+3. The failed deployment will show a red **Failed** badge
+
+Click on the deployment to see its detail page. The deployment goes through several states:
+
+| State | Meaning |
+|-------|---------|
+| `pending` | Deployment is queued |
+| `running` | Build or deploy step is in progress |
+| `deploying` | Container is being started |
+| `ready` | Container is up and passing health checks |
+| `completed` / `deployed` | Successfully live and serving traffic |
+| `failed` | Something went wrong — check the logs |
+| `cancelled` | Manually cancelled by a user |
+
+---
+
+## Read the build logs {{ anchor: true, id: 'read-the-build-logs' }}
+
+The deployment detail page shows logs from every step. Look for the step marked with a red failure indicator.
+
+Each deployment is broken into **jobs** that execute in order:
+
+1. **Download Repository** — Clones the Git repository
+2. **Build Image** — Builds the Docker image (using Nixpacks, Dockerfile, or buildpacks)
+3. **Deploy Image** — Starts the container and waits for health checks
+4. **Mark Complete** — Final cleanup and status update
+
+Additional jobs may include:
+- **Pull External Image** — For deployments from a registry
+- **Verify Local Image** — For rollbacks (checks image exists)
+- **Configure Crons** — Sets up scheduled tasks
+- **Take Screenshot** — Captures a preview of the deployed site
+- **Scan Vulnerabilities** — Runs security scan
+- **Capture Source Maps** — Uploads source maps for error tracking
+
+Click on any job to expand its logs. The logs include timestamps and are searchable.
+
+### Stream logs in real-time
+
+During a deployment, you can watch logs stream live via the dashboard. The logs update in real-time using WebSocket connections.
+
+### Access logs via API
+
+```bash
+# Get all jobs and their statuses
+curl "https://your-temps-instance/api/projects/{project_id}/deployments/{deployment_id}/jobs" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+
+# Get logs for a specific job
+curl "https://your-temps-instance/api/projects/{project_id}/deployments/{deployment_id}/jobs/{job_id}/logs" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+---
+
+## Check individual job statuses {{ anchor: true, id: 'check-individual-job-statuses' }}
+
+Each job has its own status: `Pending`, `Running`, `Success`, `Failure`, or `Cancelled`. The first job with a `Failure` status is where you should focus.
+
+Jobs also include:
+- **Error message** — A summary of what went wrong
+- **Log ID** — Link to the full structured log output
+- **Execution order** — Where in the pipeline this job runs
+- **Dependencies** — Which jobs had to complete before this one could start
+
+If a job fails, all dependent jobs are cancelled automatically.
+
+---
+
+## View container logs {{ anchor: true, id: 'view-container-logs' }}
+
+If the deployment succeeded but your application crashes at runtime, check the container logs:
+
+1. Go to your project's **Logs** section in the sidebar
+2. Select the environment and container
+3. View the application's stdout/stderr output
+
+You can also stream container logs via WebSocket:
+
+```bash
+# WebSocket endpoint for live container logs
+wss://your-temps-instance/api/projects/{project_id}/environments/{env_id}/containers/{container_id}/logs?follow=true&timestamps=true&tail=100
+```
+
+Parameters:
+- `follow=true` — Stream new logs as they arrive
+- `timestamps=true` — Include timestamps on each line
+- `tail=100` — Start with the last 100 lines
+- `start_date` / `end_date` — Filter by time range
+
+---
+
+## Common failures and fixes {{ anchor: true, id: 'common-failures-and-fixes' }}
+
+<Properties>
+  <Property name="Build fails: 'npm install' or dependency errors">
+    **Cause:** Missing or incompatible dependencies, wrong Node.js version, or corrupt lockfile.
+
+    **Fix:** Check that `package-lock.json` (or `yarn.lock`, `pnpm-lock.yaml`) is committed. Verify the Node.js version in `package.json` engines field or `.node-version` matches what your project needs. Try `npm ci` locally to reproduce.
+  </Property>
+  <Property name="Build fails: 'Dockerfile not found'">
+    **Cause:** Temps detected the project as Docker-based but cannot find a Dockerfile.
+
+    **Fix:** Either add a `Dockerfile` to your repository root, or change the framework preset in project settings to the correct one (e.g. Next.js, Vite). Temps auto-detects frameworks — if the detection is wrong, override it.
+  </Property>
+  <Property name="Deploy fails: 'Health check failed'">
+    **Cause:** The container started but did not respond to HTTP requests in time.
+
+    **Fix:**
+    - Ensure your application listens on the correct port (check `PORT` environment variable)
+    - Ensure it binds to `0.0.0.0`, not `localhost` or `127.0.0.1`
+    - Check container logs for startup errors
+    - If your app takes a long time to start, the health check may time out — optimize startup time or check resource allocation
+  </Property>
+  <Property name="Deploy fails: 'Port already in use'">
+    **Cause:** Another container or process is using the same port.
+
+    **Fix:** Check for orphaned containers with `docker ps` on your server. Tear down any stuck deployments from the dashboard. If a previous deployment did not clean up properly, use the **Teardown** action.
+  </Property>
+  <Property name="Deploy fails: 'Out of memory' or OOM kill">
+    **Cause:** The container exceeded its memory limit during build or startup.
+
+    **Fix:** Increase the memory limit in environment settings. For build-time OOM, your build process needs more memory — consider pre-building in CI instead.
+  </Property>
+  <Property name="Deploy fails: 'Image not found' during rollback">
+    **Cause:** The Docker image from the target deployment has been pruned from the server.
+
+    **Fix:** Redeploy from source instead of rolling back. The image is rebuilt from Git.
+  </Property>
+</Properties>
+
+---
+
+## Redeploy {{ anchor: true, id: 'redeploy' }}
+
+After fixing the issue (updating code, fixing configuration, adjusting resources):
+
+**Option 1: Push a fix**
+
+```bash
+git add .
+git commit -m "fix: resolve build error"
+git push
+```
+
+Temps automatically picks up the push and starts a new deployment.
+
+**Option 2: Redeploy the same commit**
+
+If you fixed the issue through configuration (environment variables, resource limits) rather than code:
+
+1. Go to the **Deployments** page
+2. Click **Redeploy** on the latest deployment (or use the trigger-pipeline API)
+
+**Option 3: Roll back**
+
+If the previous version was working, [roll back](/docs/roll-back-a-deployment) to it while you investigate.
+
+**Option 4: Cancel a stuck deployment**
+
+If a deployment is stuck in `running` or `deploying`:
+
+```bash
+curl -X POST "https://your-temps-instance/api/projects/{project_id}/deployments/{deployment_id}/cancel" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+This stops the build, writes a cancellation message to the logs, and marks the deployment as cancelled.

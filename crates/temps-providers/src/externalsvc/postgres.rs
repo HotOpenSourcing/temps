@@ -361,7 +361,7 @@ impl PostgresService {
             port_bindings: Some(HashMap::from([(
                 "5432/tcp".to_string(),
                 Some(vec![bollard::models::PortBinding {
-                    host_ip: Some("0.0.0.0".to_string()),
+                    host_ip: Some("127.0.0.1".to_string()),
                     host_port: Some(config.port.clone()),
                 }]),
             )])),
@@ -373,6 +373,9 @@ impl PostgresService {
                 ..Default::default()
             }]),
             log_config: Some(crate::utils::default_service_log_config()),
+            // Security hardening for service containers
+            security_opt: Some(vec!["no-new-privileges:true".to_string()]),
+            pids_limit: Some(512),
             ..Default::default()
         };
 
@@ -775,7 +778,45 @@ impl PostgresService {
         ))
     }
 
+    /// Validate that a database name is safe for use in SQL identifiers.
+    /// Only allows lowercase alphanumeric characters and underscores,
+    /// must start with a letter or underscore, and be <= 63 characters.
+    fn validate_database_name(name: &str) -> Result<()> {
+        if name.is_empty() {
+            return Err(anyhow::anyhow!("Database name cannot be empty"));
+        }
+        if name.len() > 63 {
+            return Err(anyhow::anyhow!(
+                "Database name '{}' exceeds 63 character limit",
+                name
+            ));
+        }
+        // Must only contain lowercase alphanumeric and underscores
+        if !name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        {
+            return Err(anyhow::anyhow!(
+                "Database name '{}' contains invalid characters. Only lowercase alphanumeric and underscores are allowed",
+                name
+            ));
+        }
+        // Must not start with a digit
+        if name.starts_with(|c: char| c.is_ascii_digit()) {
+            return Err(anyhow::anyhow!(
+                "Database name '{}' must not start with a digit",
+                name
+            ));
+        }
+        Ok(())
+    }
+
     async fn create_database(&self, service_config: ServiceConfig, name: &str) -> Result<()> {
+        // Enforce strict validation on the database name to prevent SQL injection.
+        // normalize_database_name() is called by callers, but we validate here as
+        // defense-in-depth to ensure no unsafe name ever reaches the SQL query.
+        Self::validate_database_name(name)?;
+
         let config: PostgresConfig = self.get_postgres_config(service_config)?;
         let connection_string = format!(
             "postgres://{}:{}@{}:{}/postgres",
@@ -790,22 +831,23 @@ impl PostgresService {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to connect to postgres: {}", e))?;
 
-        // Check if database exists
-        let check_db = format!("SELECT 1 FROM pg_database WHERE datname = '{}'", name);
-        info!("Checking if database exists: {}", check_db);
-        let exists = sqlx::query(&check_db)
+        // Check if database exists using parameterized query
+        let exists = sqlx::query("SELECT 1 FROM pg_database WHERE datname = $1")
+            .bind(name)
             .fetch_optional(&pool)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to check database existence: {}", e))?;
 
         if exists.is_none() {
-            // Create database if it doesn't exist
-            let create_db = format!("CREATE DATABASE {}", name);
-            info!("Creating database sql: {}", create_db);
+            // CREATE DATABASE cannot use parameterized queries in PostgreSQL,
+            // so we use a quoted identifier. The name has been validated above
+            // to contain only [a-z0-9_] characters, making injection impossible.
+            let create_db = format!("CREATE DATABASE \"{}\"", name);
+            info!("Creating database: {}", name);
             sqlx::query(&create_db)
                 .execute(&pool)
                 .await
-                .map_err(|e| anyhow::anyhow!("Failed to create database: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to create database '{}': {}", name, e))?;
         } else {
             info!("Database {} already exists, skipping creation", name);
         }
@@ -4172,5 +4214,96 @@ mod tests {
             "postgres-test-docker-env"
         );
         assert_eq!(env_vars.get("POSTGRES_PORT").unwrap(), "5432");
+    }
+
+    // ── Database Name SQL Injection Prevention Tests ─────────────────
+
+    #[test]
+    fn test_validate_database_name_valid_names() {
+        assert!(PostgresService::validate_database_name("mydb").is_ok());
+        assert!(PostgresService::validate_database_name("project_1_production").is_ok());
+        assert!(PostgresService::validate_database_name("db_test_env").is_ok());
+        assert!(PostgresService::validate_database_name("a").is_ok());
+        assert!(PostgresService::validate_database_name("_private").is_ok());
+    }
+
+    #[test]
+    fn test_validate_database_name_rejects_empty() {
+        assert!(PostgresService::validate_database_name("").is_err());
+    }
+
+    #[test]
+    fn test_validate_database_name_rejects_sql_injection_single_quote() {
+        // Classic SQL injection: ' OR 1=1 --
+        assert!(PostgresService::validate_database_name("test'; DROP TABLE users--").is_err());
+    }
+
+    #[test]
+    fn test_validate_database_name_rejects_sql_injection_semicolon() {
+        assert!(PostgresService::validate_database_name("mydb; DROP DATABASE production").is_err());
+    }
+
+    #[test]
+    fn test_validate_database_name_rejects_spaces() {
+        assert!(PostgresService::validate_database_name("my database").is_err());
+    }
+
+    #[test]
+    fn test_validate_database_name_rejects_special_chars() {
+        assert!(PostgresService::validate_database_name("db-name").is_err());
+        assert!(PostgresService::validate_database_name("db.name").is_err());
+        assert!(PostgresService::validate_database_name("db/name").is_err());
+        assert!(PostgresService::validate_database_name("db\\name").is_err());
+        assert!(PostgresService::validate_database_name("db\"name").is_err());
+        assert!(PostgresService::validate_database_name("db`name").is_err());
+    }
+
+    #[test]
+    fn test_validate_database_name_rejects_uppercase() {
+        // Uppercase is rejected to enforce consistency (normalize_database_name lowercases)
+        assert!(PostgresService::validate_database_name("MyDatabase").is_err());
+    }
+
+    #[test]
+    fn test_validate_database_name_rejects_leading_digit() {
+        assert!(PostgresService::validate_database_name("1database").is_err());
+        assert!(PostgresService::validate_database_name("123").is_err());
+    }
+
+    #[test]
+    fn test_validate_database_name_rejects_too_long() {
+        let long_name = "a".repeat(64);
+        assert!(PostgresService::validate_database_name(&long_name).is_err());
+    }
+
+    #[test]
+    fn test_validate_database_name_accepts_max_length() {
+        let max_name = "a".repeat(63);
+        assert!(PostgresService::validate_database_name(&max_name).is_ok());
+    }
+
+    #[test]
+    fn test_normalize_then_validate_is_always_safe() {
+        // Any input passed through normalize_database_name should pass validation
+        let dangerous_inputs = vec![
+            "'; DROP TABLE users--",
+            "test; DELETE FROM sessions",
+            "../../etc/passwd",
+            "admin\x00hidden",
+            "Robert'); DROP TABLE Students;--",
+            "name WITH spaces AND STUFF",
+            "UPPERCASE_NAME",
+            "123_starts_with_number",
+        ];
+
+        for input in dangerous_inputs {
+            let normalized = PostgresService::normalize_database_name(input);
+            assert!(
+                PostgresService::validate_database_name(&normalized).is_ok(),
+                "normalize_database_name('{}') produced '{}' which failed validation",
+                input,
+                normalized
+            );
+        }
     }
 }

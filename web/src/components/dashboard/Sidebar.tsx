@@ -17,23 +17,18 @@ import {
 import {
   Activity,
   BadgeCheck,
-  Bell,
   ChevronsUpDown,
   Cloud,
   Database,
-  DatabaseBackup,
   Folder,
   GitBranch,
   Globe,
-  Key,
   LogOut,
   Mail,
   MoreHorizontal,
   ScrollText,
-  Server,
   Settings,
   SquareTerminal,
-  Users,
 } from 'lucide-react'
 
 import { ProjectResponse } from '@/api/client'
@@ -89,6 +84,21 @@ const navMainAll = [
     url: '/monitoring',
     icon: Activity,
   },
+  {
+    title: 'Email',
+    url: '/email',
+    icon: Mail,
+  },
+  {
+    title: 'Git Providers',
+    url: '/git-providers',
+    icon: GitBranch,
+  },
+  {
+    title: 'DNS Providers',
+    url: '/dns-providers',
+    icon: Cloud,
+  },
 ]
 
 // Main navigation items available in demo mode (restricted)
@@ -111,65 +121,18 @@ const navMainDemo = [
   },
 ]
 
-const data = {
-  navSettings: [
-    {
-      title: 'Settings',
-      url: '/settings',
-      icon: Settings,
-    },
-    {
-      title: 'Email',
-      url: '/email',
-      icon: Mail,
-    },
-    {
-      title: 'Notifications',
-      url: '/notifications',
-      icon: Bell,
-    },
-    {
-      title: 'API Keys',
-      url: '/keys',
-      icon: Key,
-    },
-    {
-      title: 'Users',
-      url: '/users',
-      icon: Users,
-    },
-    {
-      title: 'Load balancer',
-      url: '/load-balancer',
-      icon: Server,
-    },
-    {
-      title: 'Git providers',
-      url: '/git-sources',
-      icon: GitBranch,
-    },
-    {
-      title: 'DNS providers',
-      url: '/dns-providers',
-      icon: Cloud,
-    },
-    {
-      title: 'Backups',
-      url: '/backups',
-      icon: DatabaseBackup,
-    },
-    {
-      title: 'Proxy Logs',
-      url: '/proxy-logs',
-      icon: Activity,
-    },
-    {
-      title: 'Audit Logs',
-      url: '/settings/audit-logs',
-      icon: ScrollText,
-    },
-  ],
-}
+const navObserve = [
+  {
+    title: 'Proxy Logs',
+    url: '/proxy-logs',
+    icon: Activity,
+  },
+  {
+    title: 'Audit Logs',
+    url: '/audit-logs',
+    icon: ScrollText,
+  },
+]
 
 function NavProjects({ projects }: { projects: ProjectResponse[] }) {
   const { isMinimal, isMobile } = useSidebar()
@@ -296,7 +259,7 @@ function NavMain({
   )
 }
 
-function NavSettings({
+function NavObserve({
   items,
 }: {
   items: { title: string; url: string; icon: LucideIcon }[]
@@ -311,7 +274,7 @@ function NavSettings({
       }
     >
       <SidebarGroupLabel className={isMinimal && !isMobile ? 'hidden' : ''}>
-        Settings
+        Observe
       </SidebarGroupLabel>
       <SidebarMenu>
         {items.map((item) => {
@@ -340,15 +303,94 @@ function NavSettings({
   )
 }
 
+function NavPlugins({
+  items,
+}: {
+  items: { title: string; url: string; icon: LucideIcon }[]
+}) {
+  const location = useLocation()
+  const { isMinimal, isMobile } = useSidebar()
+
+  if (items.length === 0) return null
+
+  return (
+    <SidebarGroup
+      className={
+        isMinimal && !isMobile ? '' : 'group-data-[collapsible=icon]:hidden'
+      }
+    >
+      <SidebarGroupLabel className={isMinimal && !isMobile ? 'hidden' : ''}>
+        Plugins
+      </SidebarGroupLabel>
+      <SidebarMenu>
+        {items.map((item) => {
+          const isActive = location.pathname.startsWith(item.url)
+          return (
+            <SidebarMenuItem key={item.title}>
+              <SidebarMenuButton
+                asChild
+                tooltip={isMinimal && !isMobile ? item.title : undefined}
+                className={cn(
+                  'justify-center',
+                  (!isMinimal || isMobile) && 'justify-start',
+                  isActive && 'bg-sidebar-accent text-sidebar-accent-foreground'
+                )}
+              >
+                <Link to={item.url}>
+                  <item.icon />
+                  {(!isMinimal || isMobile) && <span>{item.title}</span>}
+                </Link>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          )
+        })}
+      </SidebarMenu>
+    </SidebarGroup>
+  )
+}
+
+function NavSettingsLink() {
+  const location = useLocation()
+  const { isMinimal, isMobile } = useSidebar()
+  const isActive = location.pathname.startsWith('/settings')
+
+  return (
+    <SidebarGroup
+      className={
+        isMinimal && !isMobile ? '' : 'group-data-[collapsible=icon]:hidden'
+      }
+    >
+      <SidebarMenu>
+        <SidebarMenuItem>
+          <SidebarMenuButton
+            asChild
+            tooltip={isMinimal && !isMobile ? 'Settings' : undefined}
+            className={cn(
+              'justify-center',
+              (!isMinimal || isMobile) && 'justify-start',
+              isActive && 'bg-sidebar-accent text-sidebar-accent-foreground'
+            )}
+          >
+            <Link to="/settings">
+              <Settings />
+              {(!isMinimal || isMobile) && <span>Settings</span>}
+            </Link>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
+      </SidebarMenu>
+    </SidebarGroup>
+  )
+}
+
 export default function AppSidebar() {
   const { projects } = useProjects()
   const { setIsMinimal, isMinimal, isMobile } = useSidebar()
   const { isDemoMode } = useAuth()
-  const { platformNavEntries, settingsNavEntries } = usePluginsContext()
+  const { platformNavEntries } = usePluginsContext()
   const location = useLocation()
 
-  // Merge plugin nav entries into the platform section
-  const pluginPlatformItems = useMemo(
+  // Convert plugin nav entries to sidebar item format
+  const pluginItems = useMemo(
     () =>
       platformNavEntries.map((entry) => ({
         title: entry.label,
@@ -358,21 +400,8 @@ export default function AppSidebar() {
     [platformNavEntries]
   )
 
-  // Merge plugin nav entries into the settings section
-  const pluginSettingsItems = useMemo(
-    () =>
-      settingsNavEntries.map((entry) => ({
-        title: entry.label,
-        url: entry.path,
-        icon: resolvePluginIcon(entry.icon),
-      })),
-    [settingsNavEntries]
-  )
-
   // Use restricted navigation in demo mode (accessed via demo.<preview_domain> subdomain)
-  const navMainItems = isDemoMode
-    ? navMainDemo
-    : [...navMainAll, ...pluginPlatformItems]
+  const navMainItems = isDemoMode ? navMainDemo : navMainAll
 
   // Auto-collapse sidebar when on project detail pages
   useEffect(() => {
@@ -423,11 +452,13 @@ export default function AppSidebar() {
         <SidebarContent>
           <NavMain items={navMainItems} />
           <NavProjects projects={projects} />
-          {/* Hide settings section in demo mode */}
+          {/* Hide observe, plugins, and settings in demo mode */}
           {!isDemoMode && (
-            <NavSettings
-              items={[...data.navSettings, ...pluginSettingsItems]}
-            />
+            <>
+              <NavObserve items={navObserve} />
+              <NavPlugins items={pluginItems} />
+              <NavSettingsLink />
+            </>
           )}
           <SidebarGroup />
         </SidebarContent>
@@ -513,8 +544,6 @@ function NavUser() {
             <DropdownMenuItem
               onClick={async () => {
                 await logout()
-                // await logoutMutation({})
-                // location.reload()
               }}
             >
               <LogOut />

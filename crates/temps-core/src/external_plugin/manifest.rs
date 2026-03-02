@@ -80,6 +80,19 @@ pub struct PluginManifest {
     /// Health check endpoint path (relative to plugin root)
     #[serde(default = "default_health_path")]
     pub health_path: String,
+    /// Platform event types the plugin subscribes to.
+    ///
+    /// When specified, Temps will POST matching events to the plugin's
+    /// `/_events` endpoint. Uses dot-notation event names matching the
+    /// webhook event types (e.g., "deployment.succeeded", "project.created").
+    ///
+    /// Available events:
+    /// - `deployment.created`, `deployment.succeeded`, `deployment.failed`,
+    ///   `deployment.cancelled`, `deployment.ready`
+    /// - `project.created`, `project.deleted`
+    /// - `domain.created`, `domain.provisioned`
+    #[serde(default)]
+    pub events: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -107,6 +120,7 @@ impl PluginManifest {
                 ui: None,
                 requires_db: true,
                 health_path: "/health".to_string(),
+                events: Vec::new(),
             },
         }
     }
@@ -143,6 +157,18 @@ impl PluginManifestBuilder {
         self
     }
 
+    /// Subscribe to a platform event (e.g., "deployment.succeeded").
+    pub fn event(mut self, event_type: impl Into<String>) -> Self {
+        self.manifest.events.push(event_type.into());
+        self
+    }
+
+    /// Subscribe to multiple platform events at once.
+    pub fn events(mut self, event_types: Vec<String>) -> Self {
+        self.manifest.events.extend(event_types);
+        self
+    }
+
     pub fn build(self) -> PluginManifest {
         self.manifest
     }
@@ -163,6 +189,35 @@ pub enum HandshakeMessage {
     Manifest(Box<PluginManifest>),
     #[serde(rename = "ready")]
     Ready(PluginReady),
+}
+
+/// Well-known endpoint path where Temps delivers events to plugins.
+///
+/// Temps POSTs a JSON [`PluginEvent`] to this path on the plugin's Unix socket
+/// whenever a subscribed event occurs.
+pub const PLUGIN_EVENTS_PATH: &str = "/_events";
+
+/// An event delivered from Temps to a plugin.
+///
+/// This is the JSON body POSTed to `/_events` on the plugin's Unix socket.
+/// The structure mirrors the webhook payload format for consistency.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginEvent {
+    /// Unique event ID (UUID)
+    pub id: String,
+    /// Event type in dot-notation (e.g., "deployment.succeeded")
+    pub event_type: String,
+    /// ISO 8601 timestamp when the event occurred
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    /// Associated project ID, if applicable
+    pub project_id: Option<i32>,
+    /// Event-specific payload as a JSON value.
+    ///
+    /// The structure depends on the event type:
+    /// - `deployment.*` events include deployment details (id, branch, commit, status, etc.)
+    /// - `project.*` events include project details (id, name, slug, repo_url)
+    /// - `domain.*` events include domain details (id, name, project, ssl_status)
+    pub data: serde_json::Value,
 }
 
 #[cfg(test)]
@@ -224,5 +279,89 @@ mod tests {
         });
         let json = serde_json::to_string(&ready_msg).unwrap();
         assert!(json.contains("\"type\":\"ready\""));
+    }
+
+    #[test]
+    fn test_manifest_builder_event() {
+        let manifest = PluginManifest::builder("seo-plugin", "1.0.0")
+            .event("deployment.succeeded")
+            .event("deployment.ready")
+            .build();
+
+        assert_eq!(manifest.events.len(), 2);
+        assert_eq!(manifest.events[0], "deployment.succeeded");
+        assert_eq!(manifest.events[1], "deployment.ready");
+    }
+
+    #[test]
+    fn test_manifest_builder_events_batch() {
+        let manifest = PluginManifest::builder("audit-plugin", "1.0.0")
+            .events(vec![
+                "project.created".to_string(),
+                "project.deleted".to_string(),
+                "deployment.*".to_string(),
+            ])
+            .build();
+
+        assert_eq!(manifest.events.len(), 3);
+        assert!(manifest.events.contains(&"deployment.*".to_string()));
+    }
+
+    #[test]
+    fn test_manifest_events_default_empty() {
+        let manifest = PluginManifest::builder("no-events", "1.0.0").build();
+        assert!(manifest.events.is_empty());
+    }
+
+    #[test]
+    fn test_manifest_events_serialization_roundtrip() {
+        let manifest = PluginManifest::builder("test", "1.0.0")
+            .event("deployment.succeeded")
+            .event("project.created")
+            .build();
+
+        let json = serde_json::to_string(&manifest).unwrap();
+        assert!(json.contains("deployment.succeeded"));
+        assert!(json.contains("project.created"));
+
+        let deserialized: PluginManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.events.len(), 2);
+        assert_eq!(deserialized.events[0], "deployment.succeeded");
+        assert_eq!(deserialized.events[1], "project.created");
+    }
+
+    #[test]
+    fn test_manifest_events_deserialize_missing_field() {
+        // Old manifests without "events" field should deserialize with empty vec
+        let json = r#"{"name":"old-plugin","version":"1.0.0"}"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        assert!(manifest.events.is_empty());
+    }
+
+    #[test]
+    fn test_plugin_event_serialization_roundtrip() {
+        let event = PluginEvent {
+            id: "test-uuid".to_string(),
+            event_type: "deployment.succeeded".to_string(),
+            timestamp: chrono::Utc::now(),
+            project_id: Some(42),
+            data: serde_json::json!({
+                "deployment_id": 100,
+                "url": "https://example.com",
+            }),
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        let deserialized: PluginEvent = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.id, "test-uuid");
+        assert_eq!(deserialized.event_type, "deployment.succeeded");
+        assert_eq!(deserialized.project_id, Some(42));
+        assert_eq!(deserialized.data["deployment_id"], 100);
+    }
+
+    #[test]
+    fn test_plugin_events_path_constant() {
+        assert_eq!(PLUGIN_EVENTS_PATH, "/_events");
     }
 }

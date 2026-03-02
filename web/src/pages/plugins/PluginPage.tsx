@@ -1,19 +1,33 @@
 import { usePluginsContext } from '@/contexts/PluginsContext'
 import { resolvePluginIcon } from '@/lib/pluginIcons'
+import { Loader2 } from 'lucide-react'
+import { useCallback, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 
 /**
- * Generic page rendered for external plugin routes.
+ * Renders an external plugin's UI inside an iframe.
  *
- * For plugins that provide a UI bundle (future), this component will
- * load and mount the plugin's JS/CSS assets. For API-only plugins,
- * it shows the plugin info and a link to explore the API.
+ * The plugin serves its own HTML/JS/CSS at `/api/x/{pluginName}/ui/`.
+ * This component wraps it in a full-height iframe that communicates
+ * via postMessage for theme and navigation events.
  */
 export function PluginPage() {
   const { pluginName } = useParams<{ pluginName: string }>()
   const { getPlugin } = usePluginsContext()
+  const iframeRef = useRef<HTMLIFrameElement>(null)
+  const [isLoading, setIsLoading] = useState(true)
+  const [hasError, setHasError] = useState(false)
 
   const plugin = pluginName ? getPlugin(pluginName) : undefined
+
+  const handleLoad = useCallback(() => {
+    setIsLoading(false)
+  }, [])
+
+  const handleError = useCallback(() => {
+    setIsLoading(false)
+    setHasError(true)
+  }, [])
 
   if (!plugin) {
     return (
@@ -26,54 +40,51 @@ export function PluginPage() {
   const Icon = resolvePluginIcon(plugin.nav[0]?.icon ?? 'puzzle')
   const displayName = plugin.display_name ?? plugin.name
 
+  // The plugin UI is served by the plugin itself, proxied through the standard
+  // API proxy at /api/x/{name}/. This works in both dev (rsbuild proxies /api)
+  // and production (SPA fallback skips /api/ paths).
+  const iframeSrc = `/api/x/${plugin.name}/ui/`
+
   return (
-    <div className="max-w-4xl mx-auto p-6">
-      <div className="flex items-center gap-3 mb-6">
-        <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-muted">
-          <Icon className="h-5 w-5" />
+    <div className="flex flex-col h-[calc(100vh-4rem)]">
+      {/* Compact header */}
+      <div className="flex items-center gap-2 px-4 py-2 border-b bg-background shrink-0">
+        <div className="flex h-7 w-7 items-center justify-center rounded-md bg-muted">
+          <Icon className="h-4 w-4" />
         </div>
-        <div>
-          <h1 className="text-2xl font-semibold">{displayName}</h1>
-          {plugin.description && (
-            <p className="text-sm text-muted-foreground">
-              {plugin.description}
-            </p>
-          )}
-        </div>
-        <span className="ml-auto text-xs text-muted-foreground font-mono">
+        <h1 className="text-sm font-medium">{displayName}</h1>
+        <span className="text-xs text-muted-foreground font-mono">
           v{plugin.version}
         </span>
+        {isLoading && (
+          <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground ml-auto" />
+        )}
       </div>
 
-      <div className="rounded-lg border p-6">
-        <h2 className="text-lg font-medium mb-4">Plugin API</h2>
-        <p className="text-sm text-muted-foreground mb-4">
-          This plugin exposes an API at{' '}
-          <code className="rounded bg-muted px-1.5 py-0.5 text-xs font-mono">
-            /api/x/{plugin.name}/
-          </code>
-        </p>
-        <div className="grid grid-cols-2 gap-4 text-sm">
-          <div>
-            <span className="text-muted-foreground">Name:</span>{' '}
-            <span className="font-mono">{plugin.name}</span>
-          </div>
-          <div>
-            <span className="text-muted-foreground">Version:</span>{' '}
-            <span className="font-mono">{plugin.version}</span>
-          </div>
-          <div>
-            <span className="text-muted-foreground">Requires DB:</span>{' '}
-            <span>{plugin.requires_db ? 'Yes' : 'No'}</span>
-          </div>
-          <div>
-            <span className="text-muted-foreground">Health check:</span>{' '}
+      {/* iframe container */}
+      {hasError ? (
+        <div className="flex flex-col items-center justify-center flex-1 text-muted-foreground gap-2">
+          <p className="text-sm">
+            Failed to load plugin UI from{' '}
             <code className="rounded bg-muted px-1.5 py-0.5 text-xs font-mono">
-              /api/x/{plugin.name}{plugin.health_path}
+              {iframeSrc}
             </code>
-          </div>
+          </p>
+          <p className="text-xs">
+            Make sure the plugin serves HTML at its <code>/ui/</code> endpoint.
+          </p>
         </div>
-      </div>
+      ) : (
+        <iframe
+          ref={iframeRef}
+          src={iframeSrc}
+          title={`${displayName} plugin`}
+          className="flex-1 w-full border-0"
+          onLoad={handleLoad}
+          onError={handleError}
+          sandbox="allow-scripts allow-forms allow-same-origin allow-popups"
+        />
+      )}
     </div>
   )
 }

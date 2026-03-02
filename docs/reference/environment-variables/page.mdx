@@ -1,0 +1,305 @@
+export const metadata = {
+  title: "Environment Variables Reference",
+  description:
+    "Complete guide to environment variables in Temps. Set secrets, configure build-time vs runtime vars, and manage per-environment configs.",
+  alternates: {
+    canonical: "/docs/environment-variables",
+  },
+};
+
+export const sections = [
+  { title: "Server Configuration", id: "server" },
+  { title: "Database Configuration", id: "database" },
+  { title: "Application Environment Variables", id: "application" },
+  { title: "CLI Configuration", id: "cli" },
+  { title: "SDK Configuration", id: "sdk" },
+  { title: "Precedence Rules", id: "precedence" },
+];
+
+# Environment Variables Reference
+
+Complete reference for all environment variables used in Temps. {{ className: 'lead' }}
+
+---
+
+## Server Configuration {{ anchor: true, id: 'server' }}
+
+These environment variables configure the Temps server itself:
+
+| Variable                | CLI Flag            | Default          | Description                                          |
+| ----------------------- | ------------------- | ---------------- | ---------------------------------------------------- |
+| `TEMPS_ADDRESS`         | `--address`         | `127.0.0.1:3000` | HTTP server address and port                         |
+| `TEMPS_TLS_ADDRESS`     | `--tls-address`     | (optional)       | HTTPS server address and port                        |
+| `TEMPS_DATA_DIR`        | `--data-dir`        | `~/.temps`       | Data directory for keys and configuration            |
+| `TEMPS_LOG_LEVEL`       | `--log-level`       | `info`           | Log level: `trace`, `debug`, `info`, `warn`, `error` |
+| `TEMPS_CONSOLE_ADDRESS` | `--console-address` | (optional)       | Admin console address and port                       |
+
+### Example
+
+```bash
+export TEMPS_ADDRESS=0.0.0.0:8080
+export TEMPS_TLS_ADDRESS=0.0.0.0:8443
+export TEMPS_LOG_LEVEL=debug
+export TEMPS_DATA_DIR=/var/lib/temps
+```
+
+---
+
+## Database Configuration {{ anchor: true, id: 'database' }}
+
+| Variable             | CLI Flag         | Default    | Description                  |
+| -------------------- | ---------------- | ---------- | ---------------------------- |
+| `TEMPS_DATABASE_URL` | `--database-url` | (required) | PostgreSQL connection string |
+
+### Database URL Format
+
+```
+postgresql://[user[:password]@][host][:port][/database][?param1=value1&...]
+```
+
+### Example
+
+```bash
+export TEMPS_DATABASE_URL=postgresql://temps:password@localhost:5432/temps
+```
+
+### Data Directory
+
+Temps stores sensitive data in the data directory (`~/.temps` by default):
+
+```
+~/.temps/
+├── encryption_key    # AES-256 encryption key (auto-generated)
+└── auth_secret       # Session authentication secret (auto-generated)
+```
+
+<Note>
+  **Important**: Back up these files! Losing them means you cannot decrypt
+  existing data.
+</Note>
+
+---
+
+## Application Environment Variables {{ anchor: true, id: 'application' }}
+
+These are environment variables you configure for your deployed applications:
+
+### Setting Environment Variables
+
+Environment variables can be set per project and environment:
+
+**Via Dashboard:**
+
+1. Navigate to Project → Environment → Settings
+2. Go to Environment Variables section
+3. Add or edit variables
+
+**Via CLI:**
+
+```bash
+bunx @temps-sdk/cli environments vars set \
+  -p my-app \
+  DATABASE_URL "postgresql://user:pass@host/db"
+```
+
+**Via API:**
+
+```typescript
+await fetch("/api/projects/my-app/environments/production/env-vars", {
+  method: "POST",
+  headers: {
+    Authorization: `Bearer ${API_KEY}`,
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify({
+    key: "DATABASE_URL",
+    value: "postgresql://user:pass@host/db",
+  }),
+});
+```
+
+### Reserved Variables
+
+Temps automatically sets these variables in your containers:
+
+| Variable               | Description                                   |
+| ---------------------- | --------------------------------------------- |
+| `HOST`                 | Set to `0.0.0.0` to bind to all interfaces    |
+| `PORT`                 | Port number your application should listen on |
+| `TEMPS_PROJECT_ID`     | Current project ID                            |
+| `TEMPS_ENVIRONMENT_ID` | Current environment ID                        |
+| `TEMPS_DEPLOYMENT_ID`  | Current deployment ID                         |
+
+<Note>
+  **Note**: The `HOST` variable is automatically set to `0.0.0.0` to ensure
+  containers bind to all network interfaces, which is required for external
+  access via port mapping. You can override this if needed.
+</Note>
+
+### Framework-Specific Variables
+
+Common environment variables for popular frameworks:
+
+**Next.js:**
+
+```bash
+NODE_ENV=production
+NEXT_PUBLIC_API_URL=https://api.example.com
+```
+
+**React/Vite:**
+
+```bash
+VITE_API_URL=https://api.example.com
+```
+
+**Node.js:**
+
+```bash
+NODE_ENV=production
+PORT=3000
+```
+
+**Python:**
+
+```bash
+PYTHONUNBUFFERED=1
+FLASK_ENV=production
+```
+
+---
+
+## CLI Configuration {{ anchor: true, id: 'cli' }}
+
+These environment variables configure the Temps CLI:
+
+| Variable          | Description                                                 |
+| ----------------- | ----------------------------------------------------------- |
+| `TEMPS_API_URL`   | API endpoint URL (e.g., `https://app.temps.davidviejo.dev`) |
+| `TEMPS_API_TOKEN` | API authentication token                                    |
+| `TEMPS_API_KEY`   | API key (alternative to token)                              |
+| `NO_COLOR`        | Disable colored output (set to `1` or `true`)               |
+
+### Example
+
+```bash
+export TEMPS_API_URL=https://app.temps.davidviejo.dev
+export TEMPS_API_TOKEN=your-token-here
+```
+
+### Configuration Files
+
+CLI configuration is stored in:
+
+- **Config file**: `~/.temps/config.json`
+- **Credentials**: `~/.temps/.secrets`
+
+Use `bunx @temps-sdk/cli configure show` to view current configuration.
+
+---
+
+## SDK Configuration {{ anchor: true, id: 'sdk' }}
+
+### Node.js SDK
+
+| Variable           | Description                               |
+| ------------------ | ----------------------------------------- |
+| `TEMPS_API_URL`    | Your Temps API URL                        |
+| `TEMPS_TOKEN`      | Your API key or deployment token          |
+| `TEMPS_PROJECT_ID` | Project ID (optional, can be set in code) |
+
+### React Analytics SDK
+
+| Variable                       | Description                 |
+| ------------------------------ | --------------------------- |
+| `NEXT_PUBLIC_TEMPS_API_URL`    | Temps API URL (for Next.js) |
+| `NEXT_PUBLIC_TEMPS_PROJECT_ID` | Project ID (for Next.js)    |
+
+### Example
+
+```bash
+# Node.js SDK
+export TEMPS_API_URL=https://app.temps.davidviejo.dev
+export TEMPS_TOKEN=your-token-here
+
+# Next.js with React Analytics
+export NEXT_PUBLIC_TEMPS_API_URL=https://app.temps.davidviejo.dev
+export NEXT_PUBLIC_TEMPS_PROJECT_ID=123
+```
+
+---
+
+## Precedence Rules {{ anchor: true, id: 'precedence' }}
+
+Environment variables are resolved in the following order (highest to lowest priority):
+
+1. **Container Environment Variables** (set at deployment time)
+2. **Environment-Specific Variables** (set in dashboard/CLI for the environment)
+3. **Project-Level Variables** (set in dashboard/CLI for the project)
+4. **System Environment Variables** (from the host system)
+5. **Default Values** (if any)
+
+### Example
+
+If you set:
+
+- Project-level: `DATABASE_URL=postgres://project/db`
+- Environment-level: `DATABASE_URL=postgres://env/db`
+- Container-level: `DATABASE_URL=postgres://container/db`
+
+The container will use: `postgres://container/db` (highest priority).
+
+### Variable Override
+
+You can override any variable at a more specific level:
+
+```bash
+# Project-level (applies to all environments)
+bunx @temps-sdk/cli environments vars set \
+  -p my-app \
+  API_URL "https://api.example.com"
+
+# Environment-level (overrides project-level)
+bunx @temps-sdk/cli environments vars set \
+  -p my-app \
+  -e production \
+  API_URL "https://api-prod.example.com"
+```
+
+---
+
+## Best Practices
+
+### Security
+
+- **Never commit secrets**: Use environment variables for sensitive data
+- **Use different values per environment**: Production should have different credentials than staging
+- **Rotate secrets regularly**: Update API keys and tokens periodically
+- **Use secure storage**: Consider using secret management tools for production
+
+### Organization
+
+- **Use descriptive names**: `DATABASE_URL` is better than `DB`
+- **Document variables**: Keep a list of required variables in your README
+- **Group related variables**: Use prefixes like `DATABASE_`, `API_`, `REDIS_`
+- **Set defaults when possible**: Provide sensible defaults in your application code
+
+### Debugging
+
+- **Check variable precedence**: Verify which value is actually being used
+- **Use logging**: Log variable names (not values) to verify they're set
+- **Test locally**: Use `.env` files for local development
+- **Verify in dashboard**: Check environment variables in the Temps dashboard
+
+---
+
+## Additional Resources
+
+<div className="not-prose">
+  <Button href="/docs/api" variant="text" arrow="left">
+    API Reference
+  </Button>
+  <Button href="/docs/cli" variant="text" arrow="right">
+    CLI Reference
+  </Button>
+</div>

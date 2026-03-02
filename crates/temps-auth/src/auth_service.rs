@@ -14,7 +14,7 @@ use std::sync::Arc;
 use temps_core::notifications::DynNotificationService;
 use thiserror::Error;
 use totp_rs::Secret;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 use uuid::Uuid;
 const DEFAULT_EXTERNAL_URL: &str = "http://localhost:8000";
 #[derive(Serialize)]
@@ -99,9 +99,10 @@ impl AuthService {
     ) -> Result<temps_entities::users::Model, AuthError> {
         let session = temps_entities::sessions::Entity::find()
             .filter(temps_entities::sessions::Column::SessionToken.eq(session_token))
+            .filter(temps_entities::sessions::Column::ExpiresAt.gt(Utc::now()))
             .one(self.db.as_ref())
             .await?
-            .ok_or_else(|| AuthError::NotFound("Session not found".to_string()))?;
+            .ok_or_else(|| AuthError::NotFound("Session not found or expired".to_string()))?;
 
         let user = temps_entities::users::Entity::find_by_id(session.user_id)
             .filter(temps_entities::users::Column::DeletedAt.is_null())
@@ -136,10 +137,18 @@ impl AuthService {
             .secure(is_https)
             .build();
 
-        info!("Adding session cookie: {}", session_cookie);
+        debug!("Setting session cookie (token redacted)");
         let mut headers = HeaderMap::new();
-        headers.append(SET_COOKIE, session_cookie.to_string().parse().unwrap());
-        headers.append(SET_COOKIE, mfa_clear_cookie.to_string().parse().unwrap());
+        if let Ok(value) = session_cookie.to_string().parse() {
+            headers.append(SET_COOKIE, value);
+        } else {
+            error!("Failed to parse session cookie header value");
+        }
+        if let Ok(value) = mfa_clear_cookie.to_string().parse() {
+            headers.append(SET_COOKIE, value);
+        } else {
+            error!("Failed to parse MFA clear cookie header value");
+        }
         headers
     }
 
@@ -254,6 +263,9 @@ impl AuthService {
         &self,
         request: RegisterRequest,
     ) -> Result<temps_entities::users::Model, UserAuthError> {
+        // Validate password complexity
+        validate_password_complexity(&request.password)?;
+
         // Check if email already exists
         let existing_user = temps_entities::users::Entity::find()
             .filter(temps_entities::users::Column::Email.eq(request.email.to_lowercase()))
@@ -492,6 +504,9 @@ impl AuthService {
         &self,
         request: ResetPasswordRequest,
     ) -> Result<temps_entities::users::Model, UserAuthError> {
+        // Validate password complexity
+        validate_password_complexity(&request.new_password)?;
+
         // Find user by reset token
         let user = temps_entities::users::Entity::find()
             .filter(temps_entities::users::Column::PasswordResetToken.eq(&request.token))
@@ -584,6 +599,47 @@ impl AuthService {
     }
 }
 
+/// Validate password meets minimum complexity requirements.
+/// Requirements:
+/// - At least 8 characters long
+/// - Contains at least one uppercase letter
+/// - Contains at least one lowercase letter
+/// - Contains at least one digit
+/// - Contains at least one special character
+pub fn validate_password_complexity(password: &str) -> Result<(), UserAuthError> {
+    if password.len() < 8 {
+        return Err(UserAuthError::WeakPassword(
+            "Password must be at least 8 characters long".to_string(),
+        ));
+    }
+    if password.len() > 128 {
+        return Err(UserAuthError::WeakPassword(
+            "Password must not exceed 128 characters".to_string(),
+        ));
+    }
+    if !password.chars().any(|c| c.is_uppercase()) {
+        return Err(UserAuthError::WeakPassword(
+            "Password must contain at least one uppercase letter".to_string(),
+        ));
+    }
+    if !password.chars().any(|c| c.is_lowercase()) {
+        return Err(UserAuthError::WeakPassword(
+            "Password must contain at least one lowercase letter".to_string(),
+        ));
+    }
+    if !password.chars().any(|c| c.is_ascii_digit()) {
+        return Err(UserAuthError::WeakPassword(
+            "Password must contain at least one digit".to_string(),
+        ));
+    }
+    if !password.chars().any(|c| !c.is_alphanumeric()) {
+        return Err(UserAuthError::WeakPassword(
+            "Password must contain at least one special character".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Error, Debug)]
 pub enum UserAuthError {
     #[error("Database error: {0}")]
@@ -598,6 +654,8 @@ pub enum UserAuthError {
     InvalidToken,
     #[error("Password hashing error")]
     PasswordHashError,
+    #[error("Password does not meet complexity requirements: {0}")]
+    WeakPassword(String),
     #[error("Email service not configured")]
     EmailServiceNotConfigured,
     #[error("Email service error: {0}")]
@@ -819,6 +877,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_verify_session_expired_is_rejected() {
+        let (db, auth_service, _) = setup_test_env().await;
+        let user = create_test_user(&db.db, "expired@example.com", "password").await;
+
+        // Manually insert an expired session (expired 1 hour ago)
+        let expired_token = "expired_session_token_1234567890abcdef1234567890abcdef1234567890ab";
+        let expired_session = sessions::ActiveModel {
+            user_id: Set(user.id),
+            session_token: Set(expired_token.to_string()),
+            expires_at: Set(Utc::now() - Duration::hours(1)),
+            ..Default::default()
+        };
+        expired_session.insert(db.db.as_ref()).await.unwrap();
+
+        // Verify that the expired session is rejected
+        let result = auth_service.verify_session(expired_token).await;
+        assert!(result.is_err(), "Expired sessions must be rejected");
+        assert!(
+            matches!(result.unwrap_err(), AuthError::NotFound(_)),
+            "Expired session should return NotFound error"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_verify_session_just_expired_is_rejected() {
+        let (db, auth_service, _) = setup_test_env().await;
+        let user = create_test_user(&db.db, "justexpired@example.com", "password").await;
+
+        // Insert a session that expired just 1 second ago
+        let token = "justexpired_token_1234567890abcdef1234567890abcdef1234567890abcde";
+        let session = sessions::ActiveModel {
+            user_id: Set(user.id),
+            session_token: Set(token.to_string()),
+            expires_at: Set(Utc::now() - Duration::seconds(1)),
+            ..Default::default()
+        };
+        session.insert(db.db.as_ref()).await.unwrap();
+
+        let result = auth_service.verify_session(token).await;
+        assert!(
+            result.is_err(),
+            "Even recently expired sessions must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_verify_session_not_yet_expired_is_accepted() {
+        let (db, auth_service, _) = setup_test_env().await;
+        let user = create_test_user(&db.db, "valid@example.com", "password").await;
+
+        // Create a normal session (valid for 7 days)
+        let session_token = auth_service.create_session(user.id).await.unwrap();
+
+        // Session should be valid
+        let verified_user = auth_service.verify_session(&session_token).await.unwrap();
+        assert_eq!(verified_user.id, user.id);
+    }
+
+    #[tokio::test]
     async fn test_create_session_cookie() {
         let (_db, auth_service, _) = setup_test_env().await;
 
@@ -832,6 +949,26 @@ mod tests {
         assert!(session_cookie.contains("session=test_session_token"));
         assert!(session_cookie.contains("HttpOnly"));
         assert!(session_cookie.contains("Secure"));
+    }
+
+    #[tokio::test]
+    async fn test_create_session_cookie_does_not_panic() {
+        // Verify that cookie creation never panics, even with unusual tokens.
+        // Previously used .unwrap() which could panic on malformed values.
+        let (_db, auth_service, _) = setup_test_env().await;
+
+        // Normal token
+        let _ = auth_service.create_session_cookie("normal_token_value", true);
+
+        // Empty token
+        let _ = auth_service.create_session_cookie("", false);
+
+        // Long token
+        let long_token = "a".repeat(1000);
+        let _ = auth_service.create_session_cookie(&long_token, true);
+
+        // Token with special characters (should not panic)
+        let _ = auth_service.create_session_cookie("token-with-dashes_and_underscores", false);
     }
 
     #[tokio::test]
@@ -1381,5 +1518,100 @@ mod tests {
         assert_eq!(token1.len(), 64);
         assert_eq!(token2.len(), 64);
         assert_ne!(token1, token2); // Should be unique
+    }
+
+    // === Password complexity validation tests ===
+
+    #[test]
+    fn test_password_complexity_valid() {
+        // A strong password should pass
+        assert!(validate_password_complexity("MyP@ssw0rd").is_ok());
+        assert!(validate_password_complexity("Str0ng!Pass").is_ok());
+        assert!(validate_password_complexity("C0mpl3x#").is_ok());
+        assert!(validate_password_complexity("12345678Aa!").is_ok());
+    }
+
+    #[test]
+    fn test_password_too_short() {
+        let result = validate_password_complexity("Aa1!");
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), UserAuthError::WeakPassword(msg) if msg.contains("8 characters"))
+        );
+    }
+
+    #[test]
+    fn test_password_too_long() {
+        let long_password = format!("Aa1!{}", "x".repeat(128));
+        let result = validate_password_complexity(&long_password);
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), UserAuthError::WeakPassword(msg) if msg.contains("128 characters"))
+        );
+    }
+
+    #[test]
+    fn test_password_no_uppercase() {
+        let result = validate_password_complexity("myp@ssw0rd");
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), UserAuthError::WeakPassword(msg) if msg.contains("uppercase"))
+        );
+    }
+
+    #[test]
+    fn test_password_no_lowercase() {
+        let result = validate_password_complexity("MYP@SSW0RD");
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), UserAuthError::WeakPassword(msg) if msg.contains("lowercase"))
+        );
+    }
+
+    #[test]
+    fn test_password_no_digit() {
+        let result = validate_password_complexity("MyP@ssword");
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), UserAuthError::WeakPassword(msg) if msg.contains("digit"))
+        );
+    }
+
+    #[test]
+    fn test_password_no_special_char() {
+        let result = validate_password_complexity("MyPassw0rd");
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), UserAuthError::WeakPassword(msg) if msg.contains("special"))
+        );
+    }
+
+    #[test]
+    fn test_password_empty() {
+        let result = validate_password_complexity("");
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), UserAuthError::WeakPassword(msg) if msg.contains("8 characters"))
+        );
+    }
+
+    #[test]
+    fn test_password_only_spaces() {
+        let result = validate_password_complexity("        ");
+        assert!(result.is_err());
+        // Spaces pass the special char check but fail uppercase, lowercase, digit
+        assert!(matches!(
+            result.unwrap_err(),
+            UserAuthError::WeakPassword(_)
+        ));
+    }
+
+    #[test]
+    fn test_password_attacker_common_passwords_rejected() {
+        // Common weak passwords that meet some but not all criteria
+        assert!(validate_password_complexity("password").is_err()); // no uppercase, digit, special
+        assert!(validate_password_complexity("12345678").is_err()); // no uppercase, lowercase, special
+        assert!(validate_password_complexity("Password").is_err()); // no digit, special
+        assert!(validate_password_complexity("Password1").is_err()); // no special
     }
 }

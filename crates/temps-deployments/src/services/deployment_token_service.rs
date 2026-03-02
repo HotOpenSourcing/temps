@@ -459,6 +459,8 @@ impl DeploymentTokenService {
         }
 
         // Parse permissions
+        // SECURITY: NULL permissions defaults to empty (no access) instead of FullAccess.
+        // Tokens must explicitly include "*" (FullAccess) in their permissions array.
         let permissions = if let Some(ref perms_json) = token_model.permissions {
             let perm_strings: Vec<String> =
                 serde_json::from_value(perms_json.clone()).map_err(|_| {
@@ -472,7 +474,11 @@ impl DeploymentTokenService {
                 .filter_map(|s| DeploymentTokenPermission::from_str(s))
                 .collect()
         } else {
-            vec![DeploymentTokenPermission::FullAccess]
+            tracing::warn!(
+                "Deployment token {} has NULL permissions, defaulting to no access",
+                token_model.id
+            );
+            vec![]
         };
 
         // Update last_used_at

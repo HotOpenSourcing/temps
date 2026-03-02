@@ -71,7 +71,7 @@ mod docker_utils {
                     port_bindings: Some(HashMap::from([(
                         "9000/tcp".to_string(),
                         Some(vec![bollard::models::PortBinding {
-                            host_ip: Some("0.0.0.0".to_string()),
+                            host_ip: Some("127.0.0.1".to_string()),
                             host_port: Some(port.to_string()),
                         }]),
                     )])),

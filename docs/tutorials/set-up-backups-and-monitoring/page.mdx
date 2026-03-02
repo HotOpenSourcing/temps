@@ -1,0 +1,550 @@
+export const metadata = {
+  title: 'Set Up Backups & Monitoring',
+  description:
+    'Configure automated backups to S3 storage and uptime monitoring with alerts. Protect your data and know the moment something goes wrong.',
+  alternates: {
+    canonical: '/docs/set-up-backups-and-monitoring',
+  },
+}
+
+export const sections = [
+  { title: 'What you will build', id: 'what-you-will-build' },
+  { title: 'Prerequisites', id: 'prerequisites' },
+  { title: 'Connect S3 storage', id: 'connect-s3-storage' },
+  { title: 'Run your first backup', id: 'run-your-first-backup' },
+  { title: 'Create a backup schedule', id: 'create-a-backup-schedule' },
+  { title: 'Set up a notification channel', id: 'set-up-a-notification-channel' },
+  { title: 'Create an uptime monitor', id: 'create-an-uptime-monitor' },
+  { title: 'Simulate a failure', id: 'simulate-a-failure' },
+  { title: 'Restore from a backup', id: 'restore-from-a-backup' },
+  { title: 'What you have accomplished', id: 'what-you-have-accomplished' },
+]
+
+# Set Up Backups & Monitoring
+
+This tutorial configures automated backups and uptime monitoring for your Temps instance. By the end, your data will be backed up to S3 on a schedule, you will receive alerts when something goes down, and you will know how to restore from a backup. {{ className: 'lead' }}
+
+---
+
+## What you will build {{ anchor: true, id: 'what-you-will-build' }}
+
+By the end of this tutorial, you will have:
+
+- An S3-compatible storage bucket connected to Temps for off-site backups
+- A manual backup of your Temps database and all managed services
+- An automated backup schedule that runs nightly
+- A notification channel (email, Slack, or webhook) for alerts
+- An uptime monitor that checks your application every 60 seconds
+- Experience restoring from a backup
+
+**Time required:** approximately 20 minutes.
+
+**What this tutorial covers and does not cover:**
+
+| Covered | Not covered |
+|---------|-------------|
+| Connecting S3 storage for backups | Setting up managed databases ([tutorial](/docs/deploy-with-database)) |
+| Manual and scheduled backups | CI/CD pipeline configuration ([how-to guide](/docs/set-up-ci-cd-pipeline)) |
+| Email, Slack, and webhook notifications | Disk space monitoring (runs automatically) |
+| Uptime monitors and incidents | Custom status pages |
+| Restoring from a backup | Point-in-time recovery with WAL-G |
+
+---
+
+## Prerequisites {{ anchor: true, id: 'prerequisites' }}
+
+You need:
+
+- A **running Temps instance** with at least one deployed project (complete [Your First Deployment](/docs/your-first-deployment) first)
+- **S3-compatible storage** — any of the following:
+  - [AWS S3](https://aws.amazon.com/s3/) bucket
+  - [MinIO](https://min.io/) instance (self-hosted)
+  - [DigitalOcean Spaces](https://www.digitalocean.com/products/spaces)
+  - [Cloudflare R2](https://developers.cloudflare.com/r2/)
+  - Any S3-compatible object storage
+- **Credentials** for your S3 storage: access key ID, secret access key, bucket name, region, and endpoint URL (for non-AWS providers)
+
+<Note>
+**If you do not have S3 storage yet:** The cheapest option for getting started is [Cloudflare R2](https://developers.cloudflare.com/r2/) (free tier includes 10 GB) or a self-hosted [MinIO](https://min.io/) instance on the same server. For production, use a provider in a different region from your Temps server so backups survive even if the server is lost.
+</Note>
+
+---
+
+## Connect S3 storage {{ anchor: true, id: 'connect-s3-storage' }}
+
+Temps stores backups in S3-compatible object storage. You need to connect a storage source before you can create backups.
+
+1. In the Temps dashboard sidebar, click **Settings** (at the bottom)
+2. Find the **Backups** section
+3. Click **Add S3 Source**
+4. Fill in your storage details:
+
+<Properties>
+  <Property name="Name">
+    A label for this storage source, e.g. `production-backups`. This is for your reference only.
+  </Property>
+  <Property name="Bucket Name">
+    The name of your S3 bucket. It must already exist, or Temps will attempt to create it automatically.
+  </Property>
+  <Property name="Bucket Path">
+    The prefix (folder) within the bucket where backups are stored. Defaults to `backups`. Use a different path if you share the bucket with other tools.
+  </Property>
+  <Property name="Access Key ID">
+    Your S3 access key. Stored encrypted at rest (AES-256-GCM).
+  </Property>
+  <Property name="Secret Access Key">
+    Your S3 secret key. Stored encrypted at rest.
+  </Property>
+  <Property name="Region">
+    The bucket region, e.g. `us-east-1`, `eu-west-1`. For MinIO or other self-hosted providers, use whatever region your instance is configured with (often `us-east-1`).
+  </Property>
+  <Property name="Endpoint">
+    The S3-compatible endpoint URL. **Leave blank for AWS S3.** For other providers:
+    - MinIO: `http://your-minio-server:9000`
+    - DigitalOcean Spaces: `https://nyc3.digitaloceanspaces.com`
+    - Cloudflare R2: `https://<account-id>.r2.cloudflarestorage.com`
+  </Property>
+  <Property name="Force Path Style">
+    Enable this for MinIO and most non-AWS providers. AWS S3 uses virtual-hosted-style by default. When in doubt, enable it.
+  </Property>
+</Properties>
+
+Click **Save**. Temps validates the connection by checking bucket access. If validation fails, verify your credentials and ensure the bucket exists.
+
+<Note>
+**Security:** Your S3 credentials are encrypted before being stored in the database using AES-256-GCM. They are never exposed in API responses — the dashboard shows `***` in place of secret values.
+</Note>
+
+---
+
+## Run your first backup {{ anchor: true, id: 'run-your-first-backup' }}
+
+With storage connected, run a manual backup to verify everything works.
+
+1. On the **Backups** settings page, find your S3 source
+2. Click the **Run Backup** button (or use the actions menu)
+3. Select **Full** as the backup type
+
+Temps starts the backup immediately. The process:
+
+1. **Temps database** — The internal PostgreSQL database (with TimescaleDB extension) is backed up first. Temps uses WAL-G for efficient streaming backups when available, falling back to `pg_dump` otherwise.
+2. **Managed services** — Every managed service you have provisioned (PostgreSQL databases, Redis instances, S3 storage) is backed up individually.
+3. **Metadata** — A `metadata.json` file is generated with checksums, sizes, timestamps, and service inventory.
+4. **Upload** — Everything is uploaded to your S3 bucket and the backup index is updated.
+
+You can watch the progress on the page. When the status changes to **Completed**, your first backup is done.
+
+### Verify the backup
+
+Check that files were written to your S3 bucket. The backup is stored at:
+
+```
+{bucket_path}/backups/{YYYY}/{MM}/{DD}/{backup-uuid}/
+  ├── backup.sql.gz       # Temps database dump (gzip compressed)
+  ├── metadata.json        # Checksums, sizes, timestamps
+  └── ...                  # External service backups (if any)
+```
+
+There is also an index file at `{bucket_path}/backups/index.json` that lists all backups.
+
+### Verify from the CLI
+
+If you have the Temps CLI installed, you can list backups directly from S3:
+
+```bash
+bunx @temps-sdk/cli backup list \
+  --access-key-id YOUR_ACCESS_KEY \
+  --secret-access-key YOUR_SECRET_KEY \
+  --bucket-name your-backup-bucket \
+  --bucket-path backups \
+  --region us-east-1
+```
+
+For non-AWS providers, add `--endpoint` and `--force-path-style`:
+
+```bash
+bunx @temps-sdk/cli backup list \
+  --access-key-id YOUR_ACCESS_KEY \
+  --secret-access-key YOUR_SECRET_KEY \
+  --bucket-name your-backup-bucket \
+  --endpoint https://your-minio-server:9000 \
+  --force-path-style
+```
+
+---
+
+## Create a backup schedule {{ anchor: true, id: 'create-a-backup-schedule' }}
+
+Manual backups are useful for one-off situations (before a migration, before an upgrade). For day-to-day protection, set up an automated schedule.
+
+1. On the **Backups** settings page, click **Add Schedule**
+2. Configure the schedule:
+
+<Properties>
+  <Property name="Name">
+    A descriptive name, e.g. `nightly-full-backup`.
+  </Property>
+  <Property name="Backup Type">
+    The type of backup. Use `full` for complete database dumps.
+  </Property>
+  <Property name="S3 Source">
+    Select the S3 source you created earlier.
+  </Property>
+  <Property name="Schedule Expression">
+    A cron expression (with seconds) defining when the backup runs. Examples:
+    - `0 0 2 * * *` — Every day at 2:00 AM
+    - `0 0 3 * * 0` — Every Sunday at 3:00 AM
+    - `0 0 */6 * * *` — Every 6 hours
+
+    The minimum interval between backups is **1 hour**.
+  </Property>
+  <Property name="Retention Period">
+    Number of days to keep backups before automatic deletion. For example, `30` keeps one month of backups.
+  </Property>
+  <Property name="Description">
+    Optional notes about this schedule.
+  </Property>
+  <Property name="Tags">
+    Optional tags for organizing backups, e.g. `production`, `nightly`.
+  </Property>
+</Properties>
+
+Click **Create**. The schedule starts immediately — the next backup will run at the time specified by your cron expression.
+
+### Recommended schedules
+
+| Use case | Cron expression | Retention | Rationale |
+|----------|----------------|-----------|-----------|
+| Production (daily) | `0 0 2 * * *` | 30 days | Daily at 2 AM, keep one month |
+| Production (hourly) | `0 0 * * * *` | 7 days | Every hour, keep one week. For high-write databases. |
+| Staging (weekly) | `0 0 3 * * 0` | 14 days | Sunday at 3 AM, keep two weeks |
+
+<Note>
+**When do schedules run?** Temps checks for due schedules at the top of every hour. A schedule is considered due when the current time exceeds its `next_run` timestamp. After running, the next execution time is calculated from the cron expression.
+</Note>
+
+### Disable or enable a schedule
+
+You can pause a schedule without deleting it. On the Backups page, use the toggle or actions menu to **Disable** or **Enable** a schedule. Disabled schedules retain their configuration and history but do not run.
+
+---
+
+## Set up a notification channel {{ anchor: true, id: 'set-up-a-notification-channel' }}
+
+Before setting up monitoring, configure where Temps should send alerts. Temps supports three notification channels: email, Slack, and webhooks.
+
+### Option A: Email notifications
+
+1. In the sidebar, click **Settings**
+2. Find the **Notifications** section
+3. Click **Add Provider** and choose **Email**
+4. Configure your SMTP server:
+
+<Properties>
+  <Property name="SMTP Host">
+    Your mail server hostname, e.g. `smtp.gmail.com`, `smtp.resend.com`, `email-smtp.us-east-1.amazonaws.com`.
+  </Property>
+  <Property name="SMTP Port">
+    Usually `587` (STARTTLS) or `465` (TLS). Port `25` is unencrypted and not recommended.
+  </Property>
+  <Property name="Username">
+    Your SMTP username or email address.
+  </Property>
+  <Property name="Password">
+    Your SMTP password or app-specific password.
+  </Property>
+  <Property name="TLS Mode">
+    `Starttls` (port 587) or `Tls` (port 465). Use `None` only for local relay servers.
+  </Property>
+  <Property name="Recipient Addresses">
+    Email addresses to receive alerts. By default, alerts are also sent to all admin users.
+  </Property>
+</Properties>
+
+### Option B: Slack notifications
+
+1. Create a [Slack Incoming Webhook](https://api.slack.com/messaging/webhooks) for the channel you want alerts in
+2. In Temps, click **Add Provider** and choose **Slack**
+3. Paste the webhook URL (must start with `https://hooks.slack.com/`)
+4. Optionally set a channel name for display purposes
+
+Slack notifications include color-coded attachments: red for errors, orange for warnings, blue for informational.
+
+### Option C: Webhook notifications
+
+For integrations with Discord, PagerDuty, or any HTTP endpoint:
+
+1. Click **Add Provider** and choose **Webhook**
+2. Enter the URL of your webhook endpoint
+3. Optionally configure:
+   - **HTTP Method** — POST (default), PUT, or PATCH
+   - **Headers** — Custom headers for authentication (e.g. `Authorization: Bearer your-token`)
+   - **Timeout** — Maximum wait time in seconds (default: 30)
+
+Webhook payloads are JSON:
+
+```json
+{
+  "id": "notif_abc123",
+  "title": "Backup Failed",
+  "message": "Nightly backup schedule 'production-daily' failed",
+  "type": "error",
+  "priority": "high",
+  "severity": "error",
+  "timestamp": "2026-02-28T02:00:15Z",
+  "metadata": {
+    "schedule_id": 1,
+    "schedule_name": "production-daily",
+    "backup_type": "full"
+  }
+}
+```
+
+### Test your notification channel
+
+After creating a provider, click the **Test** button. Temps sends a test notification to verify the connection works. You should receive a test message within a few seconds.
+
+### Configure notification preferences
+
+Temps lets you fine-tune what triggers notifications. In **Settings > Notifications > Preferences**, you can control:
+
+- **Backup notifications** — failures (enabled by default), successes, S3 connection issues, retention violations
+- **Domain notifications** — SSL certificate expiration (30 days before), domain expiration, DNS changes
+- **Runtime notifications** — deployment failures, build errors, runtime error spikes
+- **Weekly digest** — a summary email sent every Monday at 9 AM with deployment stats, error trends, and performance metrics
+
+<Note>
+**Smart throttling:** Temps batches similar notifications to avoid alert fatigue. Critical alerts have a 15-minute cooldown, high-priority alerts 1 hour, and normal alerts 1 day. Identical notifications within the cooldown window are grouped with an occurrence count.
+</Note>
+
+---
+
+## Create an uptime monitor {{ anchor: true, id: 'create-an-uptime-monitor' }}
+
+Uptime monitors check your application's health at regular intervals and alert you when something goes down.
+
+1. Open your project in the dashboard
+2. Click **Monitors** in the project sidebar
+3. Click **Add Monitor**
+4. Configure the monitor:
+
+<Properties>
+  <Property name="Name">
+    A label for this monitor, e.g. `Production Health Check`.
+  </Property>
+  <Property name="Monitor Type">
+    The type of check to perform:
+    - **web** — Checks any URL for a successful HTTP response
+    - **health** — Checks the `/health` endpoint of the environment's subdomain
+    - **api** — Checks an API endpoint for a successful response
+  </Property>
+  <Property name="Environment">
+    Which environment to monitor (e.g. production). The check URL is constructed from the environment's subdomain.
+  </Property>
+  <Property name="Check Interval">
+    How often to check, in seconds. Default: `60` (every minute).
+  </Property>
+</Properties>
+
+Click **Create**. Temps runs the first check immediately and then continues at the interval you specified.
+
+### How health checks work
+
+Each check:
+
+1. Sends an HTTP GET request to the monitor URL
+2. Waits up to **10 seconds** for a response (within a 30-second client timeout)
+3. Retries up to **3 times** with exponential backoff (100ms, 200ms, 400ms) before marking as failed
+4. Maps the response to a status:
+
+| HTTP Response | Monitor Status |
+|---------------|---------------|
+| 2xx (Success) | Operational |
+| 4xx (Client Error) | Degraded |
+| 5xx (Server Error) | Major Outage |
+| Timeout / No Response | Major Outage |
+
+### Failure threshold and incidents
+
+A single failed check does not trigger an alert. By default, Temps requires **2 consecutive failures** before creating an incident. This avoids false alarms from network blips.
+
+When an outage is confirmed:
+
+1. The monitor status changes to **Down**
+2. An **incident** is created with severity based on the failure type (Minor for degraded, Major for down)
+3. A notification is sent to all configured channels
+4. The incident appears on the project's status overview
+
+When the monitor recovers:
+
+1. The monitor status returns to **Operational**
+2. The incident is automatically **resolved**
+3. A recovery notification is sent
+
+### View uptime history
+
+On the Monitors page, each monitor shows:
+
+- **Current status** — Operational, Degraded, or Down
+- **Response time** — Average, P50, P75, P95, P99 percentiles
+- **Uptime history** — Time-bucketed data showing operational/degraded/down periods
+- **Incident history** — All past incidents with severity, duration, and resolution time
+
+---
+
+## Simulate a failure {{ anchor: true, id: 'simulate-a-failure' }}
+
+To verify your monitoring and notification setup is working end-to-end, you can temporarily break your application and watch the system respond.
+
+### Option 1: Stop the container (recommended)
+
+If you have SSH access to your server:
+
+```bash
+# Find your application's container
+docker ps | grep your-project-name
+
+# Pause it temporarily (does not destroy it)
+docker pause <container-id>
+```
+
+Wait for 2-3 minutes (two check intervals). You should:
+
+1. See the monitor status change to **Down** in the dashboard
+2. Receive an outage notification on your configured channel
+3. See an incident created in the project's **Monitors** section
+
+Now resume the container:
+
+```bash
+docker unpause <container-id>
+```
+
+Within one check interval (60 seconds), you should:
+
+1. See the monitor status return to **Operational**
+2. Receive a recovery notification
+3. See the incident automatically resolved
+
+### Option 2: Deploy a broken version
+
+Push a commit that returns a 500 error from your health endpoint, deploy it, wait for the alert, then fix and redeploy. This tests the full loop including deployments, but takes longer.
+
+<Note>
+**Alert cooldown:** After an outage alert, Temps waits 5 minutes before sending another alert for the same monitor. This is configurable. If you are testing, be patient — the recovery notification will arrive after the cooldown period.
+</Note>
+
+---
+
+## Restore from a backup {{ anchor: true, id: 'restore-from-a-backup' }}
+
+The point of backups is restoring from them. Test this now while everything is working, so you are prepared if you ever need it for real.
+
+<Note>
+**Warning:** Restoring replaces your current data. In production, always restore to a staging environment first. For this tutorial, since you are learning, a direct restore is fine — but be aware it will overwrite the Temps database.
+</Note>
+
+### Restore via the CLI
+
+The CLI is the primary way to restore backups. It handles downloading from S3, decompressing, and restoring both the Temps database and all managed services.
+
+**Step 1: List available backups**
+
+```bash
+bunx @temps-sdk/cli backup list \
+  --access-key-id YOUR_ACCESS_KEY \
+  --secret-access-key YOUR_SECRET_KEY \
+  --bucket-name your-backup-bucket \
+  --region us-east-1
+```
+
+Note the `backup-id` (UUID) of the backup you want to restore.
+
+**Step 2: Restore the full backup**
+
+```bash
+bunx @temps-sdk/cli backup restore \
+  --access-key-id YOUR_ACCESS_KEY \
+  --secret-access-key YOUR_SECRET_KEY \
+  --bucket-name your-backup-bucket \
+  --region us-east-1 \
+  --database-url "postgres://user:password@localhost:16432/temps" \
+  --backup-id YOUR_BACKUP_UUID
+```
+
+This command:
+
+1. Downloads the backup from S3
+2. Decompresses the database dump
+3. Restores the Temps PostgreSQL database using `pg_restore`
+4. Restores all managed service backups (PostgreSQL databases, Redis instances, etc.)
+
+**Step 3: Restart Temps**
+
+After a restore, restart the Temps service to pick up the restored data:
+
+```bash
+sudo systemctl restart temps
+```
+
+### Restore a single managed service
+
+If you only need to restore one specific service (e.g. a PostgreSQL database that was corrupted), use `restore-service`:
+
+```bash
+bunx @temps-sdk/cli backup restore-service \
+  --access-key-id YOUR_ACCESS_KEY \
+  --secret-access-key YOUR_SECRET_KEY \
+  --bucket-name your-backup-bucket \
+  --region us-east-1 \
+  --backup-id YOUR_BACKUP_UUID \
+  --service-name my-postgres-db \
+  --encryption-key YOUR_TEMPS_ENCRYPTION_KEY
+```
+
+The `--encryption-key` is needed because managed service connection credentials are encrypted at rest. You can find it in your Temps configuration.
+
+<Note>
+For non-AWS S3 providers, add `--endpoint` and `--force-path-style` to all CLI commands, just as you did when listing backups.
+</Note>
+
+---
+
+## What you have accomplished {{ anchor: true, id: 'what-you-have-accomplished' }}
+
+Your Temps instance now has a complete protection layer:
+
+| Feature | What it does | Status |
+|---------|-------------|--------|
+| S3 backup storage | Off-site storage for all backups | Connected |
+| Manual backups | On-demand database and service snapshots | Tested |
+| Scheduled backups | Automatic nightly (or custom schedule) backups | Running |
+| Notifications | Alerts via email, Slack, or webhook | Configured |
+| Uptime monitoring | 60-second health checks with incident tracking | Active |
+| Restore process | CLI-based full or per-service restoration | Verified |
+
+Additional protections that Temps runs automatically in the background:
+
+- **Disk space monitoring** — Alerts when disk usage exceeds 80% (configurable threshold). Escalates to critical at 95%.
+- **Backup failure alerts** — High-priority notifications if a scheduled backup fails.
+- **SSL expiration warnings** — Notifications 30 days before certificates expire.
+- **Weekly digest** — A summary of deployments, errors, and performance sent every Monday.
+
+---
+
+## What to explore next
+
+<div className="not-prose">
+  <Button href="/docs/deploy-with-database" variant="text" arrow="right">
+    Deploy an application with a managed PostgreSQL database
+  </Button>
+  <Button href="/docs/debug-a-failed-deployment" variant="text" arrow="right">
+    Debug a failed deployment using logs and status codes
+  </Button>
+  <Button href="/docs/deployments" variant="text" arrow="right">
+    Understand how the deployment pipeline works under the hood
+  </Button>
+  <Button href="/docs/roll-back-a-deployment" variant="text" arrow="right">
+    Roll back to a previous deployment instantly
+  </Button>
+</div>

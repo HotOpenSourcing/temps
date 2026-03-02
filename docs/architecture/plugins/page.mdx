@@ -1,0 +1,349 @@
+export const metadata = {
+  title: 'Plugin System',
+  description: 'Understanding Temps plugin architecture and how to extend functionality.',
+  alternates: {
+    canonical: '/docs/plugins',
+  },
+}
+
+export const sections = [
+  { title: 'Overview', id: 'overview' },
+  { title: 'Plugin Architecture', id: 'architecture' },
+  { title: 'Key Plugins', id: 'key-plugins' },
+  { title: 'Service Registration', id: 'service-registration' },
+  { title: 'Route Configuration', id: 'route-configuration' },
+]
+
+# Plugin System
+
+Temps uses a modular plugin architecture that enables extensibility without modifying core code. All functionality is organized as plugins implementing the `TempsPlugin` trait. {{ className: 'lead' }}
+
+---
+
+## Overview {{ anchor: true, id: 'overview' }}
+
+The plugin system provides a clean separation of concerns, allowing features to be developed, tested, and maintained independently.
+
+### Key Benefits
+
+<Properties>
+  <Property name="Modularity">
+    Each plugin is self-contained with its own services, routes, and configuration
+  </Property>
+  <Property name="Extensibility">
+    Add new features without modifying core Temps code
+  </Property>
+  <Property name="Type Safety">
+    Type-safe dependency injection through the service registry
+  </Property>
+  <Property name="Testability">
+    Plugins can be tested in isolation with mocked dependencies
+  </Property>
+  <Property name="OpenAPI Integration">
+    Automatic API documentation generation from plugin routes
+  </Property>
+</Properties>
+
+### Plugin Lifecycle
+
+```mermaid
+graph TB
+    subgraph "Bootstrap"
+        Start["Application Starts"]
+        LoadCore["Load Core Services<br/>(DB, Config)"]
+        CreatePlugins["Create Plugin Instances"]
+    end
+
+    subgraph "Registration"
+        Register["Register Services<br/>register_services()"]
+        Init["Initialize Services<br/>initialize_plugin_services()"]
+    end
+
+    subgraph "Configuration"
+        Routes["Configure Routes<br/>configure_routes()"]
+        OpenAPI["Generate OpenAPI<br/>openapi_schema()"]
+    end
+
+    subgraph "Runtime"
+        Server["Server Ready"]
+        Handle["Handle Requests"]
+    end
+
+    Start --> LoadCore
+    LoadCore --> CreatePlugins
+    CreatePlugins --> Register
+    Register --> Init
+    Init --> Routes
+    Routes --> OpenAPI
+    OpenAPI --> Server
+    Server --> Handle
+```
+
+---
+
+## Plugin Architecture {{ anchor: true, id: 'architecture' }}
+
+### The TempsPlugin Trait
+
+All plugins implement the `TempsPlugin` trait, which defines four core methods:
+
+```rust
+pub trait TempsPlugin: Send + Sync {
+    /// Unique identifier for this plugin
+    fn name(&self) -> &'static str;
+
+    /// Register services that this plugin provides
+    fn register_services(
+        &self,
+        context: &ServiceRegistrationContext,
+    ) -> Result<(), PluginError>;
+
+    /// Configure HTTP routes for this plugin
+    fn configure_routes(&self, context: &PluginContext) -> Option<PluginRoutes>;
+
+    /// Contribute to global OpenAPI schema
+    fn openapi_schema(&self) -> Option<OpenApi>;
+}
+```
+
+### Plugin Components
+
+```mermaid
+graph TB
+    subgraph "Plugin Implementation"
+        Name["name()<br/>Plugin Identifier"]
+        Services["register_services()<br/>Service Registration"]
+        Routes["configure_routes()<br/>HTTP Routes"]
+        Schema["openapi_schema()<br/>API Documentation"]
+    end
+
+    subgraph "Plugin State"
+        ServiceReg["Service Registry<br/>(Arc<T>)"]
+        Router["Axum Router<br/>(HTTP Handlers)"]
+        OpenAPI["OpenAPI Spec<br/>(Utoipa)"]
+    end
+
+    Name --> Plugin["Plugin Ready"]
+    Services --> ServiceReg
+    Routes --> Router
+    Schema --> OpenAPI
+    ServiceReg --> Plugin
+    Router --> Plugin
+    OpenAPI --> Plugin
+```
+
+### Service Registration Flow
+
+```mermaid
+sequenceDiagram
+    participant Bootstrap
+    participant Plugin
+    participant Registry as ServiceRegistry
+    participant Handler
+
+    Bootstrap->>Plugin: register_services()
+    Plugin->>Plugin: Create Service<br/>(with dependencies)
+    Plugin->>Registry: register_service(Arc<Service>)
+    Registry->>Registry: Store by type
+    Registry-->>Plugin: OK
+
+    Bootstrap->>Plugin: configure_routes()
+    Plugin->>Registry: get_service::<Service>()
+    Registry-->>Plugin: Some(Arc<Service>)
+    Plugin->>Handler: Store in route state
+
+    Handler->>Handler: Request arrives
+    Handler->>Handler: Extract from state
+    Handler->>Service: Call method
+    Service-->>Handler: Result
+```
+
+---
+
+## Key Plugins {{ anchor: true, id: 'key-plugins' }}
+
+Temps includes 40+ plugins that provide core functionality:
+
+<Properties>
+  <Property name="ProxyPlugin">
+    HTTP/HTTPS request routing, load balancing, and analytics collection
+  </Property>
+  <Property name="DeployerPlugin">
+    Container building, CI/CD pipeline, and deployment management
+  </Property>
+  <Property name="DomainsPlugin">
+    DNS management and TLS certificate provisioning
+  </Property>
+  <Property name="AnalyticsPlugin">
+    Event tracking, metrics collection, and visitor analytics
+  </Property>
+  <Property name="AuthPlugin">
+    User authentication, authorization, and session management
+  </Property>
+  <Property name="ErrorTrackingPlugin">
+    Sentry-compatible error tracking and monitoring
+  </Property>
+  <Property name="BlobPlugin">
+    Object storage and file management
+  </Property>
+  <Property name="KVPlugin">
+    Key-value store for caching and state management
+  </Property>
+</Properties>
+
+### Plugin Dependencies
+
+Plugins can depend on services from other plugins:
+
+```mermaid
+graph LR
+    A["Core Services<br/>(DB, Config)"]
+    B["ProxyPlugin"]
+    C["AnalyticsPlugin"]
+    D["AuthPlugin"]
+    E["CustomPlugin"]
+
+    A --> B
+    A --> C
+    A --> D
+    B --> C
+    C --> E
+    D --> E
+
+    style A fill:#fff3e0
+    style B fill:#e8f5e9
+    style C fill:#e8f5e9
+    style D fill:#e8f5e9
+    style E fill:#e8f5e9
+```
+
+---
+
+## Service Registration {{ anchor: true, id: 'service-registration' }}
+
+### Type-Safe Service Lookup
+
+The service registry uses Rust's type system for compile-time safety:
+
+```rust
+// During plugin initialization
+let service = context.get_service::<MyService>();
+// Type: Option<Arc<MyService>>
+
+// Use the service
+if let Some(svc) = service {
+    let result = svc.do_something().await;
+}
+```
+
+### Service Dependencies
+
+Plugins can request services from other plugins during registration:
+
+```rust
+async fn register_services(
+    &self,
+    context: &ServiceRegistrationContext,
+) -> Result<(), PluginError> {
+    // Get database connection (from core)
+    let db = context.get_service::<DbConnection>()
+        .ok_or_else(|| PluginError::ServiceNotFound {
+            service_type: "DbConnection".to_string(),
+        })?;
+
+    // Get analytics service (from AnalyticsPlugin)
+    let analytics = context.get_service::<AnalyticsService>()
+        .ok_or_else(|| PluginError::ServiceNotFound {
+            service_type: "AnalyticsService".to_string(),
+        })?;
+
+    // Create and register your service
+    let service = Arc::new(MyService::new(db, analytics));
+    context.register_service(service);
+
+    Ok(())
+}
+```
+
+### Service Registration Flow
+
+```mermaid
+graph TB
+    subgraph "Plugin B Setup"
+        B["MyPlugin<br/>register_services()"]
+    end
+
+    subgraph "Required Services"
+        DB["DbConnection<br/>(from Core)"]
+        Other["OtherService<br/>(from Plugin A)"]
+    end
+
+    subgraph "Service Creation"
+        Create["Arc::new(<br/>MyService::new(<br/>  db,<br/>  other<br/>)<br/>)"]
+    end
+
+    subgraph "Registration"
+        Reg["context.register_service<br/>(service)"]
+    end
+
+    B -->|lookup| DB
+    B -->|lookup| Other
+    DB -->|provide| Create
+    Other -->|provide| Create
+    Create --> Reg
+    Reg -->|available to| C["Plugin C<br/>& Handlers"]
+```
+
+---
+
+## Route Configuration {{ anchor: true, id: 'route-configuration' }}
+
+### Route Naming Convention
+
+- **Admin APIs**: `/api/admin/*`
+- **Plugin APIs**: `/api/<plugin-name>/*`
+- **Public APIs**: `/api/public/*`
+- **Internal APIs**: `/api/_temps/*` (Temps reserved)
+
+### Example Route Configuration
+
+```rust
+fn configure_routes(&self, context: &PluginContext) -> Option<PluginRoutes> {
+    // Get your service from registry
+    let service = context.get_service::<MyService>()?;
+
+    // Create an Axum router
+    let router = axum::Router::new()
+        .route("/api/my-plugin/status", axum::routing::get(status_handler))
+        .route("/api/my-plugin/items", axum::routing::get(list_items))
+        .with_state(Arc::new(service.clone()));
+
+    Some(PluginRoutes::new(router))
+}
+```
+
+### OpenAPI Integration
+
+Plugins automatically contribute to the global OpenAPI schema:
+
+```rust
+fn openapi_schema(&self) -> Option<OpenApi> {
+    // Define your API documentation
+    Some(MyApiDoc::openapi())
+}
+```
+
+All plugin schemas are merged into one global schema accessible at `/swagger-ui/`.
+
+---
+
+## Additional Resources
+
+<div className="not-prose">
+  <Button href="/docs/overview" variant="text" arrow="left">
+    Architecture Overview
+  </Button>
+  <Button href="/docs/request-flow" variant="text" arrow="right">
+    Request Flow
+  </Button>
+</div>

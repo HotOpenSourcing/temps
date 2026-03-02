@@ -1,0 +1,28 @@
+[package]
+name = "temps-lighthouse-plugin"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Lighthouse Performance Audit plugin for Temps - runs automated Lighthouse audits after deployments and tracks Core Web Vitals over time"
+
+[[bin]]
+name = "temps-lighthouse-plugin"
+path = "src/main.rs"
+
+[dependencies]
+temps-plugin-sdk = { path = "../../crates/temps-plugin-sdk" }
+
+axum = { version = "0.8" }
+sea-orm = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+include_dir = "0.7"
+mime_guess = "2.0"
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
