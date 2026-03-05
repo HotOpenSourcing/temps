@@ -8,6 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Multi-node cluster support: distribute deployments across a control plane and multiple worker nodes connected via WireGuard private networking
+- `temps-agent` crate: worker node agent with Docker runtime, token-based authentication, and deploy/status/stop/logs API endpoints
+- `temps-wireguard` crate: WireGuard tunnel management for secure node-to-node networking
+- `temps agent` CLI command to start a worker node agent
+- `temps join` CLI command to register a worker node with the control plane (direct or relay mode)
+- `--private-address` flag on `temps serve` to set the control plane's private/WireGuard IP for cross-node service connectivity
+- Node scheduler with round-robin replica distribution across control plane and worker nodes, with optional target node filtering
+- Remote container deployer via agent HTTP API with health checks and log streaming support
+- Cross-node service connectivity: environment variables are rewritten for remote containers so they reach external services (Postgres, Redis, MongoDB, S3, RustFS) on the control plane via private IP and host port instead of Docker container names
+- Multi-node-aware route table: proxy resolves worker node private addresses for containers deployed on remote nodes, enabling traffic routing across the cluster with round-robin load balancing
+- Node health check job that monitors worker heartbeats and marks stale nodes as offline
+- Nodes management page in the web UI under Settings with status indicators, heartbeat timestamps, and node details
+- Database migrations: `nodes` table, `node_id` columns on `deployment_containers` and `deployment_config`
+
+### Changed
+- External service containers (Postgres, Redis, MongoDB, S3/MinIO, RustFS) now bind to `0.0.0.0` instead of `127.0.0.1`, making them reachable from worker nodes via the private network; only affects newly created containers
+
+### Fixed
+- Deployment "marking complete" step could hang for the full 60-second timeout when the job queue was busy: the DB poll fallback (which confirms the route table update via database query) was only checked when the queue receiver timed out, but a steady stream of unrelated queue events prevented the timeout from ever firing; the poll now runs on every loop iteration regardless of queue activity
+- Remote environment variables are no longer built when no active worker nodes exist, avoiding unnecessary work in single-node deployments
+
+### Added
 - Automatic `CRON_SECRET` injection into deployed containers: the deployment token is now set as `CRON_SECRET` in the container environment on every deployment, and the cron scheduler sends `Authorization: Bearer <CRON_SECRET>` when invoking endpoints — no manual configuration needed
 - Analytics overview drill-down filters for property breakdowns: `filter_country`, `filter_region`, `filter_browser`, and `filter_os` query parameters on the `/events/properties/breakdown` endpoint enable hierarchical navigation (country → region → city, browser → version, OS → version)
 - Analytics overview charts: Channels, Devices, Languages, Operating Systems, and UTM Campaigns — each with bar visualization and visitor counts
