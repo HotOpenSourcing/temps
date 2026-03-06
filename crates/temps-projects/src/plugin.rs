@@ -46,6 +46,7 @@ impl TempsPlugin for ProjectsPlugin {
             let git_provider_manager = context.require_service::<temps_git::GitProviderManager>();
             let environment_service =
                 context.require_service::<temps_environments::EnvironmentService>();
+            let encryption_service = context.require_service::<temps_core::EncryptionService>();
 
             // Create ProjectService
             let project_service = Arc::new(ProjectService::new(
@@ -55,6 +56,7 @@ impl TempsPlugin for ProjectsPlugin {
                 external_service_manager,
                 git_provider_manager,
                 environment_service,
+                encryption_service,
             ));
             context.register_service(project_service);
 

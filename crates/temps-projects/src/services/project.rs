@@ -88,8 +88,9 @@ impl ProjectService {
         external_service_manager: Arc<temps_providers::ExternalServiceManager>,
         git_provider_manager: Arc<temps_git::GitProviderManager>,
         environment_service: Arc<temps_environments::EnvironmentService>,
+        encryption_service: Arc<temps_core::EncryptionService>,
     ) -> Self {
-        let env_var_service = Arc::new(EnvVarService::new(db.clone()));
+        let env_var_service = Arc::new(EnvVarService::new(db.clone(), encryption_service));
 
         ProjectService {
             db: db.clone(),
@@ -1629,6 +1630,7 @@ mod tests {
             external_service_manager,
             git_provider_manager,
             environment_service,
+            encryption_service,
         )
     }
 

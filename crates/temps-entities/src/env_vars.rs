@@ -17,6 +17,8 @@ pub struct Model {
     pub updated_at: DBDateTime,
     /// Include this environment variable in preview environments
     pub include_in_preview: bool,
+    /// Whether the value is stored encrypted (AES-256-GCM via EncryptionService)
+    pub is_encrypted: bool,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

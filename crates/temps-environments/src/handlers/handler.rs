@@ -45,6 +45,16 @@ impl From<crate::services::env_var_service::EnvVarError> for Problem {
                     .detail(reason)
                     .build()
             }
+            EnvVarError::EncryptionFailed { .. } => {
+                temps_core::error_builder::internal_server_error()
+                    .detail(err.to_string())
+                    .build()
+            }
+            EnvVarError::DecryptionFailed { .. } => {
+                temps_core::error_builder::internal_server_error()
+                    .detail(err.to_string())
+                    .build()
+            }
             EnvVarError::Other(msg) => temps_core::error_builder::internal_server_error()
                 .detail(msg)
                 .build(),

@@ -2,6 +2,7 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
 };
 use std::sync::Arc;
+use temps_core::EncryptionService;
 use temps_entities::{env_var_environments, env_vars, environments};
 use thiserror::Error;
 
@@ -20,6 +21,16 @@ pub enum EnvVarError {
 
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+
+    #[error("Failed to encrypt environment variable '{key}': {reason}")]
+    EncryptionFailed { key: String, reason: String },
+
+    #[error("Failed to decrypt environment variable '{key}' (id={var_id}): {reason}")]
+    DecryptionFailed {
+        var_id: i32,
+        key: String,
+        reason: String,
+    },
 
     #[error("Other error: {0}")]
     Other(String),
@@ -50,11 +61,49 @@ impl From<sea_orm::TransactionError<EnvVarError>> for EnvVarError {
 #[derive(Clone)]
 pub struct EnvVarService {
     db: Arc<temps_database::DbConnection>,
+    encryption_service: Arc<EncryptionService>,
 }
 
 impl EnvVarService {
-    pub fn new(db: Arc<temps_database::DbConnection>) -> Self {
-        EnvVarService { db }
+    pub fn new(
+        db: Arc<temps_database::DbConnection>,
+        encryption_service: Arc<EncryptionService>,
+    ) -> Self {
+        EnvVarService {
+            db,
+            encryption_service,
+        }
+    }
+
+    /// Encrypt a value before storing it in the database.
+    fn encrypt_value(&self, key: &str, value: &str) -> Result<String, EnvVarError> {
+        self.encryption_service
+            .encrypt_string(value)
+            .map_err(|e| EnvVarError::EncryptionFailed {
+                key: key.to_string(),
+                reason: e.to_string(),
+            })
+    }
+
+    /// Decrypt a stored value. If `is_encrypted` is false, returns the value as-is
+    /// (backward-compatibility for rows written before encryption was enabled).
+    fn decrypt_value(
+        &self,
+        var_id: i32,
+        key: &str,
+        value: &str,
+        is_encrypted: bool,
+    ) -> Result<String, EnvVarError> {
+        if !is_encrypted {
+            return Ok(value.to_string());
+        }
+        self.encryption_service
+            .decrypt_string(value)
+            .map_err(|e| EnvVarError::DecryptionFailed {
+                var_id,
+                key: key.to_string(),
+                reason: e.to_string(),
+            })
     }
 
     pub async fn get_environment_variables(
@@ -62,22 +111,17 @@ impl EnvVarService {
         project_id: i32,
         environment_id: Option<i32>,
     ) -> Result<Vec<EnvVarWithEnvironments>, EnvVarError> {
-        // Get all env vars for the project
         let vars = env_vars::Entity::find()
             .filter(env_vars::Column::ProjectId.eq(project_id))
             .order_by_desc(env_vars::Column::UpdatedAt)
             .all(self.db.as_ref())
             .await?;
 
-        // Get all env var IDs to query environments in bulk
         let var_ids: Vec<i32> = vars.iter().map(|v| v.id).collect();
 
-        // Get all environment relationships for these vars with a JOIN to environments
-        // This prevents N+1 queries by doing a single query with JOIN
         let mut env_relationships_query = env_var_environments::Entity::find()
             .filter(env_var_environments::Column::EnvVarId.is_in(var_ids));
 
-        // If environment_id is provided, filter the relationships
         if let Some(env_id) = environment_id {
             env_relationships_query = env_relationships_query
                 .filter(env_var_environments::Column::EnvironmentId.eq(env_id));
@@ -89,7 +133,6 @@ impl EnvVarService {
                 .all(self.db.as_ref())
                 .await?;
 
-        // Build a map of env_var_id -> Vec<EnvVarEnvironment>
         let mut env_map: std::collections::HashMap<i32, Vec<EnvVarEnvironment>> =
             std::collections::HashMap::new();
 
@@ -107,29 +150,28 @@ impl EnvVarService {
             }
         }
 
-        // Build the final result, only including env vars that have environments (if filter applied)
-        let result: Vec<EnvVarWithEnvironments> = vars
-            .into_iter()
-            .filter_map(|var| {
-                let environments = env_map.get(&var.id).cloned().unwrap_or_default();
+        let mut result = Vec::new();
+        for var in vars {
+            let environments = env_map.get(&var.id).cloned().unwrap_or_default();
 
-                // If environment_id filter is specified, only include vars that have environments
-                if environment_id.is_some() && environments.is_empty() {
-                    return None;
-                }
+            if environment_id.is_some() && environments.is_empty() {
+                continue;
+            }
 
-                Some(EnvVarWithEnvironments {
-                    id: var.id,
-                    project_id: var.project_id,
-                    key: var.key,
-                    value: var.value,
-                    created_at: var.created_at,
-                    updated_at: var.updated_at,
-                    environments,
-                    include_in_preview: var.include_in_preview,
-                })
-            })
-            .collect();
+            let decrypted_value =
+                self.decrypt_value(var.id, &var.key, &var.value, var.is_encrypted)?;
+
+            result.push(EnvVarWithEnvironments {
+                id: var.id,
+                project_id: var.project_id,
+                key: var.key,
+                value: decrypted_value,
+                created_at: var.created_at,
+                updated_at: var.updated_at,
+                environments,
+                include_in_preview: var.include_in_preview,
+            });
+        }
 
         Ok(result)
     }
@@ -142,7 +184,6 @@ impl EnvVarService {
         value: String,
         include_in_preview: bool,
     ) -> Result<EnvVarWithEnvironments, EnvVarError> {
-        // Check for conflicts before creating the new env var
         let existing_env_vars = env_vars::Entity::find()
             .filter(env_vars::Column::ProjectId.eq(project_id))
             .filter(env_vars::Column::Key.eq(&key))
@@ -159,7 +200,6 @@ impl EnvVarService {
             })
             .collect();
 
-        // Check if any of the requested environment_ids conflict with existing ones
         for env_id in &environment_ids {
             if existing_env_ids.contains(env_id) {
                 return Err(EnvVarError::Other(format!(
@@ -169,63 +209,77 @@ impl EnvVarService {
             }
         }
 
-        let result = self
-            .db
-            .transaction::<_, EnvVarWithEnvironments, EnvVarError>(|txn| {
-                Box::pin(async move {
-                    // Create the env var
-                    let new_var = env_vars::ActiveModel {
-                        project_id: Set(project_id),
-                        key: Set(key.clone()),
-                        value: Set(value.clone()),
-                        include_in_preview: Set(include_in_preview),
-                        created_at: Set(chrono::Utc::now()),
-                        updated_at: Set(chrono::Utc::now()),
-                        environment_id: Set(None),
-                        ..Default::default()
-                    };
+        let encrypted_value = self.encrypt_value(&key, &value)?;
+        let encryption_service = self.encryption_service.clone();
 
-                    let var = new_var.insert(txn).await?;
+        let result =
+            self.db
+                .transaction::<_, EnvVarWithEnvironments, EnvVarError>(|txn| {
+                    let encrypted_value = encrypted_value.clone();
+                    let key = key.clone();
+                    let environment_ids = environment_ids.clone();
 
-                    // Create environment relationships and get environment names
-                    let mut environments = Vec::new();
-                    for env_id in &environment_ids {
-                        let new_env_rel = env_var_environments::ActiveModel {
-                            env_var_id: Set(var.id),
-                            environment_id: Set(*env_id),
+                    Box::pin(async move {
+                        let new_var = env_vars::ActiveModel {
+                            project_id: Set(project_id),
+                            key: Set(key.clone()),
+                            value: Set(encrypted_value),
+                            is_encrypted: Set(true),
+                            include_in_preview: Set(include_in_preview),
                             created_at: Set(chrono::Utc::now()),
+                            updated_at: Set(chrono::Utc::now()),
+                            environment_id: Set(None),
                             ..Default::default()
                         };
 
-                        new_env_rel.insert(txn).await?;
+                        let var = new_var.insert(txn).await?;
 
-                        // Get environment name
-                        let env = environments::Entity::find_by_id(*env_id)
-                            .one(txn)
-                            .await?
-                            .ok_or(EnvVarError::Other("Environment not found".to_string()))?;
+                        let mut environments = Vec::new();
+                        for env_id in &environment_ids {
+                            let new_env_rel = env_var_environments::ActiveModel {
+                                env_var_id: Set(var.id),
+                                environment_id: Set(*env_id),
+                                created_at: Set(chrono::Utc::now()),
+                                ..Default::default()
+                            };
 
-                        environments.push(EnvVarEnvironment {
-                            id: env.id,
-                            name: env.name,
-                            main_url: env.subdomain,
-                            current_deployment_id: env.current_deployment_id,
-                        });
-                    }
+                            new_env_rel.insert(txn).await?;
 
-                    Ok(EnvVarWithEnvironments {
-                        id: var.id,
-                        project_id: var.project_id,
-                        key: var.key,
-                        value: var.value,
-                        created_at: var.created_at,
-                        updated_at: var.updated_at,
-                        environments,
-                        include_in_preview: var.include_in_preview,
+                            let env = environments::Entity::find_by_id(*env_id)
+                                .one(txn)
+                                .await?
+                                .ok_or(EnvVarError::Other("Environment not found".to_string()))?;
+
+                            environments.push(EnvVarEnvironment {
+                                id: env.id,
+                                name: env.name,
+                                main_url: env.subdomain,
+                                current_deployment_id: env.current_deployment_id,
+                            });
+                        }
+
+                        // Decrypt for the response (we return the plaintext value to the caller)
+                        let decrypted_value = encryption_service
+                            .decrypt_string(&var.value)
+                            .map_err(|e| EnvVarError::DecryptionFailed {
+                                var_id: var.id,
+                                key: var.key.clone(),
+                                reason: e.to_string(),
+                            })?;
+
+                        Ok(EnvVarWithEnvironments {
+                            id: var.id,
+                            project_id: var.project_id,
+                            key: var.key,
+                            value: decrypted_value,
+                            created_at: var.created_at,
+                            updated_at: var.updated_at,
+                            environments,
+                            include_in_preview: var.include_in_preview,
+                        })
                     })
                 })
-            })
-            .await?;
+                .await?;
 
         Ok(result)
     }
@@ -239,71 +293,83 @@ impl EnvVarService {
         environment_ids: Vec<i32>,
         include_in_preview: bool,
     ) -> Result<EnvVarWithEnvironments, EnvVarError> {
-        let result = self
-            .db
-            .transaction::<_, EnvVarWithEnvironments, EnvVarError>(|txn| {
-                Box::pin(async move {
-                    // Update the env var
-                    let env_var = env_vars::Entity::find_by_id(var_id)
-                        .filter(env_vars::Column::ProjectId.eq(project_id))
-                        .one(txn)
-                        .await?
-                        .ok_or(EnvVarError::Other(
-                            "Environment variable not found".to_string(),
-                        ))?;
+        let encrypted_value = self.encrypt_value(&key, &value)?;
+        let encryption_service = self.encryption_service.clone();
 
-                    let mut active_var: env_vars::ActiveModel = env_var.into();
-                    active_var.key = Set(key.clone());
-                    active_var.value = Set(value.clone());
-                    active_var.include_in_preview = Set(include_in_preview);
-                    active_var.updated_at = Set(chrono::Utc::now());
-                    let var = active_var.update(txn).await?;
+        let result =
+            self.db
+                .transaction::<_, EnvVarWithEnvironments, EnvVarError>(|txn| {
+                    let encrypted_value = encrypted_value.clone();
+                    let key = key.clone();
+                    let environment_ids = environment_ids.clone();
 
-                    // Delete existing environment relationships
-                    env_var_environments::Entity::delete_many()
-                        .filter(env_var_environments::Column::EnvVarId.eq(var_id))
-                        .exec(txn)
-                        .await?;
-
-                    // Create new environment relationships and collect environment info
-                    let mut environments = Vec::new();
-                    for env_id in &environment_ids {
-                        let new_env_rel = env_var_environments::ActiveModel {
-                            env_var_id: Set(var.id),
-                            environment_id: Set(*env_id),
-                            created_at: Set(chrono::Utc::now()),
-                            ..Default::default()
-                        };
-
-                        new_env_rel.insert(txn).await?;
-
-                        // Get environment name
-                        let env = environments::Entity::find_by_id(*env_id)
+                    Box::pin(async move {
+                        let env_var = env_vars::Entity::find_by_id(var_id)
+                            .filter(env_vars::Column::ProjectId.eq(project_id))
                             .one(txn)
                             .await?
-                            .ok_or(EnvVarError::Other("Environment not found".to_string()))?;
+                            .ok_or(EnvVarError::Other(
+                                "Environment variable not found".to_string(),
+                            ))?;
 
-                        environments.push(EnvVarEnvironment {
-                            id: env.id,
-                            name: env.name,
-                            main_url: env.subdomain,
-                            current_deployment_id: env.current_deployment_id,
-                        });
-                    }
+                        let mut active_var: env_vars::ActiveModel = env_var.into();
+                        active_var.key = Set(key.clone());
+                        active_var.value = Set(encrypted_value);
+                        active_var.is_encrypted = Set(true);
+                        active_var.include_in_preview = Set(include_in_preview);
+                        active_var.updated_at = Set(chrono::Utc::now());
+                        let var = active_var.update(txn).await?;
 
-                    Ok(EnvVarWithEnvironments {
-                        id: var.id,
-                        project_id: var.project_id,
-                        key: var.key,
-                        value: var.value,
-                        created_at: var.created_at,
-                        updated_at: var.updated_at,
-                        environments,
-                        include_in_preview: var.include_in_preview,
+                        env_var_environments::Entity::delete_many()
+                            .filter(env_var_environments::Column::EnvVarId.eq(var_id))
+                            .exec(txn)
+                            .await?;
+
+                        let mut environments = Vec::new();
+                        for env_id in &environment_ids {
+                            let new_env_rel = env_var_environments::ActiveModel {
+                                env_var_id: Set(var.id),
+                                environment_id: Set(*env_id),
+                                created_at: Set(chrono::Utc::now()),
+                                ..Default::default()
+                            };
+
+                            new_env_rel.insert(txn).await?;
+
+                            let env = environments::Entity::find_by_id(*env_id)
+                                .one(txn)
+                                .await?
+                                .ok_or(EnvVarError::Other("Environment not found".to_string()))?;
+
+                            environments.push(EnvVarEnvironment {
+                                id: env.id,
+                                name: env.name,
+                                main_url: env.subdomain,
+                                current_deployment_id: env.current_deployment_id,
+                            });
+                        }
+
+                        let decrypted_value = encryption_service
+                            .decrypt_string(&var.value)
+                            .map_err(|e| EnvVarError::DecryptionFailed {
+                                var_id: var.id,
+                                key: var.key.clone(),
+                                reason: e.to_string(),
+                            })?;
+
+                        Ok(EnvVarWithEnvironments {
+                            id: var.id,
+                            project_id: var.project_id,
+                            key: var.key,
+                            value: decrypted_value,
+                            created_at: var.created_at,
+                            updated_at: var.updated_at,
+                            environments,
+                            include_in_preview: var.include_in_preview,
+                        })
                     })
                 })
-            })
-            .await?;
+                .await?;
 
         Ok(result)
     }
@@ -316,13 +382,11 @@ impl EnvVarService {
         self.db
             .transaction::<_, (), EnvVarError>(|txn| {
                 Box::pin(async move {
-                    // First delete the environment relationships
                     env_var_environments::Entity::delete_many()
                         .filter(env_var_environments::Column::EnvVarId.eq(var_id))
                         .exec(txn)
                         .await?;
 
-                    // Then delete the environment variable itself
                     env_vars::Entity::delete_many()
                         .filter(env_vars::Column::Id.eq(var_id))
                         .filter(env_vars::Column::ProjectId.eq(project_id))
@@ -350,6 +414,207 @@ impl EnvVarService {
             .await?
             .ok_or_else(|| EnvVarError::Other("Environment variable not found".to_string()))?;
 
-        Ok(var.value)
+        self.decrypt_value(var.id, &var.key, &var.value, var.is_encrypted)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sea_orm::{DatabaseBackend, MockDatabase};
+
+    fn make_encryption_service() -> Arc<EncryptionService> {
+        Arc::new(
+            EncryptionService::new(
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            )
+            .unwrap(),
+        )
+    }
+
+    fn make_env_var_model(
+        id: i32,
+        project_id: i32,
+        key: &str,
+        value: &str,
+        is_encrypted: bool,
+    ) -> env_vars::Model {
+        env_vars::Model {
+            id,
+            project_id,
+            environment_id: None,
+            key: key.to_string(),
+            value: value.to_string(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            include_in_preview: false,
+            is_encrypted,
+        }
+    }
+
+    #[test]
+    fn test_encrypt_then_decrypt_roundtrip() {
+        let svc = make_encryption_service();
+        let db = Arc::new(MockDatabase::new(DatabaseBackend::Postgres).into_connection());
+        let service = EnvVarService::new(db, svc.clone());
+
+        let plaintext = "super_secret_value";
+        let encrypted = service.encrypt_value("MY_KEY", plaintext).unwrap();
+        // Encrypted value must differ from plaintext
+        assert_ne!(encrypted, plaintext);
+
+        let decrypted = service
+            .decrypt_value(1, "MY_KEY", &encrypted, true)
+            .unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_decrypt_unencrypted_passthrough() {
+        let svc = make_encryption_service();
+        let db = Arc::new(MockDatabase::new(DatabaseBackend::Postgres).into_connection());
+        let service = EnvVarService::new(db, svc);
+
+        // When is_encrypted=false the value is returned as-is (backward compat)
+        let value = "plaintext_legacy_value";
+        let result = service
+            .decrypt_value(42, "LEGACY_KEY", value, false)
+            .unwrap();
+        assert_eq!(result, value);
+    }
+
+    #[test]
+    fn test_decrypt_with_wrong_key_returns_error() {
+        let svc1 = make_encryption_service();
+        let svc2 = Arc::new(
+            EncryptionService::new(
+                "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            )
+            .unwrap(),
+        );
+        let db = Arc::new(MockDatabase::new(DatabaseBackend::Postgres).into_connection());
+        let service1 = EnvVarService::new(db.clone(), svc1);
+        let service2 = EnvVarService::new(db, svc2);
+
+        let encrypted = service1.encrypt_value("KEY", "secret").unwrap();
+        let result = service2.decrypt_value(1, "KEY", &encrypted, true);
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            EnvVarError::DecryptionFailed { .. }
+        ));
+    }
+
+    #[test]
+    fn test_decrypt_invalid_base64_returns_error() {
+        let svc = make_encryption_service();
+        let db = Arc::new(MockDatabase::new(DatabaseBackend::Postgres).into_connection());
+        let service = EnvVarService::new(db, svc);
+
+        let result = service.decrypt_value(5, "KEY", "not-valid-base64!!!", true);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            EnvVarError::DecryptionFailed { var_id: 5, .. }
+        ));
+    }
+
+    #[test]
+    fn test_encryption_different_each_call() {
+        let svc = make_encryption_service();
+        let db = Arc::new(MockDatabase::new(DatabaseBackend::Postgres).into_connection());
+        let service = EnvVarService::new(db, svc);
+
+        let e1 = service.encrypt_value("K", "value").unwrap();
+        let e2 = service.encrypt_value("K", "value").unwrap();
+        // Random nonce means each encryption produces a different ciphertext
+        assert_ne!(e1, e2);
+
+        // But both decrypt to the same value
+        let d1 = service.decrypt_value(1, "K", &e1, true).unwrap();
+        let d2 = service.decrypt_value(1, "K", &e2, true).unwrap();
+        assert_eq!(d1, "value");
+        assert_eq!(d2, "value");
+    }
+
+    #[tokio::test]
+    async fn test_get_environment_variables_decrypts_values() {
+        let svc = make_encryption_service();
+        let plaintext = "my_db_password";
+        let encrypted = svc.encrypt_string(plaintext).unwrap();
+
+        let db = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results(vec![vec![make_env_var_model(
+                    1,
+                    10,
+                    "DB_PASSWORD",
+                    &encrypted,
+                    true,
+                )]])
+                .append_query_results(vec![Vec::<(
+                    env_var_environments::Model,
+                    Option<environments::Model>,
+                )>::new()])
+                .into_connection(),
+        );
+
+        let service = EnvVarService::new(db, svc);
+        let result = service.get_environment_variables(10, None).await.unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].key, "DB_PASSWORD");
+        assert_eq!(result[0].value, plaintext);
+    }
+
+    #[tokio::test]
+    async fn test_get_environment_variables_handles_unencrypted_legacy() {
+        let svc = make_encryption_service();
+
+        let db = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results(vec![vec![make_env_var_model(
+                    2,
+                    10,
+                    "LEGACY_VAR",
+                    "plaintext_legacy",
+                    false, // not encrypted — legacy row
+                )]])
+                .append_query_results(vec![Vec::<(
+                    env_var_environments::Model,
+                    Option<environments::Model>,
+                )>::new()])
+                .into_connection(),
+        );
+
+        let service = EnvVarService::new(db, svc);
+        let result = service.get_environment_variables(10, None).await.unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].value, "plaintext_legacy");
+    }
+
+    #[tokio::test]
+    async fn test_get_environment_variable_value_decrypts() {
+        let svc = make_encryption_service();
+        let plaintext = "secret_api_key";
+        let encrypted = svc.encrypt_string(plaintext).unwrap();
+
+        let db = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results(vec![vec![make_env_var_model(
+                    3, 10, "API_KEY", &encrypted, true,
+                )]])
+                .into_connection(),
+        );
+
+        let service = EnvVarService::new(db, svc);
+        let value = service
+            .get_environment_variable_value(10, "API_KEY", None)
+            .await
+            .unwrap();
+
+        assert_eq!(value, plaintext);
     }
 }

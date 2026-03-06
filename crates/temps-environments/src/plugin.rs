@@ -47,7 +47,8 @@ impl TempsPlugin for EnvironmentsPlugin {
                     .with_queue_service(queue_service),
             );
             context.register_service(environment_service);
-            let env_var_service = Arc::new(EnvVarService::new(db.clone()));
+            let encryption_service = context.require_service::<temps_core::EncryptionService>();
+            let env_var_service = Arc::new(EnvVarService::new(db.clone(), encryption_service));
             context.register_service(env_var_service);
             tracing::debug!("Environments plugin services registered successfully");
             Ok(())

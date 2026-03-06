@@ -31,6 +31,7 @@ pub struct WorkflowPlanner {
     config_service: Arc<temps_config::ConfigService>,
     dsn_service: Arc<temps_error_tracking::DSNService>,
     deployment_token_service: Arc<DeploymentTokenService>,
+    encryption_service: Arc<EncryptionService>,
 }
 
 impl WorkflowPlanner {
@@ -42,8 +43,10 @@ impl WorkflowPlanner {
         dsn_service: Arc<temps_error_tracking::DSNService>,
         encryption_service: Arc<EncryptionService>,
     ) -> Self {
-        let deployment_token_service =
-            Arc::new(DeploymentTokenService::new(db.clone(), encryption_service));
+        let deployment_token_service = Arc::new(DeploymentTokenService::new(
+            db.clone(),
+            encryption_service.clone(),
+        ));
         Self {
             db,
             log_service,
@@ -51,6 +54,7 @@ impl WorkflowPlanner {
             config_service,
             dsn_service,
             deployment_token_service,
+            encryption_service,
         }
     }
 
@@ -113,7 +117,21 @@ impl WorkflowPlanner {
                 .await?;
 
             for env_var in env_vars_list {
-                env_vars_map.insert(env_var.key, env_var.value);
+                let value = if env_var.is_encrypted {
+                    self.encryption_service
+                        .decrypt_string(&env_var.value)
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "Failed to decrypt environment variable '{}' (id={}): {}",
+                                env_var.key,
+                                env_var.id,
+                                e
+                            )
+                        })?
+                } else {
+                    env_var.value
+                };
+                env_vars_map.insert(env_var.key, value);
             }
         }
 
@@ -384,11 +402,46 @@ impl WorkflowPlanner {
     ) -> Option<std::collections::HashMap<String, String>> {
         use temps_entities::project_services;
 
-        // Check if private_address is configured
+        // Get the private address for cross-node service connectivity.
+        // Priority: multi_node.private_address > host from external_url
         let private_address = match self.config_service.get_settings().await {
-            Ok(settings) => settings.multi_node.private_address?,
+            Ok(settings) => {
+                if let Some(addr) = settings.multi_node.private_address {
+                    addr
+                } else {
+                    // Fall back to extracting host from external URL
+                    match self.config_service.get_external_url_or_default().await {
+                        Ok(url) => {
+                            if let Ok(parsed) = url::Url::parse(&url) {
+                                match parsed.host_str() {
+                                    Some(host)
+                                        if host != "localhost"
+                                            && host != "127.0.0.1"
+                                            && host != "localho.st" =>
+                                    {
+                                        info!(
+                                            "No private_address configured, falling back to external URL host: {}",
+                                            host
+                                        );
+                                        host.to_string()
+                                    }
+                                    _ => return None,
+                                }
+                            } else {
+                                return None;
+                            }
+                        }
+                        Err(_) => return None,
+                    }
+                }
+            }
             Err(_) => return None,
         };
+
+        info!(
+            "build_remote_environment_variables: resolved private_address={}",
+            private_address
+        );
 
         // Only build remote env vars if there are active worker nodes
         use temps_entities::nodes;
@@ -421,6 +474,13 @@ impl WorkflowPlanner {
             }
         };
 
+        info!(
+            "Building remote env vars for project {}: {} linked services, private_address={}",
+            project.id,
+            project_services_list.len(),
+            private_address
+        );
+
         // For each service, get its address mapping and do replacements
         for project_service in &project_services_list {
             match self
@@ -429,16 +489,32 @@ impl WorkflowPlanner {
                 .await
             {
                 Ok((container_name, internal_port, host_port)) => {
-                    for value in remote_vars.values_mut() {
+                    info!(
+                        "Service {}: container_name={}, internal_port={}, host_port={} — rewriting to {}:{}",
+                        project_service.service_id, container_name, internal_port, host_port,
+                        private_address, host_port
+                    );
+                    let mut rewritten_count = 0;
+                    for (key, value) in remote_vars.iter_mut() {
                         // Replace container_name:internal_port → private_address:host_port
                         if value.contains(&container_name) {
+                            let old_value = value.clone();
                             *value = value
                                 .replace(
                                     &format!("{}:{}", container_name, internal_port),
                                     &format!("{}:{}", private_address, host_port),
                                 )
                                 .replace(&container_name, &private_address);
+                            info!("Rewrote {}={} -> {}", key, old_value, value);
+                            rewritten_count += 1;
                         }
+                    }
+                    if rewritten_count == 0 {
+                        tracing::warn!(
+                            "Service {} container_name='{}' not found in any env var value",
+                            project_service.service_id,
+                            container_name
+                        );
                     }
                 }
                 Err(e) => {
@@ -988,9 +1064,16 @@ impl WorkflowPlanner {
                 "environment_variables": deploy_env_vars,
                 "image_name": image_name
             });
-            if let Some(remote_vars) = remote_deploy_env_vars {
+            if let Some(ref remote_vars) = remote_deploy_env_vars {
+                info!(
+                    "Storing remote_environment_variables in job config: POSTGRES_HOST={:?}, POSTGRES_URL={:?}",
+                    remote_vars.get("POSTGRES_HOST"),
+                    remote_vars.get("POSTGRES_URL").map(|u| if u.len() > 60 { format!("{}...", &u[..60]) } else { u.clone() })
+                );
                 job_config["remote_environment_variables"] =
                     serde_json::to_value(remote_vars).unwrap_or_default();
+            } else {
+                info!("No remote_environment_variables to store (single-node mode or no active nodes)");
             }
 
             jobs.push(JobDefinition {
@@ -1281,9 +1364,15 @@ impl WorkflowPlanner {
             "image_name": external_image_ref,
             "use_external_image": true,
         });
-        if let Some(remote_vars) = remote_deploy_env_vars {
+        if let Some(ref remote_vars) = remote_deploy_env_vars {
+            info!(
+                "Storing remote_environment_variables in docker image job config: POSTGRES_HOST={:?}",
+                remote_vars.get("POSTGRES_HOST"),
+            );
             job_config["remote_environment_variables"] =
                 serde_json::to_value(remote_vars).unwrap_or_default();
+        } else {
+            info!("No remote_environment_variables for docker image deployment");
         }
 
         jobs.push(JobDefinition {

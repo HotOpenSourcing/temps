@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Encryption at rest for environment variables: all values are now encrypted with AES-256-GCM (via `EncryptionService`) before being stored in the database; existing unencrypted rows are transparently decrypted at read time via an `is_encrypted` compatibility flag added in migration `m20260305_000003`; the `WorkflowPlanner` decrypts values before injecting them into deployment containers
+
+### Changed
+- `EnvVarService` (in `temps-environments` and `temps-projects`) now requires `Arc<EncryptionService>` in its constructor; plugin registration injects it from the service registry
+
 - Multi-node cluster support: distribute deployments across a control plane and multiple worker nodes connected via WireGuard private networking
 - `temps-agent` crate: worker node agent with Docker runtime, token-based authentication, and deploy/status/stop/logs API endpoints
 - `temps-wireguard` crate: WireGuard tunnel management for secure node-to-node networking
