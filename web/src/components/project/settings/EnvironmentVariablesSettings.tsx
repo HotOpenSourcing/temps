@@ -29,7 +29,7 @@ import {
 } from '@/components/ui/alert-dialog'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { Eye, EyeOff, KeyRound, Plus, Upload } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { toast } from 'sonner'
@@ -60,7 +60,6 @@ function EnvironmentVariableRow({
   const [isVisible, setIsVisible] = useState(false)
   const [isEditing, setIsEditing] = useState(false)
   const [editValue, setEditValue] = useState('')
-  const queryClient = useQueryClient()
 
   const { data, refetch } = useQuery({
     ...getEnvironmentVariableValueOptions({
@@ -102,7 +101,6 @@ function EnvironmentVariableRow({
       errorTitle: 'Failed to delete environment variable',
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['environmentVariables'] })
       refetchEnvVariables()
       toast.success('Environment variable deleted')
     },
@@ -115,7 +113,7 @@ function EnvironmentVariableRow({
     },
     onSuccess: () => {
       setIsEditing(false)
-      queryClient.invalidateQueries({ queryKey: ['environmentVariables'] })
+      refetch()
       refetchEnvVariables()
       toast.success('Environment variable updated')
     },
@@ -134,12 +132,17 @@ function EnvironmentVariableRow({
   const [selectedEditEnvironments, setSelectedEditEnvironments] = useState<
     number[]
   >(variable.environments.map((env) => env.id))
+  const [editIncludeInPreview, setEditIncludeInPreview] = useState(
+    variable.include_in_preview ?? false
+  )
 
-  // Update selected environments when variable changes (after refetch)
+  // Update selected environments and preview flag when variable changes (after refetch)
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setSelectedEditEnvironments(variable.environments.map((env) => env.id))
-  }, [variable.environments])
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setEditIncludeInPreview(variable.include_in_preview ?? false)
+  }, [variable.environments, variable.include_in_preview])
 
   const handleEdit = async () => {
     if (isEditing) {
@@ -152,6 +155,7 @@ function EnvironmentVariableRow({
           value: editValue,
           environment_ids: selectedEditEnvironments,
           key: variable.key,
+          include_in_preview: editIncludeInPreview,
         },
       })
       setIsEditModalOpen(false)
@@ -315,6 +319,21 @@ function EnvironmentVariableRow({
                     </Button>
                   ))}
                 </div>
+              </div>
+              <div className="flex items-center justify-between space-x-2 rounded-lg border p-4">
+                <div className="flex-1 space-y-1">
+                  <Label htmlFor="edit-include-preview" className="text-sm font-medium">
+                    Include in Preview Environments
+                  </Label>
+                  <p className="text-sm text-muted-foreground">
+                    Automatically add this variable to preview environments
+                  </p>
+                </div>
+                <Switch
+                  id="edit-include-preview"
+                  checked={editIncludeInPreview}
+                  onCheckedChange={setEditIncludeInPreview}
+                />
               </div>
             </div>
             <DialogFooter>
@@ -626,7 +645,6 @@ export function EnvironmentVariablesSettings({
   )
   const [isBulkDeleteDialogOpen, setIsBulkDeleteDialogOpen] = useState(false)
   const [showAllValues, setShowAllValues] = useState(false)
-  const queryClient = useQueryClient()
 
   const {
     data: envVariables,
@@ -647,7 +665,6 @@ export function EnvironmentVariablesSettings({
     },
     onSuccess: () => {
       setIsAddDialogOpen(false)
-      queryClient.invalidateQueries({ queryKey: ['environmentVariables'] })
       refetch()
       toast.success('Environment variable created')
     },
@@ -707,7 +724,6 @@ export function EnvironmentVariablesSettings({
       )
     }
 
-    queryClient.invalidateQueries({ queryKey: ['environmentVariables'] })
     refetch()
   }
 
@@ -810,7 +826,6 @@ export function EnvironmentVariablesSettings({
 
     setSelectedVariables(new Set())
     setIsBulkDeleteDialogOpen(false)
-    queryClient.invalidateQueries({ queryKey: ['environmentVariables'] })
     refetch()
   }
 
