@@ -836,22 +836,34 @@ impl DeployImageJob {
         // rewritten with control plane's private address), fall back to local env vars.
         let environment_vars = if !assignment.is_local() {
             if let Some(ref remote_vars) = self.config.remote_environment_variables {
+                tracing::info!(
+                    "Using REMOTE environment variables for non-local assignment (has {} remote vars)",
+                    remote_vars.len()
+                );
                 remote_vars.clone()
             } else {
+                tracing::warn!(
+                    "Non-local assignment but no remote_environment_variables available, using local vars"
+                );
                 self.config.environment_variables.clone()
             }
         } else {
+            tracing::info!("Using LOCAL environment variables for local assignment");
             self.config.environment_variables.clone()
         };
 
-        tracing::debug!(
-            "🌍 Deploying container with {} environment variables: {}",
+        tracing::info!(
+            "Deploying container with {} env vars, POSTGRES_HOST={:?}, POSTGRES_URL={:?}",
             environment_vars.len(),
-            environment_vars
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ")
+            environment_vars.get("POSTGRES_HOST"),
+            environment_vars.get("POSTGRES_URL").map(|u| {
+                // Truncate for logging (may contain password)
+                if u.len() > 60 {
+                    format!("{}...", &u[..60])
+                } else {
+                    u.clone()
+                }
+            })
         );
 
         // Create unique container name for each replica

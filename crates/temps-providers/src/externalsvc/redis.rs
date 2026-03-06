@@ -1108,6 +1108,14 @@ impl ExternalService for RedisService {
         }
     }
 
+    fn get_docker_container_name(&self) -> String {
+        self.get_container_name()
+    }
+
+    fn get_docker_internal_port(&self) -> String {
+        REDIS_INTERNAL_PORT.to_string()
+    }
+
     async fn init(&self, config: ServiceConfig) -> Result<HashMap<String, String>> {
         info!("Initializing Redis service {:?}", config);
 

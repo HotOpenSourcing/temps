@@ -403,6 +403,14 @@ pub trait ExternalService: Send + Sync {
     /// In Baremetal mode, returns (localhost, exposed_port)
     fn get_effective_address(&self, service_config: ServiceConfig) -> Result<(String, String)>;
 
+    /// Get the Docker container name for this service.
+    /// Used by cross-node env var rewriting to match container names in connection strings.
+    fn get_docker_container_name(&self) -> String;
+
+    /// Get the internal port used inside the Docker container (e.g., "5432" for Postgres).
+    /// Used by cross-node env var rewriting alongside `get_docker_container_name`.
+    fn get_docker_internal_port(&self) -> String;
+
     /// Backup the service data to an S3 location
     /// s3_client: Pre-built S3 client with decrypted credentials (for services that upload via AWS SDK)
     /// s3_credentials: Decrypted S3 credentials (for services that use WAL-G / external tools)

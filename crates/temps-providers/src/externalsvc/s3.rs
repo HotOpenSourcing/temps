@@ -596,6 +596,14 @@ impl ExternalService for S3Service {
         }
     }
 
+    fn get_docker_container_name(&self) -> String {
+        self.get_container_name()
+    }
+
+    fn get_docker_internal_port(&self) -> String {
+        S3_INTERNAL_PORT.to_string()
+    }
+
     async fn init(&self, config: ServiceConfig) -> Result<HashMap<String, String>> {
         info!("Initializing S3 service {:?}", config);
 

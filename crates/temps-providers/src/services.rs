@@ -1267,21 +1267,14 @@ impl ExternalServiceManager {
             })?,
         };
 
-        service_instance
-            .init(service_config.clone())
-            .await
-            .map_err(|e| ExternalServiceError::InternalError {
-                reason: format!("Failed to initialize service: {}", e),
-            })?;
+        // Use Docker container name and internal port directly — these match what
+        // get_runtime_env_vars() puts in env var values (always Docker container names,
+        // regardless of DeploymentMode). This is critical for cross-node env var rewriting.
+        let container_name = service_instance.get_docker_container_name();
+        let internal_port = service_instance.get_docker_internal_port();
 
-        // get_effective_address returns (container_name, internal_port) in Docker mode
-        let (container_name, internal_port) = service_instance
-            .get_effective_address(service_config.clone())
-            .map_err(|e| ExternalServiceError::InternalError {
-                reason: format!("Failed to get effective address: {}", e),
-            })?;
-
-        // get_local_address returns "localhost:{host_port}"
+        // get_local_address returns "localhost:{host_port}" — we need the host port
+        // for the replacement target (private_address:host_port)
         let local_address = service_instance
             .get_local_address(service_config)
             .map_err(|e| ExternalServiceError::InternalError {

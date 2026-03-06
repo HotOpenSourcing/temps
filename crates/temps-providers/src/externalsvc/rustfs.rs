@@ -1001,6 +1001,14 @@ impl ExternalService for RustfsService {
         Ok((container_name, port))
     }
 
+    fn get_docker_container_name(&self) -> String {
+        self.get_container_name()
+    }
+
+    fn get_docker_internal_port(&self) -> String {
+        DEFAULT_RUSTFS_API_PORT.to_string()
+    }
+
     fn get_default_docker_image(&self) -> (String, String) {
         ("rustfs/rustfs".to_string(), "latest".to_string())
     }

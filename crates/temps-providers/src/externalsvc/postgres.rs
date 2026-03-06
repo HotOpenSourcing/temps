@@ -2264,6 +2264,14 @@ impl ExternalService for PostgresService {
         }
     }
 
+    fn get_docker_container_name(&self) -> String {
+        self.get_container_name()
+    }
+
+    fn get_docker_internal_port(&self) -> String {
+        POSTGRES_INTERNAL_PORT.to_string()
+    }
+
     /// Backup PostgreSQL data to S3.
     ///
     /// Detects whether the container has WAL-G installed:

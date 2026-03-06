@@ -873,6 +873,14 @@ impl ExternalService for MongodbService {
         }
     }
 
+    fn get_docker_container_name(&self) -> String {
+        self.get_container_name()
+    }
+
+    fn get_docker_internal_port(&self) -> String {
+        MONGODB_INTERNAL_PORT.to_string()
+    }
+
     async fn init(&self, service_config: ServiceConfig) -> Result<HashMap<String, String>> {
         // Parse input config and transform to runtime config
         let mongodb_config = self.get_mongodb_config(service_config.clone())?;
