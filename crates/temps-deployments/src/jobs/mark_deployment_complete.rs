@@ -6,11 +6,9 @@
 //! is live before they run.
 
 use async_trait::async_trait;
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, Set,
-    Statement,
-};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use temps_core::{
     Job, JobQueue, JobReceiver, JobResult, UtcDateTime, WorkflowContext, WorkflowError,
@@ -20,6 +18,14 @@ use temps_database::DbConnection;
 use temps_entities::{deployment_containers, deployments, environments, projects};
 use temps_logs::{LogLevel, LogService};
 use tracing::{debug, info, warn};
+
+/// Process-level locks keyed by environment_id to serialize mark_complete
+/// operations for the same environment. This replaces PostgreSQL advisory
+/// locks which don't work correctly with connection pools (Sea-ORM's
+/// DatabaseConnection is pooled, so lock/unlock may hit different connections).
+static ENVIRONMENT_LOCKS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<i32, Arc<tokio::sync::Mutex<()>>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 /// Output from MarkDeploymentCompleteJob
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,81 +133,19 @@ impl MarkDeploymentCompleteJob {
         }
     }
 
-    /// Acquire a PostgreSQL advisory lock for the given environment to serialize
-    /// concurrent `mark_complete` operations. This prevents two deployments for
-    /// the same environment from racing on `current_deployment_id` updates and
-    /// container teardown. The lock is session-level and released explicitly
-    /// when we are done (or on disconnect).
-    ///
-    /// The lock key is derived from the environment_id with a fixed namespace
-    /// prefix to avoid collisions with other advisory lock users.
-    async fn acquire_environment_lock(
-        db: &DbConnection,
-        environment_id: i32,
-    ) -> Result<(), WorkflowError> {
-        // Use a two-key advisory lock: namespace 0x54454D50 ("TEMP") + environment_id
-        // This ensures we don't collide with any other advisory lock usage.
-        //
-        // Uses pg_try_advisory_lock with a retry loop instead of the blocking
-        // pg_advisory_lock to avoid hanging indefinitely when a previous
-        // mark_complete is slow (e.g., tearing down many old containers).
-        const LOCK_NAMESPACE: i32 = 0x5445_4D50_u32 as i32; // "TEMP"
-        const MAX_WAIT_SECS: u64 = 120;
-        const RETRY_INTERVAL_MS: u64 = 500;
-
-        let deadline =
-            tokio::time::Instant::now() + tokio::time::Duration::from_secs(MAX_WAIT_SECS);
-
-        loop {
-            let result = db
-                .query_one(Statement::from_sql_and_values(
-                    sea_orm::DatabaseBackend::Postgres,
-                    "SELECT pg_try_advisory_lock($1, $2)",
-                    vec![LOCK_NAMESPACE.into(), environment_id.into()],
-                ))
-                .await
-                .map_err(|e| {
-                    WorkflowError::JobExecutionFailed(format!(
-                        "Failed to try advisory lock for environment {}: {}",
-                        environment_id, e
-                    ))
-                })?;
-
-            // pg_try_advisory_lock returns a single boolean column
-            if let Some(row) = result {
-                let acquired: bool = row.try_get_by_index(0).unwrap_or(false);
-                if acquired {
-                    return Ok(());
-                }
-            }
-
-            if tokio::time::Instant::now() >= deadline {
-                return Err(WorkflowError::JobExecutionFailed(format!(
-                    "Timed out after {}s waiting for advisory lock on environment {}",
-                    MAX_WAIT_SECS, environment_id
-                )));
-            }
-
-            tokio::time::sleep(tokio::time::Duration::from_millis(RETRY_INTERVAL_MS)).await;
-        }
-    }
-
-    /// Release the PostgreSQL advisory lock for the given environment.
-    async fn release_environment_lock(db: &DbConnection, environment_id: i32) {
-        const LOCK_NAMESPACE: i32 = 0x5445_4D50_u32 as i32;
-        if let Err(e) = db
-            .execute(Statement::from_sql_and_values(
-                sea_orm::DatabaseBackend::Postgres,
-                "SELECT pg_advisory_unlock($1, $2)",
-                vec![LOCK_NAMESPACE.into(), environment_id.into()],
-            ))
-            .await
-        {
-            warn!(
-                "Failed to release advisory lock for environment {}: {}",
-                environment_id, e
-            );
-        }
+    /// Get or create a process-level mutex for the given environment.
+    /// This serializes concurrent `mark_complete` operations for the same
+    /// environment without relying on PostgreSQL advisory locks (which
+    /// break with connection pools — lock and unlock can hit different
+    /// pooled connections, leaving locks permanently held).
+    fn get_environment_mutex(environment_id: i32) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = ENVIRONMENT_LOCKS
+            .lock()
+            .expect("environment locks poisoned");
+        locks
+            .entry(environment_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     }
 
     /// Mark deployment as complete and update environment
@@ -231,26 +175,27 @@ impl MarkDeploymentCompleteJob {
 
         // ── Serialize per environment ────────────────────────────────────
         //
-        // Acquire an advisory lock keyed on environment_id. This blocks
+        // Acquire a process-level mutex keyed on environment_id. This blocks
         // until any other in-flight mark_complete for the SAME environment
         // finishes, preventing two deployments from racing on the same
         // environment's current_deployment_id and tearing down each
         // other's containers. Different environments proceed in parallel.
-        Self::acquire_environment_lock(self.db.as_ref(), environment_id).await?;
+        let env_mutex = Self::get_environment_mutex(environment_id);
+        let _guard = env_mutex.lock().await;
         info!(
             deployment_id = self.deployment_id,
-            environment_id, "Acquired advisory lock for environment"
+            environment_id, "Acquired environment lock"
         );
 
-        // Ensure we release the lock on all exit paths (success or error)
         let result = self
             .mark_complete_inner(context, &deployment, environment_id)
             .await;
 
-        Self::release_environment_lock(self.db.as_ref(), environment_id).await;
+        // Lock is released when `_guard` is dropped (on all exit paths)
+        drop(_guard);
         info!(
             deployment_id = self.deployment_id,
-            environment_id, "Released advisory lock for environment"
+            environment_id, "Released environment lock"
         );
 
         // ── Tear down previous deployments (outside the lock) ─────────
