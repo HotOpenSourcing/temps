@@ -350,6 +350,8 @@ pub struct ProxyContext {
     pub wants_markdown: bool,
     /// Accumulated body bytes for HTML-to-Markdown conversion
     pub markdown_buffer: Vec<u8>,
+    /// Number of upstream connection attempts (for retry logic)
+    pub upstream_connect_tries: usize,
 }
 
 impl ProxyContext {
@@ -1720,6 +1722,7 @@ impl ProxyHttp for LoadBalancer {
             upstream_body_bytes_received: 0,
             wants_markdown: false,
             markdown_buffer: Vec::new(),
+            upstream_connect_tries: 0,
         }
     }
 
@@ -2764,10 +2767,17 @@ impl ProxyHttp for LoadBalancer {
 
         // Use the upstream resolver trait
         // Pass SNI hostname for TLS-based routing
-        let peer = self
+        let mut peer = self
             .upstream_resolver
             .resolve_peer(&domain, &path, ctx.sni_hostname.as_deref())
             .await?;
+
+        // Configure upstream connection options
+        peer.options.connection_timeout = Some(std::time::Duration::from_secs(5));
+        peer.options.read_timeout = Some(std::time::Duration::from_secs(60));
+        peer.options.write_timeout = Some(std::time::Duration::from_secs(60));
+        // Close idle pooled connections after 60s to avoid stale keep-alive reuse
+        peer.options.idle_timeout = Some(std::time::Duration::from_secs(60));
 
         // Populate context with upstream information
         // Use the Peer trait's address() method
@@ -2789,10 +2799,19 @@ impl ProxyHttp for LoadBalancer {
         &self,
         _session: &mut PingoraSession,
         _peer: &HttpPeer,
-        _ctx: &mut Self::CTX,
-        e: Box<Error>,
+        ctx: &mut Self::CTX,
+        mut e: Box<Error>,
     ) -> Box<Error> {
-        error!("Failed to connect to upstream: {:?}", e);
+        // Retry once on connection failure — handles stale pooled connections
+        // where the upstream closed the keep-alive connection before we sent
+        // the request (TCP RST / "Connection reset by peer").
+        if ctx.upstream_connect_tries == 0 {
+            ctx.upstream_connect_tries += 1;
+            warn!("Upstream connection failed (try 1), retrying: {:?}", e);
+            e.set_retry(true);
+        } else {
+            error!("Upstream connection failed after retry: {:?}", e);
+        }
         e
     }
 
@@ -2975,6 +2994,7 @@ mod markdown_tests {
             upstream_body_bytes_received: 0,
             wants_markdown: false,
             markdown_buffer: Vec::new(),
+            upstream_connect_tries: 0,
         }
     }
 
@@ -3512,6 +3532,7 @@ mod markdown_pipeline_tests {
             upstream_body_bytes_received: 0,
             wants_markdown: false,
             markdown_buffer: Vec::new(),
+            upstream_connect_tries: 0,
         }
     }
 
