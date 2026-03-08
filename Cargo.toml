@@ -191,9 +191,9 @@ webpki-roots = "0.26"
 # ============================================================================
 # Reverse Proxy (Pingora)
 # ============================================================================
-pingora = { version = "0.7.0" }
-pingora-core = { version = "0.7.0", features = ["openssl", "connection_filter"] }
-pingora-proxy = { version = "0.7.0" }
+pingora = { version = "0.8.0" }
+pingora-core = { version = "0.8.0", features = ["openssl", "connection_filter"] }
+pingora-proxy = { version = "0.8.0" }
 prometheus = "0.14"
 
 # ============================================================================
