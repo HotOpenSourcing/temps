@@ -31,6 +31,8 @@ pub struct AppState {
     pub audit_service: Arc<dyn AuditLogger>,
     /// Node service for listing/getting worker nodes (UI-facing)
     pub node_service: Arc<NodeService>,
+    /// Encryption service for decrypting node tokens (used by drain to stop remote containers)
+    pub encryption_service: Arc<temps_core::EncryptionService>,
 }
 
 use crate::services::types::Deployment;

@@ -23,6 +23,8 @@ pub enum NodeSubcommand {
     Show(NodeShowCommand),
     /// Drain a node: stop scheduling new containers and redeploy existing ones
     Drain(NodeDrainCommand),
+    /// Undrain a node: reactivate it so it can accept new deployments again
+    Undrain(NodeUndrainCommand),
     /// Remove a node from the cluster (must be drained first)
     #[command(alias = "rm")]
     Remove(NodeRemoveCommand),
@@ -66,6 +68,18 @@ pub struct NodeDrainCommand {
     /// Timeout in seconds when using --wait (default: 600)
     #[arg(long, default_value = "600")]
     pub timeout: u64,
+}
+
+#[derive(Args)]
+pub struct NodeUndrainCommand {
+    /// Node ID to undrain
+    pub node_id: i32,
+    /// API base URL
+    #[arg(long, env = "TEMPS_API_URL")]
+    pub api_url: String,
+    /// API authentication token
+    #[arg(long, env = "TEMPS_API_TOKEN")]
+    pub api_token: String,
 }
 
 #[derive(Args)]
@@ -203,6 +217,7 @@ impl NodeCommand {
                 NodeSubcommand::List(cmd) => execute_list(cmd).await,
                 NodeSubcommand::Show(cmd) => execute_show(cmd).await,
                 NodeSubcommand::Drain(cmd) => execute_drain(cmd).await,
+                NodeSubcommand::Undrain(cmd) => execute_undrain(cmd).await,
                 NodeSubcommand::Remove(cmd) => execute_remove(cmd).await,
             }
         })
@@ -454,6 +469,47 @@ async fn execute_drain(cmd: NodeDrainCommand) -> anyhow::Result<()> {
             }
         }
     }
+
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct UndrainNodeResponse {
+    name: String,
+    status: String,
+    message: String,
+}
+
+async fn execute_undrain(cmd: NodeUndrainCommand) -> anyhow::Result<()> {
+    let client = make_client();
+    let url = api_url(&cmd.api_url, &format!("/nodes/{}/drain", cmd.node_id));
+
+    println!(
+        "  {} Undraining node {}...",
+        "⏳".bright_yellow(),
+        cmd.node_id
+    );
+
+    let response = client
+        .delete(&url)
+        .header("Authorization", format!("Bearer {}", cmd.api_token))
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to connect to API: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(handle_api_error(response).await);
+    }
+
+    let data: UndrainNodeResponse = response.json().await?;
+
+    println!(
+        "  {} Node '{}' is now {}",
+        "✓".bright_green(),
+        data.name.bright_cyan(),
+        data.status.bright_green()
+    );
+    println!("  {}", data.message);
 
     Ok(())
 }

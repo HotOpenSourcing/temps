@@ -144,10 +144,14 @@ impl NodeService {
             .await?
             .ok_or(NodeError::NotFoundById { node_id })?;
 
-        let mut active: nodes::ActiveModel = node.into();
+        let mut active: nodes::ActiveModel = node.clone().into();
         active.last_heartbeat = Set(Some(chrono::Utc::now()));
         active.capacity = Set(request.capacity);
-        active.status = Set("active".to_string());
+        // Only transition to "active" if the node was "offline" (reconnecting).
+        // Preserve managed states like "draining" and "drained".
+        if node.status == "offline" {
+            active.status = Set("active".to_string());
+        }
         if let Some(labels) = request.labels {
             active.labels = Set(labels);
         }
@@ -229,6 +233,32 @@ impl NodeService {
         active.update(self.db.as_ref()).await?;
 
         tracing::info!(node_id = node_id, "Node marked as draining");
+
+        Ok(())
+    }
+
+    /// Reactivate a drained or draining node so it can accept new deployments again.
+    /// Only nodes in "draining" or "drained" status can be undrained.
+    pub async fn mark_active(&self, node_id: i32) -> Result<(), NodeError> {
+        let node = nodes::Entity::find_by_id(node_id)
+            .one(self.db.as_ref())
+            .await?
+            .ok_or(NodeError::NotFoundById { node_id })?;
+
+        if node.status != "draining" && node.status != "drained" {
+            return Err(NodeError::Validation {
+                message: format!(
+                    "Cannot undrain node {}: current status is '{}', expected 'draining' or 'drained'",
+                    node_id, node.status
+                ),
+            });
+        }
+
+        let mut active: nodes::ActiveModel = node.into();
+        active.status = Set("active".to_string());
+        active.update(self.db.as_ref()).await?;
+
+        tracing::info!(node_id = node_id, "Node reactivated (undrained)");
 
         Ok(())
     }
@@ -326,6 +356,21 @@ impl NodeService {
         Ok(containers)
     }
 
+    /// List active containers on a node for a specific deployment.
+    pub async fn list_containers_for_node_deployment(
+        &self,
+        node_id: i32,
+        deployment_id: i32,
+    ) -> Result<Vec<deployment_containers::Model>, NodeError> {
+        let containers = deployment_containers::Entity::find()
+            .filter(deployment_containers::Column::NodeId.eq(node_id))
+            .filter(deployment_containers::Column::DeploymentId.eq(deployment_id))
+            .filter(deployment_containers::Column::DeletedAt.is_null())
+            .all(self.db.as_ref())
+            .await?;
+        Ok(containers)
+    }
+
     /// Get the set of unique (project_id, environment_id) pairs affected by
     /// containers running on the given node. Each pair represents an environment
     /// that has at least one live container on this node and may need redeployment.
@@ -357,6 +402,115 @@ impl NodeService {
             .collect();
 
         Ok(pairs)
+    }
+
+    /// Detailed info about each deployment affected by a node drain.
+    /// Returns `(project_id, environment_id, deployment_id, containers_on_node, total_active_containers)`.
+    pub async fn affected_deployments(
+        &self,
+        node_id: i32,
+    ) -> Result<Vec<AffectedDeployment>, NodeError> {
+        let containers_on_node = self.list_containers_for_node(node_id).await?;
+
+        let deployment_ids: Vec<i32> = containers_on_node
+            .iter()
+            .map(|c| c.deployment_id)
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        if deployment_ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let deploys = deployments::Entity::find()
+            .filter(deployments::Column::Id.is_in(deployment_ids.clone()))
+            .all(self.db.as_ref())
+            .await?;
+
+        // For each deployment, count ALL active containers (on any node)
+        let all_containers = deployment_containers::Entity::find()
+            .filter(deployment_containers::Column::DeploymentId.is_in(deployment_ids))
+            .filter(deployment_containers::Column::DeletedAt.is_null())
+            .all(self.db.as_ref())
+            .await?;
+
+        let mut result = Vec::new();
+        for deploy in &deploys {
+            let on_node = containers_on_node
+                .iter()
+                .filter(|c| c.deployment_id == deploy.id)
+                .count();
+            let total = all_containers
+                .iter()
+                .filter(|c| c.deployment_id == deploy.id)
+                .count();
+
+            result.push(AffectedDeployment {
+                project_id: deploy.project_id,
+                environment_id: deploy.environment_id,
+                deployment_id: deploy.id,
+                containers_on_node: on_node,
+                total_active_containers: total,
+            });
+        }
+
+        Ok(result)
+    }
+
+    /// Soft-delete all active containers on a specific node for a given deployment.
+    /// Sets `deleted_at` and `status = "removed"` so the proxy stops routing to them.
+    /// Returns the number of containers retired.
+    pub async fn retire_containers_on_node(
+        &self,
+        node_id: i32,
+        deployment_id: i32,
+    ) -> Result<usize, NodeError> {
+        let containers = deployment_containers::Entity::find()
+            .filter(deployment_containers::Column::NodeId.eq(node_id))
+            .filter(deployment_containers::Column::DeploymentId.eq(deployment_id))
+            .filter(deployment_containers::Column::DeletedAt.is_null())
+            .all(self.db.as_ref())
+            .await?;
+
+        let count = containers.len();
+        for container in containers {
+            let mut active: deployment_containers::ActiveModel = container.into();
+            active.deleted_at = Set(Some(chrono::Utc::now()));
+            active.status = Set(Some("removed".to_string()));
+            active.update(self.db.as_ref()).await?;
+        }
+
+        if count > 0 {
+            tracing::info!(
+                node_id,
+                deployment_id,
+                count,
+                "Retired containers on draining node"
+            );
+        }
+
+        Ok(count)
+    }
+}
+
+/// Info about a deployment affected by a node going offline or draining.
+#[derive(Debug, Clone)]
+pub struct AffectedDeployment {
+    pub project_id: i32,
+    pub environment_id: i32,
+    pub deployment_id: i32,
+    /// Number of active containers for this deployment on the affected node.
+    pub containers_on_node: usize,
+    /// Total number of active containers for this deployment across all nodes.
+    pub total_active_containers: usize,
+}
+
+impl AffectedDeployment {
+    /// Returns true if removing containers on the affected node leaves zero replicas.
+    /// In this case a full redeploy is needed to maintain availability.
+    pub fn needs_redeploy(&self) -> bool {
+        self.total_active_containers <= self.containers_on_node
     }
 }
 
@@ -703,5 +857,270 @@ mod tests {
 
         let completed = service.check_all_drains().await.unwrap();
         assert_eq!(completed, vec![1]);
+    }
+
+    // ── Heartbeat preserves managed status ───────────────────────
+
+    #[tokio::test]
+    async fn test_heartbeat_preserves_draining_status() {
+        let mut draining_node = sample_node();
+        draining_node.status = "draining".to_string();
+
+        // The updated node should still be "draining" (status unchanged)
+        let mut updated_node = sample_node();
+        updated_node.status = "draining".to_string();
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // find_by_id
+            .append_query_results(vec![vec![draining_node]])
+            // update
+            .append_query_results(vec![vec![updated_node]])
+            .into_connection();
+        let service = NodeService::new(Arc::new(db));
+
+        let result = service
+            .heartbeat(
+                1,
+                HeartbeatRequest {
+                    capacity: serde_json::json!({"cpu": 50}),
+                    labels: None,
+                },
+            )
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_reactivates_offline_node() {
+        let mut offline_node = sample_node();
+        offline_node.status = "offline".to_string();
+
+        let mut reactivated_node = sample_node();
+        reactivated_node.status = "active".to_string();
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![offline_node]])
+            .append_query_results(vec![vec![reactivated_node]])
+            .into_connection();
+        let service = NodeService::new(Arc::new(db));
+
+        let result = service
+            .heartbeat(
+                1,
+                HeartbeatRequest {
+                    capacity: serde_json::json!({"cpu": 50}),
+                    labels: None,
+                },
+            )
+            .await;
+        assert!(result.is_ok());
+    }
+
+    // ── AffectedDeployment unit tests ──────────────────────────────
+
+    #[test]
+    fn test_needs_redeploy_all_on_draining_node() {
+        let dep = AffectedDeployment {
+            project_id: 1,
+            environment_id: 2,
+            deployment_id: 10,
+            containers_on_node: 3,
+            total_active_containers: 3,
+        };
+        assert!(dep.needs_redeploy());
+    }
+
+    #[test]
+    fn test_needs_redeploy_some_on_other_nodes() {
+        let dep = AffectedDeployment {
+            project_id: 1,
+            environment_id: 2,
+            deployment_id: 10,
+            containers_on_node: 1,
+            total_active_containers: 4,
+        };
+        assert!(!dep.needs_redeploy());
+    }
+
+    #[test]
+    fn test_needs_redeploy_single_replica_on_node() {
+        let dep = AffectedDeployment {
+            project_id: 1,
+            environment_id: 2,
+            deployment_id: 10,
+            containers_on_node: 1,
+            total_active_containers: 1,
+        };
+        assert!(dep.needs_redeploy());
+    }
+
+    // ── affected_deployments integration tests ─────────────────────
+
+    #[tokio::test]
+    async fn test_affected_deployments_mixed_replicas() {
+        // Deployment 10: 2 containers on node 5, 4 total (has healthy replicas elsewhere)
+        // Deployment 20: 1 container on node 5, 1 total (needs redeploy)
+        let c1 = sample_container(1, 10, 5);
+        let c2 = sample_container(2, 10, 5);
+        let c3 = sample_container(3, 20, 5);
+
+        let d1 = sample_deployment(10, 100, 200);
+        let d2 = sample_deployment(20, 100, 201);
+
+        // "All active containers" includes ones on other nodes
+        let c_other_node = sample_container(4, 10, 7); // deployment 10 on node 7
+        let c_other_node2 = sample_container(5, 10, 8); // deployment 10 on node 8
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // list_containers_for_node(5): containers on the draining node
+            .append_query_results(vec![vec![c1.clone(), c2.clone(), c3.clone()]])
+            // deployments query
+            .append_query_results(vec![vec![d1, d2]])
+            // all active containers for these deployment IDs
+            .append_query_results(vec![vec![c1, c2, c_other_node, c_other_node2, c3]])
+            .into_connection();
+        let service = NodeService::new(Arc::new(db));
+
+        let affected = service.affected_deployments(5).await.unwrap();
+        assert_eq!(affected.len(), 2);
+
+        let dep10 = affected.iter().find(|d| d.deployment_id == 10).unwrap();
+        assert_eq!(dep10.containers_on_node, 2);
+        assert_eq!(dep10.total_active_containers, 4);
+        assert!(!dep10.needs_redeploy()); // 2 remain on other nodes
+
+        let dep20 = affected.iter().find(|d| d.deployment_id == 20).unwrap();
+        assert_eq!(dep20.containers_on_node, 1);
+        assert_eq!(dep20.total_active_containers, 1);
+        assert!(dep20.needs_redeploy()); // all replicas on this node
+    }
+
+    #[tokio::test]
+    async fn test_affected_deployments_empty() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![Vec::<deployment_containers::Model>::new()])
+            .into_connection();
+        let service = NodeService::new(Arc::new(db));
+
+        let affected = service.affected_deployments(99).await.unwrap();
+        assert!(affected.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_retire_containers_on_node() {
+        // 2 containers for deployment 10 on node 5
+        let c1 = sample_container(1, 10, 5);
+        let c2 = sample_container(2, 10, 5);
+
+        // After update, containers come back with deleted status
+        let mut c1_updated = sample_container(1, 10, 5);
+        c1_updated.status = Some("removed".to_string());
+        c1_updated.deleted_at = Some(chrono::Utc::now());
+        let mut c2_updated = sample_container(2, 10, 5);
+        c2_updated.status = Some("removed".to_string());
+        c2_updated.deleted_at = Some(chrono::Utc::now());
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // find containers on node for deployment
+            .append_query_results(vec![vec![c1, c2]])
+            // update c1
+            .append_query_results(vec![vec![c1_updated]])
+            // update c2
+            .append_query_results(vec![vec![c2_updated]])
+            .into_connection();
+        let service = NodeService::new(Arc::new(db));
+
+        let count = service.retire_containers_on_node(5, 10).await.unwrap();
+        assert_eq!(count, 2);
+    }
+
+    // ── mark_active (undrain) tests ──────────────────────────────
+
+    #[tokio::test]
+    async fn test_mark_active_from_draining() {
+        let mut draining_node = sample_node();
+        draining_node.status = "draining".to_string();
+
+        let mut reactivated = sample_node();
+        reactivated.status = "active".to_string();
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![draining_node]])
+            .append_query_results(vec![vec![reactivated]])
+            .into_connection();
+        let service = NodeService::new(Arc::new(db));
+
+        let result = service.mark_active(1).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_mark_active_from_drained() {
+        let mut drained_node = sample_node();
+        drained_node.status = "drained".to_string();
+
+        let mut reactivated = sample_node();
+        reactivated.status = "active".to_string();
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![drained_node]])
+            .append_query_results(vec![vec![reactivated]])
+            .into_connection();
+        let service = NodeService::new(Arc::new(db));
+
+        let result = service.mark_active(1).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_mark_active_rejects_active_node() {
+        let active_node = sample_node(); // status = "active"
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![active_node]])
+            .into_connection();
+        let service = NodeService::new(Arc::new(db));
+
+        let result = service.mark_active(1).await;
+        assert!(matches!(result.unwrap_err(), NodeError::Validation { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_mark_active_rejects_offline_node() {
+        let mut offline_node = sample_node();
+        offline_node.status = "offline".to_string();
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![offline_node]])
+            .into_connection();
+        let service = NodeService::new(Arc::new(db));
+
+        let result = service.mark_active(1).await;
+        assert!(matches!(result.unwrap_err(), NodeError::Validation { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_mark_active_not_found() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![Vec::<nodes::Model>::new()])
+            .into_connection();
+        let service = NodeService::new(Arc::new(db));
+
+        let result = service.mark_active(999).await;
+        assert!(matches!(
+            result.unwrap_err(),
+            NodeError::NotFoundById { node_id: 999 }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_retire_containers_on_node_empty() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![Vec::<deployment_containers::Model>::new()])
+            .into_connection();
+        let service = NodeService::new(Arc::new(db));
+
+        let count = service.retire_containers_on_node(5, 10).await.unwrap();
+        assert_eq!(count, 0);
     }
 }

@@ -91,9 +91,13 @@ pub async fn check_drain_completion(node_service: &NodeService) -> Vec<i32> {
     }
 }
 
-/// Trigger redeployment for all environments that have containers on the
-/// given offline node IDs. This is the failover mechanism — when a node
-/// goes offline, its workloads are automatically rescheduled.
+/// Handle failover for nodes that just went offline.
+///
+/// For each affected deployment:
+/// - If other nodes still have healthy replicas, just retire the containers
+///   on the offline node (proxy stops routing to them on next refresh).
+/// - If ALL replicas were on the offline node, trigger a full redeploy so
+///   the workload is rescheduled to a healthy node.
 pub async fn failover_offline_nodes(
     offline_node_ids: &[i32],
     node_service: &NodeService,
@@ -104,12 +108,12 @@ pub async fn failover_offline_nodes(
     }
 
     for &node_id in offline_node_ids {
-        let affected = match node_service.affected_environments(node_id).await {
-            Ok(envs) => envs,
+        let affected = match node_service.affected_deployments(node_id).await {
+            Ok(deps) => deps,
             Err(e) => {
                 tracing::error!(
                     node_id,
-                    "Failed to query affected environments for failover: {}",
+                    "Failed to query affected deployments for failover: {}",
                     e
                 );
                 continue;
@@ -117,38 +121,65 @@ pub async fn failover_offline_nodes(
         };
 
         if affected.is_empty() {
-            tracing::debug!(node_id, "No affected environments for offline node");
+            tracing::debug!(node_id, "No affected deployments for offline node");
             continue;
         }
 
         tracing::warn!(
             node_id,
             affected_count = affected.len(),
-            "Triggering failover redeployment for {} environment(s)",
+            "Failover: processing {} deployment(s) on offline node",
             affected.len()
         );
 
-        for (project_id, environment_id) in &affected {
-            match deployment_service
-                .trigger_pipeline(*project_id, *environment_id, None, None, None)
-                .await
-            {
-                Ok(_) => {
-                    tracing::info!(
-                        node_id,
-                        project_id,
-                        environment_id,
-                        "Failover: triggered redeployment"
-                    );
+        for dep in &affected {
+            if dep.needs_redeploy() {
+                // All replicas were on this node — must redeploy
+                match deployment_service
+                    .redeploy_environment(dep.project_id, dep.environment_id)
+                    .await
+                {
+                    Ok(_) => {
+                        tracing::info!(
+                            node_id,
+                            project_id = dep.project_id,
+                            environment_id = dep.environment_id,
+                            "Failover: triggered full redeploy (no healthy replicas elsewhere)"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            node_id,
+                            project_id = dep.project_id,
+                            environment_id = dep.environment_id,
+                            "Failover: failed to trigger redeploy: {}",
+                            e
+                        );
+                    }
                 }
-                Err(e) => {
-                    tracing::error!(
-                        node_id,
-                        project_id,
-                        environment_id,
-                        "Failover: failed to trigger redeployment: {}",
-                        e
-                    );
+            } else {
+                // Other nodes have healthy replicas — just retire stale containers
+                match node_service
+                    .retire_containers_on_node(node_id, dep.deployment_id)
+                    .await
+                {
+                    Ok(count) => {
+                        tracing::info!(
+                            node_id,
+                            deployment_id = dep.deployment_id,
+                            retired = count,
+                            remaining = dep.total_active_containers - dep.containers_on_node,
+                            "Failover: retired containers, healthy replicas remain"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            node_id,
+                            deployment_id = dep.deployment_id,
+                            "Failover: failed to retire containers: {}",
+                            e
+                        );
+                    }
                 }
             }
         }

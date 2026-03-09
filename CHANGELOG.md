@@ -48,6 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Docker container names are now used instead of Docker network aliases for cross-node environment variable rewriting, fixing service connectivity on remote worker nodes
 - Deployment "marking complete" step could hang for the full 60-second timeout when the job queue was busy: the DB poll fallback (which confirms the route table update via database query) was only checked when the queue receiver timed out, but a steady stream of unrelated queue events prevented the timeout from ever firing; the poll now runs on every loop iteration regardless of queue activity
 - Remote environment variables are no longer built when no active worker nodes exist, avoiding unnecessary work in single-node deployments
+- **Phantom deployments on node drain/failover**: drain and failover previously called `trigger_pipeline` with no branch/tag/commit, creating broken "preview" deployments with empty git context; now uses smart drain logic that retires containers on the draining node when healthy replicas exist on other nodes, and only triggers a full redeploy (with correct git context from the latest successful deployment) when all replicas are on the affected node
 
 ### Added
 - Automatic `CRON_SECRET` injection into deployed containers: the deployment token is now set as `CRON_SECRET` in the container environment on every deployment, and the cron scheduler sends `Authorization: Bearer <CRON_SECRET>` when invoking endpoints — no manual configuration needed

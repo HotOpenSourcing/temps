@@ -74,6 +74,7 @@ pub struct DeploymentService {
     queue_service: Arc<dyn temps_core::JobQueue>,
     docker_log_service: Arc<temps_logs::DockerLogService>,
     deployer: Arc<dyn temps_deployer::ContainerDeployer>,
+    encryption_service: Arc<temps_core::EncryptionService>,
 }
 
 impl DeploymentService {
@@ -84,6 +85,7 @@ impl DeploymentService {
         queue_service: Arc<dyn temps_core::JobQueue>,
         docker_log_service: Arc<temps_logs::DockerLogService>,
         deployer: Arc<dyn temps_deployer::ContainerDeployer>,
+        encryption_service: Arc<temps_core::EncryptionService>,
     ) -> Self {
         DeploymentService {
             db,
@@ -92,6 +94,7 @@ impl DeploymentService {
             queue_service,
             docker_log_service,
             deployer,
+            encryption_service,
         }
     }
     pub async fn get_filtered_container_logs(
@@ -604,6 +607,48 @@ impl DeploymentService {
         Ok(())
     }
 
+    /// Redeploy an environment using the context (branch, tag, commit) from its
+    /// latest successful deployment.  Used by node drain and failover — these
+    /// operations need to reschedule existing workloads, not start a fresh
+    /// deployment from scratch.
+    ///
+    /// Falls back to the environment's configured branch when no prior
+    /// deployment exists.
+    pub async fn redeploy_environment(
+        &self,
+        project_id: i32,
+        environment_id: i32,
+    ) -> Result<(), DeploymentError> {
+        // Find the latest successful deployment for this environment
+        let latest = deployments::Entity::find()
+            .filter(deployments::Column::ProjectId.eq(project_id))
+            .filter(deployments::Column::EnvironmentId.eq(environment_id))
+            .filter(deployments::Column::State.is_in(vec!["deployed", "completed", "ready"]))
+            .order_by_desc(deployments::Column::CreatedAt)
+            .one(self.db.as_ref())
+            .await
+            .map_err(|e| DeploymentError::Other(e.to_string()))?;
+
+        let (branch, tag, commit) = if let Some(ref deploy) = latest {
+            (
+                deploy.branch_ref.clone(),
+                deploy.tag_ref.clone(),
+                deploy.commit_sha.clone(),
+            )
+        } else {
+            // No prior deployment — fall back to environment's branch
+            let env = temps_entities::environments::Entity::find_by_id(environment_id)
+                .one(self.db.as_ref())
+                .await
+                .map_err(|e| DeploymentError::Other(e.to_string()))?;
+            let branch = env.and_then(|e| e.branch.filter(|b| !b.is_empty()));
+            (branch, None, None)
+        };
+
+        self.trigger_pipeline(project_id, environment_id, branch, tag, commit)
+            .await
+    }
+
     pub async fn rollback_to_deployment(
         &self,
         project_id: i32,
@@ -1004,6 +1049,7 @@ impl DeploymentService {
                 .container_deployer(self.deployer.clone())
                 .queue(self.queue_service.clone())
                 .config_service(self.config_service.clone())
+                .encryption_service(self.encryption_service.clone())
                 .build()
                 .map_err(|e| {
                     DeploymentError::Other(format!("Failed to create mark complete job: {}", e))
@@ -2765,6 +2811,7 @@ mod tests {
             queue_service,
             docker_log_service,
             deployer,
+            encryption_service: create_test_encryption_service(),
         }
     }
 
@@ -2997,6 +3044,7 @@ mod tests {
             queue_service,
             docker_log_service,
             deployer,
+            encryption_service: create_test_encryption_service(),
         }
     }
 

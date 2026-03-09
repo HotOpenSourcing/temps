@@ -48,6 +48,7 @@ impl TempsPlugin for DeploymentsPlugin {
             let git_provider = context.require_service::<dyn temps_git::GitProviderManagerTrait>();
             let image_builder = context.require_service::<dyn temps_deployer::ImageBuilder>();
             let git_provider_manager = context.require_service::<temps_git::GitProviderManager>();
+            let encryption_service = context.require_service::<temps_core::EncryptionService>();
             // Create DeploymentService
             let deployment_service = Arc::new(DeploymentService::new(
                 db.clone(),
@@ -56,6 +57,7 @@ impl TempsPlugin for DeploymentsPlugin {
                 queue_service.clone(),
                 docker_log_service,
                 deployer.clone(),
+                encryption_service.clone(),
             ));
             context.register_service(deployment_service.clone());
 
@@ -297,6 +299,11 @@ impl TempsPlugin for DeploymentsPlugin {
         // Create NodeService for admin node routes (list/get with session auth)
         let node_service = Arc::new(crate::services::NodeService::new(db.clone()));
 
+        // Re-fetch encryption service for AppState (the first ref was moved into WorkflowPlanner)
+        let encryption_service = context
+            .get_service::<temps_core::EncryptionService>()
+            .expect("EncryptionService must be registered before configuring routes");
+
         let app_state = Arc::new(handlers::types::AppState {
             deployment_service,
             log_service,
@@ -312,6 +319,7 @@ impl TempsPlugin for DeploymentsPlugin {
             image_builder,
             audit_service,
             node_service,
+            encryption_service,
         });
 
         let deployments_routes = handlers::deployments::configure_routes();

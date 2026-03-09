@@ -55,7 +55,7 @@ impl UpstreamResolver for UpstreamResolverImpl {
         host: &str,
         path: &str,
         sni_hostname: Option<&str>,
-    ) -> PingoraResult<Box<HttpPeer>> {
+    ) -> PingoraResult<PeerSelection> {
         debug!(
             "Resolving peer for host: {}, path: {}, sni: {:?}",
             host, path, sni_hostname
@@ -72,53 +72,75 @@ impl UpstreamResolver for UpstreamResolverImpl {
                 false,
                 "".to_string(),
             ));
-            return Ok(peer);
+            return Ok(PeerSelection {
+                peer,
+                container_id: None,
+                container_name: None,
+            });
         }
 
         // 1. First try TLS/SNI-based routing
-        // Note: In pingora-core 0.6.0, SNI is not available in SslDigest
-        // We use the Host header which typically matches the SNI for TLS connections
-        // If SNI was provided (from future pingora versions), use it; otherwise use host
         let sni_or_host = sni_hostname.unwrap_or(host);
         if let Some(route_info) = self.route_table.get_route_by_sni(sni_or_host) {
-            let backend_addr = route_info.get_backend_addr();
+            let selection = route_info.select_backend();
             debug!(
                 "Found TLS route via SNI/Host {} -> {}",
-                sni_or_host, backend_addr
+                sni_or_host, selection.address
             );
-            let peer = Box::new(HttpPeer::new(backend_addr, false, "".to_string()));
-            return Ok(peer);
+            let peer = Box::new(HttpPeer::new(
+                selection.address.clone(),
+                false,
+                "".to_string(),
+            ));
+            return Ok(PeerSelection {
+                peer,
+                container_id: selection.container_id,
+                container_name: selection.container_name,
+            });
         }
 
         // 2. Try HTTP Host-based routing (HTTP routes)
         if let Some(route_info) = self.route_table.get_route_by_host(host) {
             let project_id = route_info.project.as_ref().map(|p| p.id);
             let env_id = route_info.environment.as_ref().map(|e| e.id);
-            let backend_addr = route_info.get_backend_addr(); // Get next backend using round-robin
+            let selection = route_info.select_backend();
             debug!(
                 "Found HTTP route for {} -> {} (project_id: {:?}, env_id: {:?})",
-                host, backend_addr, project_id, env_id
+                host, selection.address, project_id, env_id
             );
 
-            // Note: Redirects are now handled in proxy.rs request_filter before peer resolution
-            // If we reach here, no redirect is configured and we route to backend normally
-
-            let peer = Box::new(HttpPeer::new(backend_addr, false, "".to_string()));
-            return Ok(peer);
+            let peer = Box::new(HttpPeer::new(
+                selection.address.clone(),
+                false,
+                "".to_string(),
+            ));
+            return Ok(PeerSelection {
+                peer,
+                container_id: selection.container_id,
+                container_name: selection.container_name,
+            });
         }
 
         // 3. Legacy: Check the old get_route method for backwards compatibility
         if let Some(route_info) = self.route_table.get_route(host) {
             let project_id = route_info.project.as_ref().map(|p| p.id);
             let env_id = route_info.environment.as_ref().map(|e| e.id);
-            let backend_addr = route_info.get_backend_addr();
+            let selection = route_info.select_backend();
             debug!(
                 "Found legacy route for {} -> {} (project_id: {:?}, env_id: {:?})",
-                host, backend_addr, project_id, env_id
+                host, selection.address, project_id, env_id
             );
 
-            let peer = Box::new(HttpPeer::new(backend_addr, false, "".to_string()));
-            return Ok(peer);
+            let peer = Box::new(HttpPeer::new(
+                selection.address.clone(),
+                false,
+                "".to_string(),
+            ));
+            return Ok(PeerSelection {
+                peer,
+                container_id: selection.container_id,
+                container_name: selection.container_name,
+            });
         }
 
         // No route found - route to console address as default
@@ -131,7 +153,11 @@ impl UpstreamResolver for UpstreamResolverImpl {
             false,
             "".to_string(),
         ));
-        Ok(peer)
+        Ok(PeerSelection {
+            peer,
+            container_id: None,
+            container_name: None,
+        })
     }
 
     async fn has_custom_route(&self, host: &str) -> bool {

@@ -131,7 +131,7 @@ impl JoinCommand {
             "name": node_name,
             "token": agent_token,
             "join_token": self.token,
-            "address": format!("http://{}:{}", private_address, self.agent_address.split(':').next_back().unwrap_or("3100")),
+            "address": format!("http://{}:{}", private_address.trim(), self.agent_address.split(':').next_back().unwrap_or("3100").trim()),
             "private_address": private_address,
             "labels": labels,
         });
@@ -266,7 +266,12 @@ impl JoinCommand {
             relay_response.control_plane_url
         );
 
-        let agent_port = self.agent_address.split(':').next_back().unwrap_or("3100");
+        let agent_port = self
+            .agent_address
+            .split(':')
+            .next_back()
+            .unwrap_or("3100")
+            .trim();
 
         let register_body = serde_json::json!({
             "name": node_name,

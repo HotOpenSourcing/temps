@@ -180,7 +180,7 @@ pub mod proxy_tests {
             host: &str,
             path: &str,
             _sni_hostname: Option<&str>,
-        ) -> pingora_core::Result<Box<pingora_core::upstreams::peer::HttpPeer>> {
+        ) -> pingora_core::Result<PeerSelection> {
             let upstream_addr = if path.starts_with("/api/_temps") {
                 &self.console_addr
             } else if host == "test.example.com" {
@@ -196,7 +196,11 @@ pub mod proxy_tests {
                 false,
                 "".to_string(),
             ));
-            Ok(peer)
+            Ok(PeerSelection {
+                peer,
+                container_id: None,
+                container_name: None,
+            })
         }
 
         async fn has_custom_route(&self, host: &str) -> bool {
@@ -285,12 +289,16 @@ pub mod proxy_tests {
         );
 
         // Test that the LoadBalancer can resolve the upstream
-        let upstream = lb
+        let selection = lb
             .upstream_resolver()
             .resolve_peer("test.example.com", "/", None)
             .await?;
-        println!("Resolved upstream to: {}", upstream.address());
-        assert!(upstream.address().to_string().starts_with("127.0.0.1:"));
+        println!("Resolved upstream to: {}", selection.peer.address());
+        assert!(selection
+            .peer
+            .address()
+            .to_string()
+            .starts_with("127.0.0.1:"));
 
         // Note: Using shared database, so we don't cleanup individual test data
         Ok(())
@@ -349,21 +357,21 @@ pub mod proxy_tests {
             MockUpstreamResolver::new(mock_server_addr.clone(), "127.0.0.1:3001".to_string());
 
         // Test different route resolutions
-        let peer1 = upstream_resolver
+        let sel1 = upstream_resolver
             .resolve_peer("test.example.com", "/", None)
             .await?;
-        assert!(peer1.address().to_string().starts_with("127.0.0.1:"));
-        assert_eq!(peer1.address().to_string(), mock_server_addr);
+        assert!(sel1.peer.address().to_string().starts_with("127.0.0.1:"));
+        assert_eq!(sel1.peer.address().to_string(), mock_server_addr);
 
-        let peer2 = upstream_resolver
+        let sel2 = upstream_resolver
             .resolve_peer("unknown.com", "/", None)
             .await?;
-        assert_eq!(peer2.address().to_string(), "127.0.0.1:3001"); // Should go to console
+        assert_eq!(sel2.peer.address().to_string(), "127.0.0.1:3001"); // Should go to console
 
-        let peer3 = upstream_resolver
+        let sel3 = upstream_resolver
             .resolve_peer("test.example.com", "/api/_temps/health", None)
             .await?;
-        assert_eq!(peer3.address().to_string(), "127.0.0.1:3001"); // Temps API should go to console
+        assert_eq!(sel3.peer.address().to_string(), "127.0.0.1:3001"); // Temps API should go to console
 
         // Test custom route detection
         assert!(

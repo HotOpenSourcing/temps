@@ -27,6 +27,7 @@ use crate::services::node_service::{
     HeartbeatRequest, NodeError, NodeService, RegisterNodeRequest,
 };
 use temps_core::problemdetails::{self, Problem};
+use temps_deployer::ContainerDeployer;
 
 /// App state for node registration handlers
 pub struct NodeAppState {
@@ -152,6 +153,15 @@ pub struct DrainStatusResponse {
     pub message: String,
 }
 
+/// Response after undraining (reactivating) a node.
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct UndrainNodeResponse {
+    pub id: i32,
+    pub name: String,
+    pub status: String,
+    pub message: String,
+}
+
 #[derive(OpenApi)]
 #[openapi(
     paths(
@@ -161,6 +171,7 @@ pub struct DrainStatusResponse {
         admin_get_node,
         admin_list_node_containers,
         admin_drain_node,
+        admin_undrain_node,
         admin_remove_node,
         admin_drain_status,
     ),
@@ -174,6 +185,7 @@ pub struct DrainStatusResponse {
         NodeContainerResponse,
         NodeContainerListResponse,
         DrainNodeResponse,
+        UndrainNodeResponse,
         RemoveNodeResponse,
         DrainStatusResponse,
     )),
@@ -208,7 +220,9 @@ pub fn configure_admin_routes() -> Router<Arc<AppState>> {
         )
         .route(
             "/internal/nodes/{node_id}/drain",
-            get(admin_drain_status).post(admin_drain_node),
+            get(admin_drain_status)
+                .post(admin_drain_node)
+                .delete(admin_undrain_node),
         )
 }
 
@@ -314,11 +328,11 @@ async fn register_node(
         })?;
 
     let register_request = RegisterNodeRequest {
-        name: request.name,
+        name: request.name.trim().to_string(),
         token_hash,
         token_encrypted: Some(token_encrypted),
-        address: request.address,
-        private_address: request.private_address,
+        address: request.address.trim().to_string(),
+        private_address: request.private_address.trim().to_string(),
         public_endpoint: request.public_endpoint,
         wg_public_key: request.wg_public_key,
         role: request.role.unwrap_or_else(|| "worker".to_string()),
@@ -594,6 +608,24 @@ async fn admin_list_node_containers(
     Ok(Json(NodeContainerListResponse { containers, total }))
 }
 
+/// Create a `RemoteNodeDeployer` for stopping containers on a worker node.
+/// Returns `None` if the node has no encrypted token or decryption fails (best-effort).
+fn create_remote_deployer(
+    node: &temps_entities::nodes::Model,
+    encryption_service: &temps_core::EncryptionService,
+) -> Option<Arc<dyn ContainerDeployer>> {
+    let encrypted_token = node.token_encrypted.as_ref()?;
+    let decrypted_bytes = encryption_service.decrypt(encrypted_token).ok()?;
+    let token = String::from_utf8(decrypted_bytes).ok()?;
+    let deployer = temps_deployer::remote::RemoteNodeDeployer::new(
+        node.address.clone(),
+        token,
+        node.name.clone(),
+    )
+    .ok()?;
+    Some(Arc::new(deployer))
+}
+
 /// Drain a node: mark it as "draining" so no new replicas are scheduled on it,
 /// and trigger redeployment of all affected environments so their containers
 /// are rescheduled to healthy nodes.
@@ -629,14 +661,12 @@ async fn admin_drain_node(
             .with_detail(format!("Node '{}' is already in draining state", node.name)));
     }
 
-    // Find affected environments before draining
+    // Get detailed info about each deployment on this node
     let affected = app_state
         .node_service
-        .affected_environments(node_id)
+        .affected_deployments(node_id)
         .await
         .map_err(Problem::from)?;
-
-    let affected_count = affected.len();
 
     // Mark the node as draining — scheduler will exclude it from new assignments
     app_state
@@ -645,35 +675,100 @@ async fn admin_drain_node(
         .await
         .map_err(Problem::from)?;
 
-    info!(
-        node_id,
-        node_name = %node.name,
-        affected_environments = affected_count,
-        "Node drain initiated, triggering redeployment for affected environments"
-    );
+    let mut retired_count = 0usize;
+    let mut redeployed_count = 0usize;
 
-    // Trigger redeployment for each affected environment so containers
-    // move off the draining node onto healthy nodes
-    for (project_id, environment_id) in &affected {
-        match app_state
-            .deployment_service
-            .trigger_pipeline(*project_id, *environment_id, None, None, None)
-            .await
-        {
-            Ok(_) => {
-                info!(
-                    project_id,
-                    environment_id, "Triggered redeployment for drain"
-                );
+    for dep in &affected {
+        if dep.needs_redeploy() {
+            // All replicas are on this node — must redeploy to maintain availability
+            match app_state
+                .deployment_service
+                .redeploy_environment(dep.project_id, dep.environment_id)
+                .await
+            {
+                Ok(_) => {
+                    redeployed_count += 1;
+                    info!(
+                        node_id,
+                        project_id = dep.project_id,
+                        environment_id = dep.environment_id,
+                        "Drain: triggered full redeploy (no healthy replicas on other nodes)"
+                    );
+                }
+                Err(e) => {
+                    error!(
+                        node_id,
+                        project_id = dep.project_id,
+                        environment_id = dep.environment_id,
+                        "Drain: failed to trigger redeploy: {}",
+                        e
+                    );
+                }
             }
-            Err(e) => {
-                error!(
-                    project_id,
-                    environment_id, "Failed to trigger redeployment during drain: {}", e
-                );
+        } else {
+            // Other nodes still have healthy replicas — stop and retire containers on this node
+            // First, stop containers on the agent (best-effort)
+            let containers = app_state
+                .node_service
+                .list_containers_for_node_deployment(node_id, dep.deployment_id)
+                .await
+                .unwrap_or_default();
+
+            if let Some(remote_deployer) =
+                create_remote_deployer(&node, &app_state.encryption_service)
+            {
+                for container in &containers {
+                    if let Err(e) = remote_deployer
+                        .stop_container(&container.container_id)
+                        .await
+                    {
+                        warn!(
+                            node_id,
+                            container_id = %container.container_id,
+                            "Drain: failed to stop container on agent (will still retire): {}", e
+                        );
+                    }
+                }
+            }
+
+            // Then soft-delete in DB so the proxy stops routing to them
+            match app_state
+                .node_service
+                .retire_containers_on_node(node_id, dep.deployment_id)
+                .await
+            {
+                Ok(count) => {
+                    retired_count += count;
+                    info!(
+                        node_id,
+                        deployment_id = dep.deployment_id,
+                        retired = count,
+                        remaining = dep.total_active_containers - dep.containers_on_node,
+                        "Drain: retired containers, healthy replicas remain on other nodes"
+                    );
+                }
+                Err(e) => {
+                    error!(
+                        node_id,
+                        deployment_id = dep.deployment_id,
+                        "Drain: failed to retire containers: {}",
+                        e
+                    );
+                }
             }
         }
     }
+
+    info!(
+        node_id,
+        node_name = %node.name,
+        affected_deployments = affected.len(),
+        retired_count,
+        redeployed_count,
+        "Node drain initiated"
+    );
+
+    let affected_count = affected.len();
 
     Ok(Json(DrainNodeResponse {
         id: node_id,
@@ -681,9 +776,55 @@ async fn admin_drain_node(
         status: "draining".to_string(),
         affected_environments: affected_count,
         message: format!(
-            "Node drain initiated. {} environment(s) will be redeployed to healthy nodes.",
-            affected_count
+            "Node drain initiated. {} deployment(s) affected: {} container(s) retired, {} environment(s) redeployed.",
+            affected_count, retired_count, redeployed_count
         ),
+    }))
+}
+
+/// Undrain (reactivate) a node so it can accept new deployments again.
+/// Only works for nodes in "draining" or "drained" status.
+#[utoipa::path(
+    tag = "Nodes",
+    delete,
+    path = "/internal/nodes/{node_id}/drain",
+    params(
+        ("node_id" = i32, Path, description = "Node ID")
+    ),
+    responses(
+        (status = 200, description = "Node reactivated", body = UndrainNodeResponse),
+        (status = 400, description = "Node not in drainable state"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Node not found"),
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn admin_undrain_node(
+    RequireAuth(_auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    Path(node_id): Path<i32>,
+) -> Result<impl IntoResponse, Problem> {
+    let node = app_state
+        .node_service
+        .get_by_id(node_id)
+        .await
+        .map_err(Problem::from)?;
+
+    let node_name = node.name.clone();
+
+    app_state
+        .node_service
+        .mark_active(node_id)
+        .await
+        .map_err(Problem::from)?;
+
+    info!(node_id, node_name = %node_name, "Node undrained (reactivated)");
+
+    Ok(Json(UndrainNodeResponse {
+        id: node_id,
+        name: node_name,
+        status: "active".to_string(),
+        message: "Node reactivated and ready to accept new deployments.".to_string(),
     }))
 }
 

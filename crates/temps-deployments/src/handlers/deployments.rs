@@ -2581,6 +2581,13 @@ mod tests {
                 "temps-test".to_string(),
             ));
 
+        let encryption_service = Arc::new(
+            temps_core::EncryptionService::new(
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            )
+            .expect("Failed to create test encryption service"),
+        );
+
         let deployment_service = Arc::new(crate::services::services::DeploymentService::new(
             db.clone(),
             log_service.clone(),
@@ -2588,14 +2595,8 @@ mod tests {
             queue_service.clone(),
             docker_log_service,
             deployer,
+            encryption_service.clone(),
         ));
-
-        let encryption_service = Arc::new(
-            temps_core::EncryptionService::new(
-                "0000000000000000000000000000000000000000000000000000000000000000",
-            )
-            .expect("Failed to create test encryption service"),
-        );
 
         let deployment_token_service = Arc::new(
             crate::services::deployment_token_service::DeploymentTokenService::new(
@@ -2701,6 +2702,9 @@ mod tests {
             image_builder: Arc::new(MockImageBuilder) as Arc<dyn temps_deployer::ImageBuilder>,
             audit_service: Arc::new(MockAuditLogger) as Arc<dyn temps_core::AuditLogger>,
             node_service: Arc::new(crate::services::NodeService::new(db.clone())),
+            encryption_service: Arc::new(
+                temps_core::EncryptionService::new("01234567890123456789012345678901").unwrap(),
+            ),
         })
     }
 

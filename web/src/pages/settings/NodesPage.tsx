@@ -44,6 +44,7 @@ import {
   Loader2,
   MemoryStick,
   Pause,
+  Play,
   RefreshCw,
   Server,
   Shield,
@@ -75,6 +76,8 @@ function StatusBadge({ status }: { status: string }) {
     offline: 'bg-red-500/15 text-red-700 dark:text-red-400 border-red-500/20',
     draining:
       'bg-orange-500/15 text-orange-700 dark:text-orange-400 border-orange-500/20',
+    drained:
+      'bg-gray-500/15 text-gray-700 dark:text-gray-400 border-gray-500/20',
     pending:
       'bg-yellow-500/15 text-yellow-700 dark:text-yellow-400 border-yellow-500/20',
   }
@@ -631,8 +634,10 @@ function NodeDetail({
   const queryClient = useQueryClient()
   const [showDrainDialog, setShowDrainDialog] = useState(false)
   const [showRemoveDialog, setShowRemoveDialog] = useState(false)
+  const [showUndrainDialog, setShowUndrainDialog] = useState(false)
   const [drainPending, setDrainPending] = useState(false)
   const [removePending, setRemovePending] = useState(false)
+  const [undrainPending, setUndrainPending] = useState(false)
 
   const { data: node, isLoading: nodeLoading } = useQuery({
     ...adminGetNodeOptions({ path: { node_id: nodeId } }),
@@ -711,6 +716,28 @@ function NodeDetail({
     }
   }
 
+  const handleUndrain = async () => {
+    setUndrainPending(true)
+    try {
+      const resp = await client.delete({
+        url: '/internal/nodes/{node_id}/drain' as never,
+        path: { node_id: nodeId },
+      })
+      if (resp.error) {
+        toast.error('Failed to undrain node')
+        return
+      }
+      toast.success('Node reactivated')
+      queryClient.invalidateQueries({ queryKey: adminGetNodeOptions({ path: { node_id: nodeId } }).queryKey })
+      queryClient.invalidateQueries({ queryKey: adminListNodesOptions().queryKey })
+    } catch {
+      toast.error('Failed to undrain node')
+    } finally {
+      setUndrainPending(false)
+      setShowUndrainDialog(false)
+    }
+  }
+
   if (nodeLoading) {
     return (
       <div className="flex items-center justify-center min-h-[300px]">
@@ -730,7 +757,8 @@ function NodeDetail({
   }
 
   const canDrain = node.status === 'active'
-  const canRemove = (node.status === 'draining' && (drainStatus?.can_remove ?? containers.length === 0))
+  const canUndrain = node.status === 'draining' || node.status === 'drained'
+  const canRemove = (node.status === 'drained' && (drainStatus?.can_remove ?? containers.length === 0))
     || node.status === 'offline'
 
   return (
@@ -765,6 +793,21 @@ function NodeDetail({
                 <Pause className="h-4 w-4 mr-1" />
               )}
               <span className="hidden sm:inline">Drain</span>
+            </Button>
+          )}
+          {canUndrain && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setShowUndrainDialog(true)}
+              disabled={undrainPending}
+            >
+              {undrainPending ? (
+                <Loader2 className="h-4 w-4 animate-spin mr-1" />
+              ) : (
+                <Play className="h-4 w-4 mr-1" />
+              )}
+              <span className="hidden sm:inline">Undrain</span>
             </Button>
           )}
           {canRemove && (
@@ -830,23 +873,46 @@ function NodeDetail({
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Draining status banner */}
-      {node.status === 'draining' && (
-        <Alert className={drainStatus?.drain_complete ? 'border-green-500/30 bg-green-500/5' : 'border-orange-500/30 bg-orange-500/5'}>
-          {drainStatus?.drain_complete ? (
+      {/* Undrain confirmation dialog */}
+      <AlertDialog open={showUndrainDialog} onOpenChange={setShowUndrainDialog}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Reactivate node "{node.name}"?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will set the node back to "active" so it can accept new container
+              deployments again. Any containers that were already migrated off will
+              not be moved back automatically.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={undrainPending}>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={handleUndrain} disabled={undrainPending}>
+              {undrainPending && <Loader2 className="h-4 w-4 animate-spin mr-1" />}
+              Reactivate Node
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Draining/drained status banner */}
+      {(node.status === 'draining' || node.status === 'drained') && (
+        <Alert className={node.status === 'drained' || drainStatus?.drain_complete ? 'border-green-500/30 bg-green-500/5' : 'border-orange-500/30 bg-orange-500/5'}>
+          {node.status === 'drained' || drainStatus?.drain_complete ? (
             <AlertCircle className="h-4 w-4 text-green-500" />
           ) : (
             <Pause className="h-4 w-4 text-orange-500" />
           )}
-          <AlertTitle className={drainStatus?.drain_complete ? 'text-green-700 dark:text-green-400' : 'text-orange-700 dark:text-orange-400'}>
-            {drainStatus?.drain_complete ? 'Drain complete' : 'Node is draining'}
+          <AlertTitle className={node.status === 'drained' || drainStatus?.drain_complete ? 'text-green-700 dark:text-green-400' : 'text-orange-700 dark:text-orange-400'}>
+            {node.status === 'drained' ? 'Node is drained' : drainStatus?.drain_complete ? 'Drain complete' : 'Node is draining'}
           </AlertTitle>
-          <AlertDescription className={drainStatus?.drain_complete ? 'text-green-600 dark:text-green-300' : 'text-orange-600 dark:text-orange-300'}>
-            {drainStatus
-              ? drainStatus.message
-              : containers.length > 0
-                ? `${containers.length} container(s) still running. Workloads are being migrated to other nodes.`
-                : 'All containers have been migrated. This node can now be safely removed.'}
+          <AlertDescription className={node.status === 'drained' || drainStatus?.drain_complete ? 'text-green-600 dark:text-green-300' : 'text-orange-600 dark:text-orange-300'}>
+            {node.status === 'drained'
+              ? 'All containers have been migrated. You can remove the node or reactivate it with the Undrain button.'
+              : drainStatus
+                ? drainStatus.message
+                : containers.length > 0
+                  ? `${containers.length} container(s) still running. Workloads are being migrated to other nodes.`
+                  : 'All containers have been migrated. This node can now be safely removed.'}
           </AlertDescription>
         </Alert>
       )}

@@ -55,6 +55,24 @@ async fn resolve_node_private_address(
     }
 }
 
+/// Build a `BackendEntry` for a container, including its network address and metadata.
+fn build_backend_entry(
+    container: &temps_entities::deployment_containers::Model,
+    node_private_address: Option<&str>,
+) -> BackendEntry {
+    let address = build_container_backend_addr(
+        &container.container_name,
+        container.container_port,
+        container.host_port,
+        node_private_address,
+    );
+    BackendEntry {
+        address,
+        container_id: Some(container.container_id.clone()),
+        container_name: Some(container.container_name.clone()),
+    }
+}
+
 /// Build a backend address for a container based on deployment mode and node location
 ///
 /// For local containers (node_private_address is None):
@@ -84,13 +102,35 @@ fn build_container_backend_addr(
     }
 }
 
+/// A single backend entry: network address plus container metadata for tracking.
+#[derive(Clone, Debug)]
+pub struct BackendEntry {
+    /// Network address (e.g., "127.0.0.1:8080" or "container-name:3000")
+    pub address: String,
+    /// Docker container ID (short hash), if available
+    pub container_id: Option<String>,
+    /// Human-readable container name (e.g., "my-app-abc123")
+    pub container_name: Option<String>,
+}
+
+/// Result of selecting a backend via round-robin.
+#[derive(Clone, Debug)]
+pub struct BackendSelection {
+    /// Network address to connect to
+    pub address: String,
+    /// Docker container ID that will handle the request
+    pub container_id: Option<String>,
+    /// Human-readable container name
+    pub container_name: Option<String>,
+}
+
 /// Backend type for a route
 #[derive(Clone, Debug)]
 pub enum BackendType {
     /// Proxy to backend addresses (containers)
     Upstream {
-        /// Backend addresses for load balancing (e.g., ["127.0.0.1:8080", "127.0.0.1:8081"])
-        addresses: Vec<String>,
+        /// Backend entries for load balancing
+        backends: Vec<BackendEntry>,
         /// Round-robin counter for load balancing
         round_robin_counter: Arc<AtomicUsize>,
     },
@@ -102,28 +142,44 @@ pub enum BackendType {
 }
 
 impl BackendType {
-    /// Get the next backend address using round-robin load balancing
-    /// Returns None for StaticDir backends
-    pub fn get_backend_addr(&self) -> Option<String> {
+    /// Get the next backend using round-robin load balancing.
+    /// Returns None for StaticDir backends.
+    pub fn get_backend(&self) -> Option<BackendSelection> {
         match self {
             BackendType::Upstream {
-                addresses,
+                backends,
                 round_robin_counter,
             } => {
-                if addresses.is_empty() {
-                    return Some("127.0.0.1:8080".to_string()); // Fallback
+                if backends.is_empty() {
+                    return Some(BackendSelection {
+                        address: "127.0.0.1:8080".to_string(),
+                        container_id: None,
+                        container_name: None,
+                    });
                 }
 
-                if addresses.len() == 1 {
-                    return Some(addresses[0].clone());
-                }
+                let entry = if backends.len() == 1 {
+                    &backends[0]
+                } else {
+                    let index =
+                        round_robin_counter.fetch_add(1, Ordering::Relaxed) % backends.len();
+                    &backends[index]
+                };
 
-                // Round-robin load balancing
-                let index = round_robin_counter.fetch_add(1, Ordering::Relaxed) % addresses.len();
-                Some(addresses[index].clone())
+                Some(BackendSelection {
+                    address: entry.address.clone(),
+                    container_id: entry.container_id.clone(),
+                    container_name: entry.container_name.clone(),
+                })
             }
             BackendType::StaticDir { .. } => None,
         }
+    }
+
+    /// Get the next backend address string using round-robin.
+    /// Convenience wrapper for callers that only need the address.
+    pub fn get_backend_addr(&self) -> Option<String> {
+        self.get_backend().map(|s| s.address)
     }
 
     /// Check if this is a static directory backend
@@ -158,12 +214,22 @@ pub struct RouteInfo {
 }
 
 impl RouteInfo {
-    /// Get the next backend address using round-robin load balancing
-    /// Returns fallback address if this is a static directory backend
-    pub fn get_backend_addr(&self) -> String {
+    /// Select the next backend (address + container metadata) using round-robin.
+    /// Returns a fallback selection if this is a static directory backend.
+    pub fn select_backend(&self) -> BackendSelection {
         self.backend
-            .get_backend_addr()
-            .unwrap_or_else(|| "127.0.0.1:8080".to_string())
+            .get_backend()
+            .unwrap_or_else(|| BackendSelection {
+                address: "127.0.0.1:8080".to_string(),
+                container_id: None,
+                container_name: None,
+            })
+    }
+
+    /// Get the next backend address using round-robin load balancing.
+    /// Convenience wrapper — use `select_backend()` when you also need container info.
+    pub fn get_backend_addr(&self) -> String {
+        self.select_backend().address
     }
 
     /// Check if this route serves static files
@@ -355,7 +421,7 @@ impl CachedPeerTable {
                             }
                         } else if !containers.is_empty() {
                             // Container deployment - proxy to containers
-                            let mut backend_addrs = Vec::with_capacity(containers.len());
+                            let mut backend_entries = Vec::with_capacity(containers.len());
                             for c in &containers {
                                 let node_addr = resolve_node_private_address(
                                     c.node_id,
@@ -363,15 +429,10 @@ impl CachedPeerTable {
                                     self.db.as_ref(),
                                 )
                                 .await;
-                                backend_addrs.push(build_container_backend_addr(
-                                    &c.container_name,
-                                    c.container_port,
-                                    c.host_port,
-                                    node_addr.as_deref(),
-                                ));
+                                backend_entries.push(build_backend_entry(c, node_addr.as_deref()));
                             }
                             BackendType::Upstream {
-                                addresses: backend_addrs,
+                                backends: backend_entries,
                                 round_robin_counter: Arc::new(AtomicUsize::new(0)),
                             }
                         } else {
@@ -392,7 +453,9 @@ impl CachedPeerTable {
                         );
 
                         match &backend {
-                            BackendType::Upstream { addresses, .. } => {
+                            BackendType::Upstream { backends, .. } => {
+                                let addresses: Vec<&str> =
+                                    backends.iter().map(|b| b.address.as_str()).collect();
                                 debug!(
                                     "Loaded environment domain route: {} -> {:?} ({} containers, project={}, env={}, deploy={})",
                                     env_domain.domain, addresses, addresses.len(), environment.project_id, environment.id, deployment_id
@@ -432,7 +495,11 @@ impl CachedPeerTable {
             let backend_addr = format!("{}:{}", custom_route.host, custom_route.port);
             let route_info = RouteInfo {
                 backend: BackendType::Upstream {
-                    addresses: vec![backend_addr.clone()],
+                    backends: vec![BackendEntry {
+                        address: backend_addr.clone(),
+                        container_id: None,
+                        container_name: None,
+                    }],
                     round_robin_counter: Arc::new(AtomicUsize::new(0)),
                 },
                 redirect_to: None,
@@ -552,7 +619,7 @@ impl CachedPeerTable {
                             }
                         } else if !containers.is_empty() {
                             // Container deployment - proxy to containers
-                            let mut backend_addrs = Vec::with_capacity(containers.len());
+                            let mut backend_entries = Vec::with_capacity(containers.len());
                             for c in &containers {
                                 let node_addr = resolve_node_private_address(
                                     c.node_id,
@@ -560,15 +627,10 @@ impl CachedPeerTable {
                                     self.db.as_ref(),
                                 )
                                 .await;
-                                backend_addrs.push(build_container_backend_addr(
-                                    &c.container_name,
-                                    c.container_port,
-                                    c.host_port,
-                                    node_addr.as_deref(),
-                                ));
+                                backend_entries.push(build_backend_entry(c, node_addr.as_deref()));
                             }
                             BackendType::Upstream {
-                                addresses: backend_addrs,
+                                backends: backend_entries,
                                 round_robin_counter: Arc::new(AtomicUsize::new(0)),
                             }
                         } else {
@@ -595,7 +657,9 @@ impl CachedPeerTable {
                             );
                         } else {
                             match &backend {
-                                BackendType::Upstream { addresses, .. } => {
+                                BackendType::Upstream { backends, .. } => {
+                                    let addresses: Vec<&str> =
+                                        backends.iter().map(|b| b.address.as_str()).collect();
                                     debug!(
                                         "Loaded custom domain route: {} -> {:?} ({} containers, project={}, env={}, deploy={})",
                                         custom_domain.domain, addresses, addresses.len(), custom_domain.project_id, environment.id, deployment_id
@@ -680,7 +744,7 @@ impl CachedPeerTable {
                         }
                     } else if !containers.is_empty() {
                         // Container deployment - proxy to containers
-                        let mut backend_addrs = Vec::with_capacity(containers.len());
+                        let mut backend_entries = Vec::with_capacity(containers.len());
                         for c in &containers {
                             let node_addr = resolve_node_private_address(
                                 c.node_id,
@@ -688,15 +752,10 @@ impl CachedPeerTable {
                                 self.db.as_ref(),
                             )
                             .await;
-                            backend_addrs.push(build_container_backend_addr(
-                                &c.container_name,
-                                c.container_port,
-                                c.host_port,
-                                node_addr.as_deref(),
-                            ));
+                            backend_entries.push(build_backend_entry(c, node_addr.as_deref()));
                         }
                         BackendType::Upstream {
-                            addresses: backend_addrs,
+                            backends: backend_entries,
                             round_robin_counter: Arc::new(AtomicUsize::new(0)),
                         }
                     } else {
@@ -718,7 +777,9 @@ impl CachedPeerTable {
                             },
                         );
                         match &backend {
-                            BackendType::Upstream { addresses, .. } => {
+                            BackendType::Upstream { backends, .. } => {
+                                let addresses: Vec<&str> =
+                                    backends.iter().map(|b| b.address.as_str()).collect();
                                 debug!(
                                     "Loaded environment route: {} -> {:?} ({} containers, project={}, env={}, deploy={})",
                                     main_url, addresses, addresses.len(), env.project_id, env.id, deployment_id
@@ -748,7 +809,9 @@ impl CachedPeerTable {
                             },
                         );
                         match &backend {
-                            BackendType::Upstream { addresses, .. } => {
+                            BackendType::Upstream { backends, .. } => {
+                                let addresses: Vec<&str> =
+                                    backends.iter().map(|b| b.address.as_str()).collect();
                                 debug!(
                                     "Loaded environment route with preview domain: {} -> {:?} ({} containers, project={}, env={}, deploy={})",
                                     full_domain, addresses, addresses.len(), env.project_id, env.id, deployment_id
@@ -836,7 +899,7 @@ impl CachedPeerTable {
                         }
                     } else if !containers.is_empty() {
                         // Container deployment - proxy to containers
-                        let mut backend_addrs = Vec::with_capacity(containers.len());
+                        let mut backend_entries = Vec::with_capacity(containers.len());
                         for c in &containers {
                             let node_addr = resolve_node_private_address(
                                 c.node_id,
@@ -844,15 +907,10 @@ impl CachedPeerTable {
                                 self.db.as_ref(),
                             )
                             .await;
-                            backend_addrs.push(build_container_backend_addr(
-                                &c.container_name,
-                                c.container_port,
-                                c.host_port,
-                                node_addr.as_deref(),
-                            ));
+                            backend_entries.push(build_backend_entry(c, node_addr.as_deref()));
                         }
                         BackendType::Upstream {
-                            addresses: backend_addrs,
+                            backends: backend_entries,
                             round_robin_counter: Arc::new(AtomicUsize::new(0)),
                         }
                     } else {
@@ -877,7 +935,9 @@ impl CachedPeerTable {
                             },
                         );
                         match &backend {
-                            BackendType::Upstream { addresses, .. } => {
+                            BackendType::Upstream { backends, .. } => {
+                                let addresses: Vec<&str> =
+                                    backends.iter().map(|b| b.address.as_str()).collect();
                                 debug!(
                                     "Loaded fallback route for active deployment: {} -> {:?} ({} containers, project={}, env={}, deploy={})",
                                     fallback_domain, addresses, addresses.len(), env.project_id, env.id, deployment_id
@@ -1092,7 +1152,11 @@ mod tests {
     fn test_route_info_creation() {
         let route = RouteInfo {
             backend: BackendType::Upstream {
-                addresses: vec!["127.0.0.1:8080".to_string()],
+                backends: vec![BackendEntry {
+                    address: "127.0.0.1:8080".to_string(),
+                    container_id: None,
+                    container_name: None,
+                }],
                 round_robin_counter: Arc::new(AtomicUsize::new(0)),
             },
             redirect_to: None,
@@ -1114,7 +1178,11 @@ mod tests {
     fn test_route_info_with_redirect() {
         let route = RouteInfo {
             backend: BackendType::Upstream {
-                addresses: vec!["127.0.0.1:8080".to_string()],
+                backends: vec![BackendEntry {
+                    address: "127.0.0.1:8080".to_string(),
+                    container_id: None,
+                    container_name: None,
+                }],
                 round_robin_counter: Arc::new(AtomicUsize::new(0)),
             },
             redirect_to: Some("https://example.com".to_string()),
@@ -1132,7 +1200,11 @@ mod tests {
     fn test_route_info_custom_route() {
         let route = RouteInfo {
             backend: BackendType::Upstream {
-                addresses: vec!["192.168.1.100:3000".to_string()],
+                backends: vec![BackendEntry {
+                    address: "192.168.1.100:3000".to_string(),
+                    container_id: None,
+                    container_name: None,
+                }],
                 round_robin_counter: Arc::new(AtomicUsize::new(0)),
             },
             redirect_to: None,
@@ -1153,10 +1225,22 @@ mod tests {
     fn test_route_info_load_balancing() {
         let route = RouteInfo {
             backend: BackendType::Upstream {
-                addresses: vec![
-                    "127.0.0.1:8080".to_string(),
-                    "127.0.0.1:8081".to_string(),
-                    "127.0.0.1:8082".to_string(),
+                backends: vec![
+                    BackendEntry {
+                        address: "127.0.0.1:8080".to_string(),
+                        container_id: None,
+                        container_name: None,
+                    },
+                    BackendEntry {
+                        address: "127.0.0.1:8081".to_string(),
+                        container_id: None,
+                        container_name: None,
+                    },
+                    BackendEntry {
+                        address: "127.0.0.1:8082".to_string(),
+                        container_id: None,
+                        container_name: None,
+                    },
                 ],
                 round_robin_counter: Arc::new(AtomicUsize::new(0)),
             },
@@ -1195,7 +1279,18 @@ mod tests {
     #[test]
     fn test_backend_type_upstream() {
         let backend = BackendType::Upstream {
-            addresses: vec!["127.0.0.1:8080".to_string(), "127.0.0.1:8081".to_string()],
+            backends: vec![
+                BackendEntry {
+                    address: "127.0.0.1:8080".to_string(),
+                    container_id: None,
+                    container_name: None,
+                },
+                BackendEntry {
+                    address: "127.0.0.1:8081".to_string(),
+                    container_id: None,
+                    container_name: None,
+                },
+            ],
             round_robin_counter: Arc::new(AtomicUsize::new(0)),
         };
 
@@ -1229,7 +1324,7 @@ mod tests {
     #[test]
     fn test_backend_type_upstream_empty_addresses() {
         let backend = BackendType::Upstream {
-            addresses: vec![],
+            backends: vec![],
             round_robin_counter: Arc::new(AtomicUsize::new(0)),
         };
 
@@ -1244,7 +1339,11 @@ mod tests {
     #[test]
     fn test_backend_type_upstream_single_address() {
         let backend = BackendType::Upstream {
-            addresses: vec!["192.168.1.100:3000".to_string()],
+            backends: vec![BackendEntry {
+                address: "192.168.1.100:3000".to_string(),
+                container_id: None,
+                container_name: None,
+            }],
             round_robin_counter: Arc::new(AtomicUsize::new(0)),
         };
 
@@ -1286,7 +1385,11 @@ mod tests {
     fn test_route_info_methods_with_upstream_backend() {
         let route = RouteInfo {
             backend: BackendType::Upstream {
-                addresses: vec!["10.0.0.1:9000".to_string()],
+                backends: vec![BackendEntry {
+                    address: "10.0.0.1:9000".to_string(),
+                    container_id: None,
+                    container_name: None,
+                }],
                 round_robin_counter: Arc::new(AtomicUsize::new(0)),
             },
             redirect_to: None,

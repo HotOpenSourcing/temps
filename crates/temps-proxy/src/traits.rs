@@ -77,6 +77,13 @@ impl Default for CookieConfig {
     }
 }
 
+/// Result of resolving an upstream peer, including optional container metadata
+pub struct PeerSelection {
+    pub peer: Box<HttpPeer>,
+    pub container_id: Option<String>,
+    pub container_name: Option<String>,
+}
+
 /// Trait for resolving upstream peers based on host and request information
 #[async_trait]
 pub trait UpstreamResolver: Send + Sync {
@@ -91,7 +98,7 @@ pub trait UpstreamResolver: Send + Sync {
         host: &str,
         path: &str,
         sni_hostname: Option<&str>,
-    ) -> PingoraResult<Box<HttpPeer>>;
+    ) -> PingoraResult<PeerSelection>;
 
     /// Check if a host has custom routing configured
     async fn has_custom_route(&self, host: &str) -> bool;

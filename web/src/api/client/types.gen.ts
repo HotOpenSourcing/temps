@@ -1660,6 +1660,16 @@ export type DeployFromStaticRequest = {
  */
 export type DeploymentConfig = {
     /**
+     * Anti-affinity: spread replicas across different nodes.
+     *
+     * When enabled, the scheduler avoids placing two replicas of the same
+     * environment on the same node. If there are fewer eligible nodes than
+     * replicas, remaining replicas wrap around (best-effort spreading).
+     *
+     * Defaults to `true` — replicas spread by default.
+     */
+    antiAffinity?: boolean;
+    /**
      * Enable automatic deployments on git push
      */
     automaticDeploy?: boolean;
@@ -2518,6 +2528,36 @@ export type DomainResponse = {
     status: string;
     updated_at: number;
     verification_method: string;
+};
+
+export type DrainNodeResponse = {
+    affected_environments: number;
+    id: number;
+    message: string;
+    name: string;
+    status: string;
+};
+
+/**
+ * Progress of a node drain operation.
+ */
+export type DrainStatusResponse = {
+    /**
+     * Can the node be safely removed?
+     */
+    can_remove: boolean;
+    /**
+     * Whether the drain is complete (all containers migrated)
+     */
+    drain_complete: boolean;
+    message: string;
+    node_id: number;
+    node_name: string;
+    /**
+     * Number of containers still on this node
+     */
+    remaining_containers: number;
+    status: string;
 };
 
 /**
@@ -5260,6 +5300,27 @@ export type NixpacksPresetConfig = {
     [key: string]: unknown;
 };
 
+export type NodeContainerListResponse = {
+    containers: Array<NodeContainerResponse>;
+    total: number;
+};
+
+/**
+ * A container running on a specific node, enriched with project/environment context.
+ */
+export type NodeContainerResponse = {
+    container_id: string;
+    container_name: string;
+    created_at: string;
+    deployment_id: number;
+    environment_id: number;
+    environment_name: string;
+    image_name: string;
+    project_id: number;
+    project_name: string;
+    status: string;
+};
+
 export type NodeInfoResponse = {
     address: string;
     /**
@@ -6893,6 +6954,11 @@ export type ReloadResponse = {
      * Names of loaded plugins
      */
     plugins: Array<string>;
+};
+
+export type RemoveNodeResponse = {
+    id: number;
+    message: string;
 };
 
 export type RepositoryListQuery = {
@@ -8565,6 +8631,16 @@ export type UiRoute = {
      * Page title for breadcrumbs
      */
     title: string;
+};
+
+/**
+ * Response after undraining (reactivating) a node.
+ */
+export type UndrainNodeResponse = {
+    id: number;
+    message: string;
+    name: string;
+    status: string;
 };
 
 /**
@@ -16801,6 +16877,46 @@ export type RegisterNodeResponses = {
 
 export type RegisterNodeResponse2 = RegisterNodeResponses[keyof RegisterNodeResponses];
 
+export type AdminRemoveNodeData = {
+    body?: never;
+    path: {
+        /**
+         * Node ID
+         */
+        node_id: number;
+    };
+    query?: never;
+    url: '/internal/nodes/{node_id}';
+};
+
+export type AdminRemoveNodeErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Node not found
+     */
+    404: unknown;
+    /**
+     * Node still has active containers
+     */
+    409: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type AdminRemoveNodeResponses = {
+    /**
+     * Node removed
+     */
+    200: RemoveNodeResponse;
+};
+
+export type AdminRemoveNodeResponse = AdminRemoveNodeResponses[keyof AdminRemoveNodeResponses];
+
 export type AdminGetNodeData = {
     body?: never;
     path: {
@@ -16837,27 +16953,12 @@ export type AdminGetNodeResponses = {
 
 export type AdminGetNodeResponse = AdminGetNodeResponses[keyof AdminGetNodeResponses];
 
-export type NodeContainerResponse = {
-    container_id: string;
-    container_name: string;
-    image_name: string;
-    status: string;
-    created_at: string;
-    deployment_id: number;
-    project_id: number;
-    project_name: string;
-    environment_id: number;
-    environment_name: string;
-};
-
-export type NodeContainerListResponse = {
-    containers: Array<NodeContainerResponse>;
-    total: number;
-};
-
 export type AdminListNodeContainersData = {
     body?: never;
     path: {
+        /**
+         * Node ID
+         */
         node_id: number;
     };
     query?: never;
@@ -16865,16 +16966,136 @@ export type AdminListNodeContainersData = {
 };
 
 export type AdminListNodeContainersErrors = {
+    /**
+     * Unauthorized
+     */
     401: unknown;
+    /**
+     * Node not found
+     */
     404: unknown;
+    /**
+     * Internal server error
+     */
     500: unknown;
 };
 
 export type AdminListNodeContainersResponses = {
+    /**
+     * Containers on this node
+     */
     200: NodeContainerListResponse;
 };
 
 export type AdminListNodeContainersResponse = AdminListNodeContainersResponses[keyof AdminListNodeContainersResponses];
+
+export type AdminUndrainNodeData = {
+    body?: never;
+    path: {
+        /**
+         * Node ID
+         */
+        node_id: number;
+    };
+    query?: never;
+    url: '/internal/nodes/{node_id}/drain';
+};
+
+export type AdminUndrainNodeErrors = {
+    /**
+     * Node not in drainable state
+     */
+    400: unknown;
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Node not found
+     */
+    404: unknown;
+};
+
+export type AdminUndrainNodeResponses = {
+    /**
+     * Node reactivated
+     */
+    200: UndrainNodeResponse;
+};
+
+export type AdminUndrainNodeResponse = AdminUndrainNodeResponses[keyof AdminUndrainNodeResponses];
+
+export type AdminDrainStatusData = {
+    body?: never;
+    path: {
+        /**
+         * Node ID
+         */
+        node_id: number;
+    };
+    query?: never;
+    url: '/internal/nodes/{node_id}/drain';
+};
+
+export type AdminDrainStatusErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Node not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type AdminDrainStatusResponses = {
+    /**
+     * Drain status
+     */
+    200: DrainStatusResponse;
+};
+
+export type AdminDrainStatusResponse = AdminDrainStatusResponses[keyof AdminDrainStatusResponses];
+
+export type AdminDrainNodeData = {
+    body?: never;
+    path: {
+        /**
+         * Node ID
+         */
+        node_id: number;
+    };
+    query?: never;
+    url: '/internal/nodes/{node_id}/drain';
+};
+
+export type AdminDrainNodeErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Node not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type AdminDrainNodeResponses = {
+    /**
+     * Node drain initiated
+     */
+    200: DrainNodeResponse;
+};
+
+export type AdminDrainNodeResponse = AdminDrainNodeResponses[keyof AdminDrainNodeResponses];
 
 export type NodeHeartbeatData = {
     body: HeartbeatApiRequest;

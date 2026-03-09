@@ -139,14 +139,18 @@ fn reverse_domain(domain: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::route_table::BackendType;
+    use crate::route_table::{BackendEntry, BackendType};
     use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
 
     fn create_test_route(addr: &str) -> RouteInfo {
         RouteInfo {
             backend: BackendType::Upstream {
-                addresses: vec![addr.to_string()],
+                backends: vec![BackendEntry {
+                    address: addr.to_string(),
+                    container_id: None,
+                    container_name: None,
+                }],
                 round_robin_counter: Arc::new(AtomicUsize::new(0)),
             },
             redirect_to: None,

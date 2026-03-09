@@ -805,7 +805,7 @@ impl WorkflowExecutionService {
                         )
                     })? as i32;
 
-                let job = crate::jobs::MarkDeploymentCompleteJobBuilder::new()
+                let mut builder = crate::jobs::MarkDeploymentCompleteJobBuilder::new()
                     .job_id(db_job.job_id.clone())
                     .deployment_id(deployment_id)
                     .db(self.db.clone())
@@ -813,8 +813,13 @@ impl WorkflowExecutionService {
                     .log_service(self.log_service.clone())
                     .container_deployer(self.container_deployer.clone())
                     .queue(self.queue.clone())
-                    .config_service(self.config_service.clone())
-                    .build()?;
+                    .config_service(self.config_service.clone());
+
+                if let Some(enc_service) = self.encryption_service.get() {
+                    builder = builder.encryption_service(enc_service.clone());
+                }
+
+                let job = builder.build()?;
 
                 Ok(Arc::new(job))
             }

@@ -15,7 +15,7 @@ use temps_core::{
     WorkflowTask,
 };
 use temps_database::DbConnection;
-use temps_entities::{deployment_containers, deployments, environments, projects};
+use temps_entities::{deployment_containers, deployments, environments, nodes, projects};
 use temps_logs::{LogLevel, LogService};
 use tracing::{debug, info, warn};
 
@@ -44,6 +44,7 @@ pub struct MarkDeploymentCompleteJob {
     container_deployer: Arc<dyn temps_deployer::ContainerDeployer>,
     queue: Arc<dyn JobQueue>,
     config_service: Option<Arc<temps_config::ConfigService>>,
+    encryption_service: Arc<temps_core::EncryptionService>,
 }
 
 impl std::fmt::Debug for MarkDeploymentCompleteJob {
@@ -62,6 +63,7 @@ impl MarkDeploymentCompleteJob {
         db: Arc<DbConnection>,
         container_deployer: Arc<dyn temps_deployer::ContainerDeployer>,
         queue: Arc<dyn JobQueue>,
+        encryption_service: Arc<temps_core::EncryptionService>,
     ) -> Self {
         Self {
             job_id,
@@ -72,6 +74,7 @@ impl MarkDeploymentCompleteJob {
             container_deployer,
             queue,
             config_service: None,
+            encryption_service,
         }
     }
 
@@ -833,6 +836,52 @@ impl MarkDeploymentCompleteJob {
         }
     }
 
+    /// Create a `RemoteNodeDeployer` for a given node_id by looking up the
+    /// node's address and decrypting its token.
+    async fn get_remote_deployer(
+        &self,
+        node_id: i32,
+    ) -> Result<Arc<dyn temps_deployer::ContainerDeployer>, String> {
+        let node = nodes::Entity::find_by_id(node_id)
+            .one(self.db.as_ref())
+            .await
+            .map_err(|e| format!("DB error looking up node {}: {}", node_id, e))?
+            .ok_or_else(|| format!("Node {} not found in database", node_id))?;
+
+        let encrypted_token = node.token_encrypted.ok_or_else(|| {
+            format!(
+                "Node '{}' (id={}) has no encrypted token",
+                node.name, node_id
+            )
+        })?;
+
+        let decrypted_bytes = self
+            .encryption_service
+            .decrypt(&encrypted_token)
+            .map_err(|e| format!("Failed to decrypt token for node '{}': {}", node.name, e))?;
+
+        let token = String::from_utf8(decrypted_bytes).map_err(|e| {
+            format!(
+                "Decrypted token for node '{}' is not valid UTF-8: {}",
+                node.name, e
+            )
+        })?;
+
+        let remote = temps_deployer::remote::RemoteNodeDeployer::new(
+            node.address.clone(),
+            token,
+            node.name.clone(),
+        )
+        .map_err(|e| {
+            format!(
+                "Failed to create remote deployer for node '{}': {}",
+                node.name, e
+            )
+        })?;
+
+        Ok(Arc::new(remote))
+    }
+
     /// Teardown all running/pending deployments for the same environment
     /// This ensures only one active deployment per environment
     /// Note: Deployment state is NOT changed - the is_current flag indicates which deployment is active
@@ -911,8 +960,28 @@ impl MarkDeploymentCompleteJob {
             for container in containers {
                 let container_id = container.container_id.clone();
 
+                // Determine which deployer to use based on node_id
+                let deployer: Arc<dyn temps_deployer::ContainerDeployer> = if let Some(node_id) =
+                    container.node_id
+                {
+                    match self.get_remote_deployer(node_id).await {
+                        Ok(remote) => remote,
+                        Err(e) => {
+                            self.log(format!(
+                                    "Failed to create remote deployer for container {} on node {}: {} — falling back to local",
+                                    container_id, node_id, e
+                                ))
+                                .await
+                                .ok();
+                            self.container_deployer.clone()
+                        }
+                    }
+                } else {
+                    self.container_deployer.clone()
+                };
+
                 // Stop container first
-                match self.container_deployer.stop_container(&container_id).await {
+                match deployer.stop_container(&container_id).await {
                     Ok(_) => {
                         self.log(format!("Stopped container {}", container_id))
                             .await
@@ -926,11 +995,7 @@ impl MarkDeploymentCompleteJob {
                 }
 
                 // Remove container from Docker
-                match self
-                    .container_deployer
-                    .remove_container(&container_id)
-                    .await
-                {
+                match deployer.remove_container(&container_id).await {
                     Ok(_) => {
                         self.log(format!("Removed container {}", container_id))
                             .await
@@ -1047,6 +1112,7 @@ pub struct MarkDeploymentCompleteJobBuilder {
     container_deployer: Option<Arc<dyn temps_deployer::ContainerDeployer>>,
     queue: Option<Arc<dyn JobQueue>>,
     config_service: Option<Arc<temps_config::ConfigService>>,
+    encryption_service: Option<Arc<temps_core::EncryptionService>>,
 }
 
 impl MarkDeploymentCompleteJobBuilder {
@@ -1060,6 +1126,7 @@ impl MarkDeploymentCompleteJobBuilder {
             container_deployer: None,
             queue: None,
             config_service: None,
+            encryption_service: None,
         }
     }
 
@@ -1106,6 +1173,11 @@ impl MarkDeploymentCompleteJobBuilder {
         self
     }
 
+    pub fn encryption_service(mut self, service: Arc<temps_core::EncryptionService>) -> Self {
+        self.encryption_service = Some(service);
+        self
+    }
+
     pub fn build(self) -> Result<MarkDeploymentCompleteJob, WorkflowError> {
         let job_id = self
             .job_id
@@ -1122,9 +1194,18 @@ impl MarkDeploymentCompleteJobBuilder {
         let queue = self
             .queue
             .ok_or_else(|| WorkflowError::JobValidationFailed("queue is required".to_string()))?;
+        let encryption_service = self.encryption_service.ok_or_else(|| {
+            WorkflowError::JobValidationFailed("encryption_service is required".to_string())
+        })?;
 
-        let mut job =
-            MarkDeploymentCompleteJob::new(job_id, deployment_id, db, container_deployer, queue);
+        let mut job = MarkDeploymentCompleteJob::new(
+            job_id,
+            deployment_id,
+            db,
+            container_deployer,
+            queue,
+            encryption_service,
+        );
 
         if let Some(log_id) = self.log_id {
             job = job.with_log_id(log_id);

@@ -339,6 +339,7 @@ pub struct ProxyContext {
     pub error_message: Option<String>,
     pub upstream_host: Option<String>,
     pub container_id: Option<String>,
+    pub container_name: Option<String>,
     pub tls_fingerprint: Option<String>,
     pub tls_version: Option<String>,
     pub tls_cipher: Option<String>,
@@ -1714,6 +1715,7 @@ impl ProxyHttp for LoadBalancer {
             error_message: None,
             upstream_host: None,
             container_id: None,
+            container_name: None,
             tls_fingerprint: None,
             tls_version: None,
             tls_cipher: None,
@@ -2528,6 +2530,11 @@ impl ProxyHttp for LoadBalancer {
             upstream_response.remove_header("content-length");
         }
 
+        // Add X-Served-By header with the container name that handled this request
+        if let Some(name) = &ctx.container_name {
+            upstream_response.insert_header("X-Served-By", name).ok();
+        }
+
         // Confirm or cancel Markdown conversion now that we know the upstream status and
         // content type.  We only convert successful (2xx) text/html responses; everything
         // else passes through unchanged so the client receives the original response as-is.
@@ -2805,10 +2812,12 @@ impl ProxyHttp for LoadBalancer {
 
         // Use the upstream resolver trait
         // Pass SNI hostname for TLS-based routing
-        let mut peer = self
+        let selection = self
             .upstream_resolver
             .resolve_peer(&domain, &path, ctx.sni_hostname.as_deref())
             .await?;
+
+        let mut peer = selection.peer;
 
         // Configure upstream connection options
         peer.options.connection_timeout = Some(std::time::Duration::from_secs(5));
@@ -2818,15 +2827,14 @@ impl ProxyHttp for LoadBalancer {
         peer.options.idle_timeout = Some(std::time::Duration::from_secs(60));
 
         // Populate context with upstream information
-        // Use the Peer trait's address() method
         let addr = peer.address();
         ctx.upstream_host = Some(addr.to_string());
 
-        // Try to extract container ID from peer metadata if available
-        // The container ID might be set by the upstream resolver
-        if let Some(deployment) = &ctx.deployment {
-            // For now, we'll use the deployment ID as a proxy for container tracking
-            // In the future, the upstream resolver could provide actual container IDs
+        // Set container info from the upstream resolver's backend selection
+        if selection.container_id.is_some() {
+            ctx.container_id = selection.container_id;
+            ctx.container_name = selection.container_name;
+        } else if let Some(deployment) = &ctx.deployment {
             ctx.container_id = Some(format!("deployment-{}", deployment.id));
         }
 
@@ -3025,6 +3033,7 @@ mod markdown_tests {
             error_message: None,
             upstream_host: None,
             container_id: None,
+            container_name: None,
             tls_fingerprint: None,
             tls_version: None,
             tls_cipher: None,
@@ -3564,6 +3573,7 @@ mod markdown_pipeline_tests {
             error_message: None,
             upstream_host: None,
             container_id: None,
+            container_name: None,
             tls_fingerprint: None,
             tls_version: None,
             tls_cipher: None,
