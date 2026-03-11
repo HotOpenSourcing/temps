@@ -378,7 +378,7 @@ function UsageAnalytics() {
   return (
     <div className="space-y-4">
       {/* Time range selector */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <h3 className="text-lg font-semibold">Usage Analytics</h3>
         <div className="flex gap-1">
           {TIME_RANGES.map((range) => (
@@ -395,7 +395,7 @@ function UsageAnalytics() {
       </div>
 
       {/* Summary stat cards */}
-      <div className="grid gap-4 grid-cols-2 md:grid-cols-5">
+      <div className="grid gap-3 sm:gap-4 grid-cols-2 md:grid-cols-5">
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium flex items-center gap-2">
@@ -610,14 +610,14 @@ function UsageAnalytics() {
                 {topModels.map((m) => {
                   const cost = computeCost(m.model, m.input_tokens, m.output_tokens, pricingMap)
                   return (
-                    <div key={m.model} className="flex items-center justify-between text-sm">
+                    <div key={m.model} className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between text-sm">
                       <div className="flex items-center gap-2 min-w-0">
                         <span className="font-mono truncate">{m.model}</span>
                         <Badge variant="outline" className="text-[10px] shrink-0">
                           {providerName(m.provider)}
                         </Badge>
                       </div>
-                      <div className="flex items-center gap-4 shrink-0 text-muted-foreground">
+                      <div className="flex items-center gap-3 sm:gap-4 shrink-0 text-muted-foreground text-xs sm:text-sm">
                         <span>{formatTokenCount(m.request_count)} req</span>
                         <span>{formatTokenCount(m.total_tokens)} tok</span>
                         {cost > 0 && (
@@ -949,13 +949,13 @@ function SpanTreeRow({
         <Icon className={`h-3.5 w-3.5 shrink-0 ${isGenAi ? 'text-primary' : 'text-muted-foreground'}`} />
 
         {/* Name */}
-        <span className={`font-mono text-xs truncate max-w-[260px] ${isGenAi ? 'text-foreground' : 'text-muted-foreground'}`}>
+        <span className={`font-mono text-xs truncate max-w-[120px] sm:max-w-[260px] ${isGenAi ? 'text-foreground' : 'text-muted-foreground'}`}>
           {spanLabel(span)}
         </span>
 
         {/* Operation badge */}
         {span.gen_ai_operation && (
-          <Badge variant="outline" className="text-[9px] px-1 py-0 h-4 shrink-0">
+          <Badge variant="outline" className="text-[9px] px-1 py-0 h-4 shrink-0 hidden sm:inline-flex">
             {span.gen_ai_operation}
           </Badge>
         )}
@@ -2459,23 +2459,23 @@ console.log(response.choices[0].message.content);`,
   }
 
   return (
-    <div className="container mx-auto py-6 space-y-6">
+    <div className="container mx-auto px-4 sm:px-6 py-4 sm:py-6 space-y-4 sm:space-y-6">
       {/* Page Header */}
-      <div className="flex justify-between items-center">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-3xl font-bold">AI Gateway</h1>
-          <p className="text-muted-foreground mt-2">
+          <h1 className="text-2xl sm:text-3xl font-bold">AI Gateway</h1>
+          <p className="text-muted-foreground mt-1 sm:mt-2 text-sm">
             Unified API for multiple AI providers with a single endpoint
           </p>
         </div>
-        <Button onClick={() => setDialogOpen(true)}>
+        <Button onClick={() => setDialogOpen(true)} className="w-full sm:w-auto">
           <Plus className="mr-2 h-4 w-4" />
           Add Provider Key
         </Button>
       </div>
 
       {/* Quick Stats */}
-      <div className="grid gap-4 grid-cols-2 md:grid-cols-4">
+      <div className="grid gap-3 sm:gap-4 grid-cols-2 md:grid-cols-4">
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium">Active Providers</CardTitle>
@@ -2527,12 +2527,14 @@ console.log(response.choices[0].message.content);`,
       </div>
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
-        <TabsList>
-          <TabsTrigger value="keys">Provider Keys</TabsTrigger>
-          <TabsTrigger value="usage">Usage</TabsTrigger>
-          <TabsTrigger value="activity">Activity</TabsTrigger>
-          <TabsTrigger value="settings">Settings</TabsTrigger>
-        </TabsList>
+        <div className="overflow-x-auto -mx-1 px-1">
+          <TabsList className="w-full sm:w-auto">
+            <TabsTrigger value="keys">Provider Keys</TabsTrigger>
+            <TabsTrigger value="usage">Usage</TabsTrigger>
+            <TabsTrigger value="activity">Activity</TabsTrigger>
+            <TabsTrigger value="settings">Settings</TabsTrigger>
+          </TabsList>
+        </div>
 
         {/* Provider Keys Tab */}
         <TabsContent value="keys" className="space-y-4">
