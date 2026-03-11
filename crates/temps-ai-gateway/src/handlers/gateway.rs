@@ -18,6 +18,7 @@ use utoipa::OpenApi;
 use crate::error::AiGatewayError;
 use crate::handlers::types::AiGatewayAppState;
 use crate::services::gateway_service::{ByokOverride, CredentialType};
+use crate::services::usage_service::AiRequestContext;
 use crate::services::UsageService;
 use crate::types::*;
 
@@ -32,6 +33,37 @@ fn extract_byok(headers: &HeaderMap) -> ByokOverride {
             .get("x-provider-base-url")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string()),
+    }
+}
+
+/// Extract AI request context (conversation, tags, trace) from request headers.
+fn extract_ai_context(headers: &HeaderMap) -> AiRequestContext {
+    AiRequestContext {
+        conversation_id: headers
+            .get("x-conversation-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string()),
+        tags: headers
+            .get("x-tags")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| {
+                s.split(',')
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        request_id: headers
+            .get("x-request-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string()),
+        trace_id: headers
+            .get("traceparent")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|tp| {
+                // W3C traceparent: {version}-{trace-id}-{parent-id}-{flags}
+                tp.split('-').nth(1).map(String::from)
+            }),
     }
 }
 
@@ -74,6 +106,7 @@ fn extract_usage_from_sse_line(line: &str) -> Option<(i64, i64)> {
 
 /// Wraps an upstream SSE byte stream to transparently intercept usage data
 /// from the final chunks, then logs it after the stream ends.
+#[allow(clippy::too_many_arguments)]
 fn wrap_stream_with_usage_tracking(
     inner: std::pin::Pin<
         Box<dyn tokio_stream::Stream<Item = Result<Bytes, AiGatewayError>> + Send>,
@@ -84,6 +117,7 @@ fn wrap_stream_with_usage_tracking(
     model: String,
     start: Instant,
     is_byok: bool,
+    ai_context: AiRequestContext,
 ) -> std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<Bytes, AiGatewayError>> + Send>> {
     use tokio_stream::StreamExt;
 
@@ -130,7 +164,7 @@ fn wrap_stream_with_usage_tracking(
             if input > 0 || output > 0 {
                 tokio::spawn(async move {
                     if let Err(e) = usage_service
-                        .log_usage(
+                        .log_usage_with_context(
                             Some(user_id),
                             &provider,
                             &model,
@@ -141,6 +175,7 @@ fn wrap_stream_with_usage_tracking(
                             200,
                             true, // streaming
                             is_byok,
+                            &ai_context,
                         )
                         .await
                     {
@@ -358,6 +393,7 @@ async fn chat_completions(
     }
 
     let byok = extract_byok(&headers);
+    let ai_context = extract_ai_context(&headers);
     let start = Instant::now();
     let model = request.model.clone();
     let is_streaming = request.stream;
@@ -389,6 +425,7 @@ async fn chat_completions(
                     model.clone(),
                     start,
                     cred_type == CredentialType::Byok,
+                    ai_context.clone(),
                 );
                 let body = Body::from_stream(wrapped);
 
@@ -436,9 +473,10 @@ async fn chat_completions(
                     let output = usage.completion_tokens;
                     let latency_ms = latency.as_millis() as i32;
                     let is_byok = cred_type == CredentialType::Byok;
+                    let ctx = ai_context.clone();
                     tokio::spawn(async move {
                         if let Err(e) = usage_service
-                            .log_usage(
+                            .log_usage_with_context(
                                 Some(user_id),
                                 &provider_clone,
                                 &model_clone,
@@ -449,6 +487,7 @@ async fn chat_completions(
                                 200,
                                 false, // non-streaming path
                                 is_byok,
+                                &ctx,
                             )
                             .await
                         {
@@ -893,5 +932,102 @@ mod tests {
     fn test_extract_usage_from_sse_zero_tokens_ignored() {
         let line = r#"data: {"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}"#;
         assert_eq!(extract_usage_from_sse_line(line), None);
+    }
+
+    #[test]
+    fn test_extract_ai_context_empty_headers() {
+        let headers = HeaderMap::new();
+        let ctx = extract_ai_context(&headers);
+        assert!(ctx.conversation_id.is_none());
+        assert!(ctx.tags.is_empty());
+        assert!(ctx.request_id.is_none());
+        assert!(ctx.trace_id.is_none());
+    }
+
+    #[test]
+    fn test_extract_ai_context_conversation_id() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-conversation-id", "conv_abc123".parse().unwrap());
+        let ctx = extract_ai_context(&headers);
+        assert_eq!(ctx.conversation_id.as_deref(), Some("conv_abc123"));
+    }
+
+    #[test]
+    fn test_extract_ai_context_tags() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-tags", "agent:support, env:prod".parse().unwrap());
+        let ctx = extract_ai_context(&headers);
+        assert_eq!(ctx.tags, vec!["agent:support", "env:prod"]);
+    }
+
+    #[test]
+    fn test_extract_ai_context_tags_trims_whitespace() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-tags", " foo , bar , baz ".parse().unwrap());
+        let ctx = extract_ai_context(&headers);
+        assert_eq!(ctx.tags, vec!["foo", "bar", "baz"]);
+    }
+
+    #[test]
+    fn test_extract_ai_context_tags_filters_empty() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-tags", "foo,,bar,".parse().unwrap());
+        let ctx = extract_ai_context(&headers);
+        assert_eq!(ctx.tags, vec!["foo", "bar"]);
+    }
+
+    #[test]
+    fn test_extract_ai_context_request_id() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-request-id", "req_xyz789".parse().unwrap());
+        let ctx = extract_ai_context(&headers);
+        assert_eq!(ctx.request_id.as_deref(), Some("req_xyz789"));
+    }
+
+    #[test]
+    fn test_extract_ai_context_traceparent() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "traceparent",
+            "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+                .parse()
+                .unwrap(),
+        );
+        let ctx = extract_ai_context(&headers);
+        assert_eq!(
+            ctx.trace_id.as_deref(),
+            Some("0af7651916cd43dd8448eb211c80319c")
+        );
+    }
+
+    #[test]
+    fn test_extract_ai_context_invalid_traceparent() {
+        let mut headers = HeaderMap::new();
+        headers.insert("traceparent", "not-valid".parse().unwrap());
+        let ctx = extract_ai_context(&headers);
+        // "not-valid" split by '-': ["not", "valid"] -> nth(1) = "valid"
+        assert_eq!(ctx.trace_id.as_deref(), Some("valid"));
+    }
+
+    #[test]
+    fn test_extract_ai_context_all_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-conversation-id", "conv_123".parse().unwrap());
+        headers.insert("x-tags", "agent:bot,tier:premium".parse().unwrap());
+        headers.insert("x-request-id", "req_456".parse().unwrap());
+        headers.insert(
+            "traceparent",
+            "00-abcdef1234567890abcdef1234567890-1234567890abcdef-01"
+                .parse()
+                .unwrap(),
+        );
+        let ctx = extract_ai_context(&headers);
+        assert_eq!(ctx.conversation_id.as_deref(), Some("conv_123"));
+        assert_eq!(ctx.tags, vec!["agent:bot", "tier:premium"]);
+        assert_eq!(ctx.request_id.as_deref(), Some("req_456"));
+        assert_eq!(
+            ctx.trace_id.as_deref(),
+            Some("abcdef1234567890abcdef1234567890")
+        );
     }
 }

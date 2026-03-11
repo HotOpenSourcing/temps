@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Query, State},
+    extract::{Path, Query, State},
     response::IntoResponse,
     routing::get,
     Json, Router,
@@ -15,7 +15,8 @@ use utoipa::{OpenApi, ToSchema};
 use crate::error::AiGatewayError;
 use crate::handlers::types::AiGatewayAppState;
 use crate::services::usage_service::{
-    ModelUsage, ProviderUsage, TimeseriesBucket, UsageLogEntry, UsageSummary,
+    ConversationSummary, ModelUsage, ProviderUsage, TimeseriesBucket, UsageFilter, UsageLogEntry,
+    UsageSummary,
 };
 
 // ============================================================================
@@ -30,17 +31,22 @@ use crate::services::usage_service::{
         get_usage_timeseries,
         get_usage_top_models,
         get_usage_recent,
+        get_conversations,
+        get_conversation_detail,
     ),
     components(schemas(
         UsageQueryParams,
         TimeseriesQueryParams,
         TopModelsQueryParams,
         RecentQueryParams,
+        ConversationsQueryParams,
         UsageSummary,
         ProviderUsage,
         TimeseriesBucket,
         ModelUsage,
         UsageLogEntry,
+        ConversationSummary,
+        UsageFilter,
     )),
     info(
         title = "AI Gateway Usage API",
@@ -60,6 +66,11 @@ pub fn configure_usage_routes() -> Router<Arc<AiGatewayAppState>> {
         .route("/ai/usage/timeseries", get(get_usage_timeseries))
         .route("/ai/usage/top-models", get(get_usage_top_models))
         .route("/ai/usage/recent", get(get_usage_recent))
+        .route("/ai/usage/conversations", get(get_conversations))
+        .route(
+            "/ai/usage/conversations/{conversation_id}",
+            get(get_conversation_detail),
+        )
 }
 
 // ============================================================================
@@ -72,6 +83,28 @@ pub struct UsageQueryParams {
     pub from: Option<String>,
     /// ISO 8601 end time (defaults to now)
     pub to: Option<String>,
+    /// Filter by user ID
+    pub user_id: Option<i32>,
+    /// Filter by conversation ID
+    pub conversation_id: Option<String>,
+    /// Filter by tags (comma-separated, AND logic)
+    pub tags: Option<String>,
+    /// Filter by model name
+    pub model: Option<String>,
+    /// Filter by provider name
+    pub provider: Option<String>,
+}
+
+impl UsageQueryParams {
+    fn to_filter(&self) -> UsageFilter {
+        UsageFilter {
+            user_id: self.user_id,
+            conversation_id: self.conversation_id.clone(),
+            tags: self.tags.clone(),
+            model: self.model.clone(),
+            provider: self.provider.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -82,6 +115,28 @@ pub struct TimeseriesQueryParams {
     pub to: Option<String>,
     /// Bucket size: "hour", "day", "week" (defaults to "day")
     pub bucket: Option<String>,
+    /// Filter by user ID
+    pub user_id: Option<i32>,
+    /// Filter by conversation ID
+    pub conversation_id: Option<String>,
+    /// Filter by tags (comma-separated, AND logic)
+    pub tags: Option<String>,
+    /// Filter by model name
+    pub model: Option<String>,
+    /// Filter by provider name
+    pub provider: Option<String>,
+}
+
+impl TimeseriesQueryParams {
+    fn to_filter(&self) -> UsageFilter {
+        UsageFilter {
+            user_id: self.user_id,
+            conversation_id: self.conversation_id.clone(),
+            tags: self.tags.clone(),
+            model: self.model.clone(),
+            provider: self.provider.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -92,11 +147,80 @@ pub struct TopModelsQueryParams {
     pub to: Option<String>,
     /// Max results (defaults to 10)
     pub limit: Option<u64>,
+    /// Filter by user ID
+    pub user_id: Option<i32>,
+    /// Filter by tags (comma-separated, AND logic)
+    pub tags: Option<String>,
+}
+
+impl TopModelsQueryParams {
+    fn to_filter(&self) -> UsageFilter {
+        UsageFilter {
+            user_id: self.user_id,
+            tags: self.tags.clone(),
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct RecentQueryParams {
     /// Max results (defaults to 50, max 100)
+    pub limit: Option<u64>,
+    /// Filter by user ID
+    pub user_id: Option<i32>,
+    /// Filter by conversation ID
+    pub conversation_id: Option<String>,
+    /// Filter by tags (comma-separated, AND logic)
+    pub tags: Option<String>,
+    /// Filter by model name
+    pub model: Option<String>,
+    /// Filter by provider name
+    pub provider: Option<String>,
+}
+
+impl RecentQueryParams {
+    fn to_filter(&self) -> UsageFilter {
+        UsageFilter {
+            user_id: self.user_id,
+            conversation_id: self.conversation_id.clone(),
+            tags: self.tags.clone(),
+            model: self.model.clone(),
+            provider: self.provider.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ConversationsQueryParams {
+    /// ISO 8601 start time (defaults to 24h ago)
+    pub from: Option<String>,
+    /// ISO 8601 end time (defaults to now)
+    pub to: Option<String>,
+    /// Max results (defaults to 50, max 100)
+    pub limit: Option<u64>,
+    /// Filter by user ID
+    pub user_id: Option<i32>,
+    /// Filter by tags (comma-separated, AND logic)
+    pub tags: Option<String>,
+    /// Filter by model name
+    pub model: Option<String>,
+}
+
+impl ConversationsQueryParams {
+    fn to_filter(&self) -> UsageFilter {
+        UsageFilter {
+            user_id: self.user_id,
+            tags: self.tags.clone(),
+            model: self.model.clone(),
+            ..Default::default()
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ConversationDetailQueryParams {
+    /// Max results (defaults to 100)
     pub limit: Option<u64>,
 }
 
@@ -156,7 +280,11 @@ async fn get_usage_summary(
     permission_guard!(auth, AiGatewayRead);
 
     let (from, to) = parse_time_range(params.from.as_deref(), params.to.as_deref())?;
-    let summary = app_state.usage_service.get_summary(from, to).await?;
+    let filter = params.to_filter();
+    let summary = app_state
+        .usage_service
+        .get_summary_filtered(from, to, &filter)
+        .await?;
 
     Ok(Json(summary))
 }
@@ -185,7 +313,11 @@ async fn get_usage_by_provider(
     permission_guard!(auth, AiGatewayRead);
 
     let (from, to) = parse_time_range(params.from.as_deref(), params.to.as_deref())?;
-    let usage = app_state.usage_service.get_by_provider(from, to).await?;
+    let filter = params.to_filter();
+    let usage = app_state
+        .usage_service
+        .get_by_provider_filtered(from, to, &filter)
+        .await?;
 
     Ok(Json(usage))
 }
@@ -216,9 +348,10 @@ async fn get_usage_timeseries(
 
     let (from, to) = parse_time_range(params.from.as_deref(), params.to.as_deref())?;
     let bucket = params.bucket.as_deref().unwrap_or("day");
+    let filter = params.to_filter();
     let timeseries = app_state
         .usage_service
-        .get_timeseries(from, to, bucket)
+        .get_timeseries_filtered(from, to, bucket, &filter)
         .await?;
 
     Ok(Json(timeseries))
@@ -250,9 +383,10 @@ async fn get_usage_top_models(
 
     let (from, to) = parse_time_range(params.from.as_deref(), params.to.as_deref())?;
     let limit = std::cmp::min(params.limit.unwrap_or(10), 100);
+    let filter = params.to_filter();
     let models = app_state
         .usage_service
-        .get_top_models(from, to, limit)
+        .get_top_models_filtered(from, to, limit, &filter)
         .await?;
 
     Ok(Json(models))
@@ -280,7 +414,81 @@ async fn get_usage_recent(
     permission_guard!(auth, AiGatewayRead);
 
     let limit = std::cmp::min(params.limit.unwrap_or(50), 100);
-    let entries = app_state.usage_service.get_recent(limit).await?;
+    let filter = params.to_filter();
+    let entries = app_state
+        .usage_service
+        .get_recent_filtered(limit, &filter)
+        .await?;
+
+    Ok(Json(entries))
+}
+
+#[utoipa::path(
+    tag = "AI Gateway Usage",
+    get,
+    path = "/ai/usage/conversations",
+    params(
+        ("from" = Option<String>, Query, description = "ISO 8601 start time (defaults to 24h ago)"),
+        ("to" = Option<String>, Query, description = "ISO 8601 end time (defaults to now)"),
+        ("limit" = Option<u64>, Query, description = "Max results (defaults to 50, max 100)"),
+        ("user_id" = Option<i32>, Query, description = "Filter by user ID"),
+        ("tags" = Option<String>, Query, description = "Filter by tags (comma-separated)"),
+        ("model" = Option<String>, Query, description = "Filter by model name"),
+    ),
+    responses(
+        (status = 200, description = "Conversation summaries", body = Vec<ConversationSummary>),
+        (status = 400, description = "Invalid query parameters", body = ProblemDetails),
+        (status = 401, description = "Unauthorized", body = ProblemDetails),
+        (status = 403, description = "Insufficient permissions", body = ProblemDetails),
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn get_conversations(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AiGatewayAppState>>,
+    Query(params): Query<ConversationsQueryParams>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, AiGatewayRead);
+
+    let (from, to) = parse_time_range(params.from.as_deref(), params.to.as_deref())?;
+    let limit = std::cmp::min(params.limit.unwrap_or(50), 100);
+    let filter = params.to_filter();
+    let conversations = app_state
+        .usage_service
+        .get_conversations(from, to, &filter, limit)
+        .await?;
+
+    Ok(Json(conversations))
+}
+
+#[utoipa::path(
+    tag = "AI Gateway Usage",
+    get,
+    path = "/ai/usage/conversations/{conversation_id}",
+    params(
+        ("conversation_id" = String, Path, description = "Conversation ID"),
+        ("limit" = Option<u64>, Query, description = "Max results (defaults to 100)"),
+    ),
+    responses(
+        (status = 200, description = "Invocations within a conversation", body = Vec<UsageLogEntry>),
+        (status = 401, description = "Unauthorized", body = ProblemDetails),
+        (status = 403, description = "Insufficient permissions", body = ProblemDetails),
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn get_conversation_detail(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AiGatewayAppState>>,
+    Path(conversation_id): Path<String>,
+    Query(params): Query<ConversationDetailQueryParams>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, AiGatewayRead);
+
+    let limit = std::cmp::min(params.limit.unwrap_or(100), 500);
+    let entries = app_state
+        .usage_service
+        .get_conversation_detail(&conversation_id, limit)
+        .await?;
 
     Ok(Json(entries))
 }

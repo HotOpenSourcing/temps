@@ -22,6 +22,14 @@ pub struct Model {
     pub is_streaming: bool,
     /// Whether the caller used their own API key (BYOK) instead of the system key
     pub is_byok: bool,
+    /// Groups related requests into a conversation
+    pub conversation_id: Option<String>,
+    /// User-supplied tags for filtering
+    pub tags: Vec<String>,
+    /// Caller-supplied request correlation ID
+    pub request_id: Option<String>,
+    /// Links to OTel trace_id for waterfall views
+    pub trace_id: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
