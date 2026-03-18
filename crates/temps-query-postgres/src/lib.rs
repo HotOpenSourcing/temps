@@ -10,13 +10,61 @@ use temps_query::{
     DataRow, DataSource, DatasetSchema, EntityCountHint, EntityInfo, FieldDef, FieldType,
     Introspect, QueryOptions, QueryResult, QueryStats, Queryable, Result,
 };
-use tokio::sync::RwLock;
 use tokio_postgres::{Client, NoTls, Row};
-use tracing::{debug, error};
+use tokio_postgres_rustls::MakeRustlsConnect;
+use tracing::{debug, error, warn};
+
+/// Escape a SQL identifier by doubling any internal double-quote characters.
+/// Prevents identifier injection when used inside `"..."` quoting.
+fn escape_ident(name: &str) -> String {
+    name.replace('"', "\"\"")
+}
+
+/// A certificate verifier that accepts all server certificates (including self-signed).
+/// Used for connecting to PostgreSQL clusters with `--ssl-self-signed` certificates.
+#[derive(Debug)]
+struct AcceptAllVerifier;
+
+impl rustls::client::danger::ServerCertVerifier for AcceptAllVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
 
 /// PostgreSQL data source implementation
 pub struct PostgresSource {
-    client: Arc<RwLock<Client>>,
+    client: Arc<Client>,
     database_name: String,
 }
 
@@ -39,16 +87,33 @@ impl PostgresSource {
             username, host, port, database
         );
 
-        let (client, connection) = tokio_postgres::connect(&config, NoTls).await.map_err(|e| {
-            DataError::ConnectionFailed(format!("PostgreSQL connection failed: {}", e))
-        })?;
-
-        // Spawn connection handler
-        tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                error!("PostgreSQL connection error: {}", e);
+        let client = match Self::connect_with_tls(&config).await {
+            Ok(client) => {
+                debug!("Connected to PostgreSQL with TLS");
+                client
             }
-        });
+            Err(tls_err) => {
+                warn!(
+                    "TLS connection failed, falling back to plain connection: {}",
+                    tls_err
+                );
+                let (client, connection) =
+                    tokio_postgres::connect(&config, NoTls).await.map_err(|e| {
+                        DataError::ConnectionFailed(format!(
+                            "PostgreSQL connection failed (TLS error: {}, plain error: {})",
+                            tls_err, e
+                        ))
+                    })?;
+
+                tokio::spawn(async move {
+                    if let Err(e) = connection.await {
+                        error!("PostgreSQL connection error: {}", e);
+                    }
+                });
+
+                client
+            }
+        };
 
         debug!(
             "Successfully connected to PostgreSQL database: {}",
@@ -56,9 +121,39 @@ impl PostgresSource {
         );
 
         Ok(Self {
-            client: Arc::new(RwLock::new(client)),
+            client: Arc::new(client),
             database_name: database.to_string(),
         })
+    }
+
+    /// Execute a raw SQL statement (no result rows expected).
+    /// Used for DDL/admin operations like creating roles and granting privileges.
+    pub async fn execute_raw(&self, sql: &str) -> Result<()> {
+        self.client
+            .batch_execute(sql)
+            .await
+            .map_err(|e| DataError::QueryFailed(format!("Execute failed: {}", e)))?;
+        Ok(())
+    }
+
+    /// Attempt a TLS connection using rustls configured to accept self-signed certificates.
+    /// Returns the Client after spawning the connection task.
+    async fn connect_with_tls(config: &str) -> std::result::Result<Client, tokio_postgres::Error> {
+        let rustls_config = rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AcceptAllVerifier))
+            .with_no_client_auth();
+
+        let tls = MakeRustlsConnect::new(rustls_config);
+        let (client, connection) = tokio_postgres::connect(config, tls).await?;
+
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                error!("PostgreSQL TLS connection error: {}", e);
+            }
+        });
+
+        Ok(client)
     }
 
     /// Strip SQL string literals to avoid false positives when scanning for dangerous patterns.
@@ -403,7 +498,7 @@ impl DataSource for PostgresSource {
     }
 
     async fn list_containers(&self, path: &ContainerPath) -> Result<Vec<ContainerInfo>> {
-        let client = self.client.read().await;
+        let client = &self.client;
 
         match path.depth() {
             // Depth 0: List databases
@@ -536,7 +631,7 @@ impl DataSource for PostgresSource {
     }
 
     async fn get_container_info(&self, path: &ContainerPath) -> Result<ContainerInfo> {
-        let client = self.client.read().await;
+        let client = &self.client;
 
         match path.depth() {
             // Depth 1: Get database info
@@ -660,7 +755,7 @@ impl DataSource for PostgresSource {
             )));
         }
 
-        let client = self.client.read().await;
+        let client = &self.client;
 
         debug!("Listing tables in schema: {}", schema_name);
 
@@ -731,7 +826,7 @@ impl DataSource for PostgresSource {
             )));
         }
 
-        let client = self.client.read().await;
+        let client = &self.client;
 
         let query = r#"
             SELECT table_type
@@ -754,7 +849,8 @@ impl DataSource for PostgresSource {
         // Get row count
         let count_query = format!(
             "SELECT COUNT(*) FROM \"{}\".\"{}\"",
-            schema_name, entity_name
+            escape_ident(schema_name),
+            escape_ident(entity_name)
         );
 
         let row_count = client
@@ -797,7 +893,7 @@ impl DataSource for PostgresSource {
             )));
         }
 
-        let client = self.client.read().await;
+        let client = &self.client;
 
         debug!("Getting schema for table: {}.{}", schema_name, entity_name);
 
@@ -882,7 +978,7 @@ impl Introspect for PostgresSource {
         }
 
         let schema_name = &container_path.segments[1];
-        let client = self.client.read().await;
+        let client = &self.client;
 
         let query = r#"
             SELECT COUNT(*)
@@ -912,7 +1008,7 @@ impl Introspect for PostgresSource {
         }
 
         let schema_name = &container_path.segments[1];
-        let client = self.client.read().await;
+        let client = &self.client;
 
         let query = r#"
             SELECT data_type
@@ -951,12 +1047,15 @@ impl Queryable for PostgresSource {
         }
 
         let schema_name = &container_path.segments[1];
-        let client = self.client.read().await;
 
         let start = std::time::Instant::now();
 
         // Build SQL query
-        let mut sql = format!("SELECT * FROM \"{}\".\"{}\"", schema_name, entity_name);
+        let mut sql = format!(
+            "SELECT * FROM \"{}\".\"{}\"",
+            escape_ident(schema_name),
+            escape_ident(entity_name)
+        );
 
         // Add WHERE clause if filters provided
         if let Some(filter_json) = filters {
@@ -984,6 +1083,11 @@ impl Queryable for PostgresSource {
         sql.push_str(&format!(" LIMIT {} OFFSET {}", limit, offset));
 
         debug!("Executing query: {}", sql);
+
+        // Safety: SQL injection is prevented by validate_sql() for WHERE clauses
+        // and escape_ident() for identifiers. The database user should be read-only
+        // as defense-in-depth.
+        let client = &self.client;
 
         let rows = client.query(&sql, &[]).await.map_err(|e| {
             error!("PostgreSQL query failed: {}", e);
@@ -1057,11 +1161,11 @@ impl Queryable for PostgresSource {
         }
 
         let schema_name = &container_path.segments[1];
-        let client = self.client.read().await;
 
         let mut sql = format!(
             "SELECT COUNT(*) FROM \"{}\".\"{}\"",
-            schema_name, entity_name
+            escape_ident(schema_name),
+            escape_ident(entity_name)
         );
 
         // Add WHERE clause if filters provided
@@ -1073,6 +1177,8 @@ impl Queryable for PostgresSource {
                 sql.push_str(where_clause);
             }
         }
+
+        let client = &self.client;
 
         let row = client
             .query_one(&sql, &[])
@@ -1093,7 +1199,7 @@ impl Queryable for PostgresSource {
         }
 
         let schema_name = &container_path.segments[1];
-        let client = self.client.read().await;
+        let client = &self.client;
 
         let query = r#"
             SELECT COUNT(*)

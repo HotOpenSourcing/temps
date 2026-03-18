@@ -8,9 +8,7 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import { getFunnelMetricsOptions } from '@/api/client/@tanstack/react-query.gen'
-import { formatDateForAPI } from '@/lib/date'
 import { useQuery } from '@tanstack/react-query'
-import { subDays } from 'date-fns'
 import {
   Users,
   TrendingUp,
@@ -20,9 +18,15 @@ import {
   ChevronRight,
 } from 'lucide-react'
 
+interface DateRangeQuery {
+  start_date: string
+  end_date: string
+}
+
 interface FunnelCardProps {
   funnel: FunnelResponse
   project: ProjectResponse
+  dateRange: DateRangeQuery
   onDelete: () => void
   onView: () => void
   onEdit: () => void
@@ -31,6 +35,7 @@ interface FunnelCardProps {
 export function FunnelCard({
   funnel,
   project,
+  dateRange,
   onDelete,
   onView,
   onEdit,
@@ -45,10 +50,7 @@ export function FunnelCard({
         project_id: project.id,
         funnel_id: funnel.id,
       },
-      query: {
-        start_date: formatDateForAPI(subDays(new Date(), 30)),
-        end_date: formatDateForAPI(new Date()),
-      },
+      query: dateRange,
     }),
     retry: false,
   })

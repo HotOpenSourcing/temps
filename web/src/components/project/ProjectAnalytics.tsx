@@ -73,7 +73,13 @@ import { CreateFunnel } from '@/pages/CreateFunnel'
 import { EditFunnel } from '@/pages/EditFunnel'
 import RequestLogs from '@/pages/RequestLogs'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { format, subDays } from 'date-fns'
+import { format } from 'date-fns'
+import {
+  getDateRangeFromFilter,
+  QUICK_FILTERS,
+  type QuickFilter,
+  type AnalyticsDateFilter,
+} from '@/hooks/useAnalyticsDateRange'
 import {
   Calendar as CalendarIcon,
   Code2,
@@ -304,32 +310,32 @@ export function VisitorChart({
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <CardTitle>{getChartTitle()}</CardTitle>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <CardTitle className="text-base sm:text-lg">{getChartTitle()}</CardTitle>
         <div className="flex items-center gap-2">
           {onZoom && (
             <span className="text-xs text-muted-foreground hidden sm:inline">
               Drag on chart to zoom
             </span>
           )}
-          <div className="flex gap-2">
+          <div className="flex gap-1.5 sm:gap-2">
             <Badge
               variant={aggregationLevel === 'events' ? 'default' : 'outline'}
-              className="cursor-pointer"
+              className="cursor-pointer text-xs"
               onClick={() => setAggregationLevel('events')}
             >
               Events
             </Badge>
             <Badge
               variant={aggregationLevel === 'sessions' ? 'default' : 'outline'}
-              className="cursor-pointer"
+              className="cursor-pointer text-xs"
               onClick={() => setAggregationLevel('sessions')}
             >
               Sessions
             </Badge>
             <Badge
               variant={aggregationLevel === 'visitors' ? 'default' : 'outline'}
-              className="cursor-pointer"
+              className="cursor-pointer text-xs"
               onClick={() => setAggregationLevel('visitors')}
             >
               Visitors
@@ -409,17 +415,6 @@ export function VisitorChart({
     </div>
   )
 }
-
-const QUICK_FILTERS = [
-  { label: 'Today', value: 'today' },
-  { label: 'Yesterday', value: 'yesterday' },
-  { label: 'Last 24 hours', value: '24hours' },
-  { label: 'Last 7 Days', value: '7days' },
-  { label: 'Last 30 Days', value: '30days' },
-  { label: 'Custom', value: 'custom' },
-] as const
-
-type QuickFilter = (typeof QUICK_FILTERS)[number]['value']
 
 interface AnalyticsFiltersProps {
   project: ProjectResponse
@@ -526,23 +521,28 @@ function AnalyticsFilters({
                 variant={activeFilter === 'custom' ? 'default' : 'outline'}
                 size="sm"
                 className={cn(
-                  'min-w-[140px]',
+                  'sm:min-w-[140px]',
                   !dateRange?.from && 'text-muted-foreground'
                 )}
               >
-                <CalendarIcon className="mr-2 h-4 w-4" />
-                {dateRange?.from ? (
-                  dateRange.to ? (
-                    <>
-                      {format(dateRange.from, 'LLL dd, y HH:mm')} -{' '}
-                      {format(dateRange.to, 'LLL dd, y HH:mm')}
-                    </>
+                <CalendarIcon className="h-4 w-4 sm:mr-2" />
+                <span className="hidden sm:inline">
+                  {dateRange?.from ? (
+                    dateRange.to ? (
+                      <>
+                        {format(dateRange.from, 'LLL dd, y HH:mm')} -{' '}
+                        {format(dateRange.to, 'LLL dd, y HH:mm')}
+                      </>
+                    ) : (
+                      format(dateRange.from, 'LLL dd, y HH:mm')
+                    )
                   ) : (
-                    format(dateRange.from, 'LLL dd, y HH:mm')
-                  )
-                ) : (
-                  <span>Custom range</span>
-                )}
+                    'Custom range'
+                  )}
+                </span>
+                <span className="sm:hidden">
+                  {dateRange?.from ? format(dateRange.from, 'MM/dd') : 'Custom'}
+                </span>
               </Button>
             </PopoverTrigger>
             <PopoverContent className="w-auto p-0" align="end">
@@ -554,7 +554,7 @@ function AnalyticsFilters({
                 }
                 selected={dateRange}
                 onSelect={onDateRangeChange}
-                numberOfMonths={2}
+                numberOfMonths={typeof window !== 'undefined' && window.innerWidth < 640 ? 1 : 2}
                 disabled={(date) => date > new Date()}
                 toDate={new Date()}
                 fromDate={
@@ -659,56 +659,7 @@ function PagesTab({ project }: PagesTabProps) {
   const [isRefreshing, setIsRefreshing] = React.useState(false)
   const queryClient = useQueryClient()
 
-  const getDateRange = React.useCallback(() => {
-    const now = new Date()
-    if (dateFilter.quickFilter === 'custom' && dateFilter.dateRange) {
-      return {
-        startDate: dateFilter.dateRange.from,
-        endDate: dateFilter.dateRange.to,
-      }
-    }
-
-    switch (dateFilter.quickFilter) {
-      case 'today':
-        return {
-          startDate: new Date(now.setHours(0, 0, 0, 0)),
-          endDate: new Date(now.setHours(23, 59, 59, 999)),
-        }
-      case 'yesterday': {
-        const yesterday = new Date(now)
-        yesterday.setDate(yesterday.getDate() - 1)
-        return {
-          startDate: new Date(yesterday.setHours(0, 0, 0, 0)),
-          endDate: new Date(yesterday.setHours(23, 59, 59, 999)),
-        }
-      }
-      case '24hours': {
-        const twentyFourHoursAgo = new Date(now)
-        twentyFourHoursAgo.setHours(twentyFourHoursAgo.getHours() - 24)
-        return {
-          startDate: twentyFourHoursAgo,
-          endDate: now,
-        }
-      }
-      case '7days':
-        return {
-          startDate: subDays(now, 7),
-          endDate: now,
-        }
-      case '30days':
-        return {
-          startDate: subDays(now, 30),
-          endDate: now,
-        }
-      default:
-        return {
-          startDate: subDays(now, 7),
-          endDate: now,
-        }
-    }
-  }, [dateFilter])
-
-  const { startDate, endDate } = getDateRange()
+  const { startDate, endDate } = getDateRangeFromFilter(dateFilter)
 
   const handleRefresh = React.useCallback(() => {
     setIsRefreshing(true)
@@ -826,56 +777,7 @@ function EventDetailTab({ project }: EventDetailTabProps) {
   const [isRefreshing, setIsRefreshing] = React.useState(false)
   const queryClient = useQueryClient()
 
-  const getDateRange = React.useCallback(() => {
-    const now = new Date()
-    if (dateFilter.quickFilter === 'custom' && dateFilter.dateRange) {
-      return {
-        startDate: dateFilter.dateRange.from,
-        endDate: dateFilter.dateRange.to,
-      }
-    }
-
-    switch (dateFilter.quickFilter) {
-      case 'today':
-        return {
-          startDate: new Date(now.setHours(0, 0, 0, 0)),
-          endDate: new Date(now.setHours(23, 59, 59, 999)),
-        }
-      case 'yesterday': {
-        const yesterday = new Date(now)
-        yesterday.setDate(yesterday.getDate() - 1)
-        return {
-          startDate: new Date(yesterday.setHours(0, 0, 0, 0)),
-          endDate: new Date(yesterday.setHours(23, 59, 59, 999)),
-        }
-      }
-      case '24hours': {
-        const twentyFourHoursAgo = new Date(now)
-        twentyFourHoursAgo.setHours(twentyFourHoursAgo.getHours() - 24)
-        return {
-          startDate: twentyFourHoursAgo,
-          endDate: now,
-        }
-      }
-      case '7days':
-        return {
-          startDate: subDays(now, 7),
-          endDate: now,
-        }
-      case '30days':
-        return {
-          startDate: subDays(now, 30),
-          endDate: now,
-        }
-      default:
-        return {
-          startDate: subDays(now, 7),
-          endDate: now,
-        }
-    }
-  }, [dateFilter])
-
-  const { startDate, endDate } = getDateRange()
+  const { startDate, endDate } = getDateRangeFromFilter(dateFilter)
 
   const handleRefresh = React.useCallback(() => {
     setIsRefreshing(true)
@@ -949,56 +851,7 @@ function SessionReplaysTab({ project }: SessionReplaysTabProps) {
   const [isRefreshing, setIsRefreshing] = React.useState(false)
   const queryClient = useQueryClient()
 
-  const getDateRange = React.useCallback(() => {
-    const now = new Date()
-    if (dateFilter.quickFilter === 'custom' && dateFilter.dateRange) {
-      return {
-        startDate: dateFilter.dateRange.from,
-        endDate: dateFilter.dateRange.to,
-      }
-    }
-
-    switch (dateFilter.quickFilter) {
-      case 'today':
-        return {
-          startDate: new Date(now.setHours(0, 0, 0, 0)),
-          endDate: new Date(now.setHours(23, 59, 59, 999)),
-        }
-      case 'yesterday': {
-        const yesterday = new Date(now)
-        yesterday.setDate(yesterday.getDate() - 1)
-        return {
-          startDate: new Date(yesterday.setHours(0, 0, 0, 0)),
-          endDate: new Date(yesterday.setHours(23, 59, 59, 999)),
-        }
-      }
-      case '24hours': {
-        const twentyFourHoursAgo = new Date(now)
-        twentyFourHoursAgo.setHours(twentyFourHoursAgo.getHours() - 24)
-        return {
-          startDate: twentyFourHoursAgo,
-          endDate: now,
-        }
-      }
-      case '7days':
-        return {
-          startDate: subDays(now, 7),
-          endDate: now,
-        }
-      case '30days':
-        return {
-          startDate: subDays(now, 30),
-          endDate: now,
-        }
-      default:
-        return {
-          startDate: subDays(now, 7),
-          endDate: now,
-        }
-    }
-  }, [dateFilter])
-
-  const { startDate, endDate } = getDateRange()
+  const { startDate, endDate } = getDateRangeFromFilter(dateFilter)
 
   const handleRefresh = React.useCallback(() => {
     setIsRefreshing(true)
@@ -1063,56 +916,7 @@ function JourneyTab({ project }: JourneyTabProps) {
   const [isRefreshing, setIsRefreshing] = React.useState(false)
   const queryClient = useQueryClient()
 
-  const getDateRange = React.useCallback(() => {
-    const now = new Date()
-    if (dateFilter.quickFilter === 'custom' && dateFilter.dateRange) {
-      return {
-        startDate: dateFilter.dateRange.from,
-        endDate: dateFilter.dateRange.to,
-      }
-    }
-
-    switch (dateFilter.quickFilter) {
-      case 'today':
-        return {
-          startDate: new Date(now.setHours(0, 0, 0, 0)),
-          endDate: new Date(now.setHours(23, 59, 59, 999)),
-        }
-      case 'yesterday': {
-        const yesterday = new Date(now)
-        yesterday.setDate(yesterday.getDate() - 1)
-        return {
-          startDate: new Date(yesterday.setHours(0, 0, 0, 0)),
-          endDate: new Date(yesterday.setHours(23, 59, 59, 999)),
-        }
-      }
-      case '24hours': {
-        const twentyFourHoursAgo = new Date(now)
-        twentyFourHoursAgo.setHours(twentyFourHoursAgo.getHours() - 24)
-        return {
-          startDate: twentyFourHoursAgo,
-          endDate: now,
-        }
-      }
-      case '7days':
-        return {
-          startDate: subDays(now, 7),
-          endDate: now,
-        }
-      case '30days':
-        return {
-          startDate: subDays(now, 30),
-          endDate: now,
-        }
-      default:
-        return {
-          startDate: subDays(now, 7),
-          endDate: now,
-        }
-    }
-  }, [dateFilter])
-
-  const { startDate, endDate } = getDateRange()
+  const { startDate, endDate } = getDateRangeFromFilter(dateFilter)
 
   const handleRefresh = React.useCallback(() => {
     setIsRefreshing(true)
@@ -1162,10 +966,6 @@ function JourneyTab({ project }: JourneyTabProps) {
 
 interface ProjectAnalyticsProps {
   project: ProjectResponse
-}
-interface AnalyticsDateFilter {
-  quickFilter: QuickFilter
-  dateRange: DateRange | undefined
 }
 
 export function ProjectAnalytics({ project }: ProjectAnalyticsProps) {
@@ -1267,58 +1067,7 @@ function ProjectAnalyticsOverview({ project }: ProjectAnalyticsOverviewProps) {
   const [isRefreshing, setIsRefreshing] = React.useState(false)
   const [showSetupOverride] = React.useState(false)
   const queryClient = useQueryClient()
-  const getDateRange = React.useCallback(() => {
-    const now = new Date()
-
-    if (dateFilter.quickFilter === 'custom' && dateFilter.dateRange) {
-      return {
-        startDate: dateFilter.dateRange.from,
-        endDate: dateFilter.dateRange.to,
-      }
-    }
-
-    switch (dateFilter.quickFilter) {
-      case 'today':
-        return {
-          startDate: new Date(now.setHours(0, 0, 0, 0)),
-          endDate: new Date(now.setHours(23, 59, 59, 999)),
-        }
-      case 'yesterday': {
-        const yesterday = new Date(now)
-        yesterday.setDate(yesterday.getDate() - 1)
-        return {
-          startDate: new Date(yesterday.setHours(0, 0, 0, 0)),
-          endDate: new Date(yesterday.setHours(23, 59, 59, 999)),
-        }
-      }
-      case '24hours': {
-        const twentyFourHoursAgo = new Date(now)
-        twentyFourHoursAgo.setHours(twentyFourHoursAgo.getHours() - 24)
-        return {
-          startDate: twentyFourHoursAgo,
-          endDate: now,
-        }
-      }
-      case '7days': {
-        const sevenDaysAgo = new Date(now)
-        sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7)
-        return {
-          startDate: new Date(sevenDaysAgo.setHours(0, 0, 0, 0)),
-          endDate: new Date(now.setHours(23, 59, 59, 999)),
-        }
-      }
-      case '30days':
-      default: {
-        const thirtyDaysAgo = new Date(now)
-        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
-        return {
-          startDate: new Date(thirtyDaysAgo.setHours(0, 0, 0, 0)),
-          endDate: new Date(now.setHours(23, 59, 59, 999)),
-        }
-      }
-    }
-  }, [dateFilter])
-  const { startDate, endDate } = getDateRange()
+  const { startDate, endDate } = getDateRangeFromFilter(dateFilter)
 
   // Chart zoom handler — sets a custom date range from drag selection
   const handleChartZoom = React.useCallback(
@@ -1471,25 +1220,25 @@ function ProjectAnalyticsOverview({ project }: ProjectAnalyticsOverviewProps) {
               navigate(`/projects/${project.slug}/analytics/globe`)
             }
           >
-            <CardContent className="flex items-center justify-between py-4">
-              <div className="flex items-center gap-3">
-                <Globe className="h-5 w-5 text-muted-foreground" />
-                <div>
+            <CardContent className="flex items-center justify-between gap-3 py-3 sm:py-4">
+              <div className="flex items-center gap-3 min-w-0">
+                <Globe className="h-5 w-5 text-muted-foreground shrink-0" />
+                <div className="min-w-0">
                   <p className="font-medium text-sm">Visitor Globe</p>
-                  <p className="text-xs text-muted-foreground">
+                  <p className="text-xs text-muted-foreground hidden sm:block">
                     See where your visitors are coming from on an interactive 3D
                     globe
                   </p>
                 </div>
               </div>
-              <Button variant="outline" size="sm">
+              <Button variant="outline" size="sm" className="shrink-0">
                 View Globe
               </Button>
             </CardContent>
           </Card>
 
           {/* Analytics Charts */}
-          <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-2">
+          <div className="grid grid-cols-1 gap-4 sm:gap-6 md:grid-cols-2">
             <PagesChart
               project={project}
               startDate={startDate}

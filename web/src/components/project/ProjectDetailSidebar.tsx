@@ -4,25 +4,17 @@ import { usePluginsContext } from '@/contexts/PluginsContext'
 import { resolvePluginIcon } from '@/lib/pluginIcons'
 import { cn } from '@/lib/utils'
 import {
-  Activity,
-  BarChart3,
+  Bot,
+  Boxes,
   ChevronDown,
   ChevronRight,
-  Database,
-  FileText,
-  Gauge,
+  Eye,
   GitBranch,
   Home,
   Layers,
   ScrollText,
   Settings,
-  Shield,
   ShieldAlert,
-  Key,
-  Globe,
-  Boxes,
-  Bot,
-  Workflow,
 } from 'lucide-react'
 import {
   useCallback,
@@ -94,9 +86,9 @@ interface NavItem {
 }
 
 const baseNavItems: NavItem[] = [
-  // Core Development
+  // Core
   {
-    title: 'Project',
+    title: 'Overview',
     url: 'project',
     icon: Home,
     kbd: 'P',
@@ -108,104 +100,66 @@ const baseNavItems: NavItem[] = [
     kbd: 'D',
   },
 
-  // Monitoring & Analytics (High Frequency)
+  // Observability (Analytics + Uptime + Metrics + Traces + Speed)
   {
-    title: 'Analytics',
+    title: 'Observability',
     url: 'analytics',
-    icon: BarChart3,
+    icon: Eye,
     subItems: [
-      { title: 'Overview', url: 'analytics' },
+      { title: 'Analytics', url: 'analytics' },
       { title: 'Visitors', url: 'analytics/visitors' },
       { title: 'Pages', url: 'analytics/pages' },
-      { title: 'Replays', url: 'analytics/replays' },
-      { title: 'Journey', url: 'analytics/journey' },
-      { title: 'Live', url: 'analytics/live' },
-      { title: 'Globe', url: 'analytics/globe' },
       { title: 'Funnels', url: 'analytics/funnels' },
-      { title: 'Speed Insights', url: 'speed' },
-      { title: 'Setup', url: 'analytics/setup' },
+      { title: 'Session Replays', url: 'analytics/replays' },
+      { title: 'Uptime', url: 'monitors' },
+      { title: 'Metrics', url: 'monitoring' },
+      { title: 'Traces', url: 'traces' },
+      { title: 'Speed', url: 'speed' },
     ],
   },
+
+  // Error Tracking
   {
-    title: 'Error Tracking',
+    title: 'Errors',
     url: 'errors',
     icon: ShieldAlert,
     kbd: 'E',
-  },
-  {
-    title: 'Security',
-    url: 'security',
-    icon: Shield,
-  },
-  {
-    title: 'Monitors',
-    url: 'monitors',
-    icon: Activity,
-    kbd: 'M',
-  },
-  {
-    title: 'Monitoring',
-    url: 'monitoring',
-    icon: Gauge,
-  },
-  {
-    title: 'Traces',
-    url: 'traces',
-    icon: Workflow,
-  },
-  {
-    title: 'AI Activity',
-    url: 'ai-activity',
-    icon: Bot,
+    subItems: [
+      { title: 'Issues', url: 'errors' },
+      { title: 'Alert Rules', url: 'errors/alert-rules' },
+    ],
   },
 
-  // Debugging (Medium Frequency)
+  // Logs
   {
     title: 'Logs',
     url: 'runtime',
     icon: ScrollText,
     kbd: 'L',
   },
+
+  // AI Activity
   {
-    title: 'HTTP Requests',
-    url: 'analytics/requests',
-    icon: FileText,
+    title: 'AI Activity',
+    url: 'ai-activity',
+    icon: Bot,
   },
 
-  // Management (Medium Frequency)
-  {
-    title: 'Domains',
-    url: 'settings/domains',
-    icon: Globe,
-  },
-  {
-    title: 'Storage',
-    url: 'storage',
-    icon: Database,
-    kbd: 'S',
-  },
+  // Services (merged: Storage + Services + KV + Blob)
   {
     title: 'Services',
     url: 'services',
     icon: Boxes,
+    kbd: 'S',
     subItems: [
       { title: 'Overview', url: 'services' },
+      { title: 'Databases', url: 'storage' },
       { title: 'KV Store', url: 'services/kv' },
       { title: 'Blob Storage', url: 'services/blob' },
     ],
   },
 
-  // Configuration (Lower Frequency)
-  {
-    title: 'Environment Variables',
-    url: 'settings/environment-variables',
-    icon: Key,
-  },
-  {
-    title: 'Git',
-    url: 'settings/git',
-    icon: GitBranch,
-  },
+  // Settings (absorbed: Domains, Env Vars, Git, Security, Cron, Webhooks)
   {
     title: 'Settings',
     url: 'settings',
@@ -213,6 +167,9 @@ const baseNavItems: NavItem[] = [
     kbd: ',',
     subItems: [
       { title: 'General', url: 'settings/general' },
+      { title: 'Domains', url: 'settings/domains' },
+      { title: 'Env Variables', url: 'settings/environment-variables' },
+      { title: 'Git', url: 'settings/git' },
       { title: 'Security', url: 'settings/security' },
       { title: 'Cron Jobs', url: 'settings/cron-jobs' },
       { title: 'Webhooks', url: 'settings/webhooks' },
@@ -244,8 +201,8 @@ export function ProjectDetailSidebar({ project }: ProjectDetailSidebarProps) {
   const { isDemoMode } = useAuth()
   const { projectNavEntries } = usePluginsContext()
   const [expandedItems, setExpandedItems] = useState<string[]>([
-    'analytics',
-    'settings',
+    'Observability',
+    'Settings',
   ])
 
   // Convert plugin project nav entries to NavItem format
@@ -272,18 +229,16 @@ export function ProjectDetailSidebar({ project }: ProjectDetailSidebarProps) {
     baseNavItems[settingsIndex],
   ]
 
-  // In demo mode, only show Analytics and Monitors as flat items (no sub-items)
-  // This creates a simplified view for the demo
+  // In demo mode, only show Observability as a flat item
   const demoNavItems: NavItem[] = [
     {
-      title: 'Analytics',
+      title: 'Observability',
       url: 'analytics',
-      icon: BarChart3,
-    },
-    {
-      title: 'Monitors',
-      url: 'monitors',
-      icon: Activity,
+      icon: Eye,
+      subItems: [
+        { title: 'Analytics', url: 'analytics' },
+        { title: 'Uptime', url: 'monitors' },
+      ],
     },
   ]
   const navItems = isDemoMode ? demoNavItems : allNavItems
@@ -323,17 +278,16 @@ export function ProjectDetailSidebar({ project }: ProjectDetailSidebarProps) {
       return routeParts[0] === 'environments'
     }
 
+
     // For exact matching
     if (routeParts.length !== urlParts.length) return false
     return routeParts.join('/') === url
   }
 
   const isParentActive = (item: NavItem) => {
-    // Parent is only active if we're on the first sub-item (default route)
     if (!item.subItems || item.subItems.length === 0) return false
-    const path = location.pathname
-    // Check if we're on the parent route exactly (e.g., /projects/slug/analytics)
-    return path.endsWith(`/${item.url}`) && !path.includes(`/${item.url}/`)
+    // Parent is active if any of its sub-items is active
+    return item.subItems.some((subItem) => isActive(subItem.url))
   }
 
   const toggleExpanded = useCallback(
@@ -418,7 +372,7 @@ export function ProjectDetailSidebar({ project }: ProjectDetailSidebarProps) {
                   </button>
                 </div>
                 {isExpanded && (
-                  <div className="ml-7 mt-1 flex flex-col gap-1">
+                  <div className="ml-[1.6rem] mt-0.5 flex flex-col gap-0.5 border-l border-border pl-3">
                     {item.subItems.map((subItem) => {
                       const subActive = isActive(subItem.url)
                       return (
@@ -427,7 +381,7 @@ export function ProjectDetailSidebar({ project }: ProjectDetailSidebarProps) {
                           to={`/projects/${project.slug}/${subItem.url}`}
                           onClick={closeSheet}
                           className={cn(
-                            'rounded-lg px-3 py-1.5 text-sm transition-all hover:bg-accent',
+                            'rounded-md px-2 py-1 text-xs transition-all hover:bg-accent',
                             subActive
                               ? 'bg-accent text-accent-foreground font-medium'
                               : 'text-muted-foreground'

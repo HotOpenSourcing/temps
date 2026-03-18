@@ -239,6 +239,21 @@ export type AggregatedBucketsResponse = {
 
 export type AggregationLevel = 'events' | 'sessions' | 'visitors';
 
+export type AlertRuleResponse = {
+    cooldown_minutes: number;
+    created_at: string;
+    enabled: boolean;
+    environment_filter?: number | null;
+    error_level_filter?: string | null;
+    id: number;
+    name: string;
+    notification_priority: string;
+    project_id: number;
+    trigger_config: unknown;
+    trigger_type: string;
+    updated_at: string;
+};
+
 export type AnalyticsMetrics = {
     average_visit_duration: number;
     bounce_rate: number;
@@ -703,6 +718,20 @@ export type CliLoginRequest = {
     username: string;
 };
 
+/**
+ * Request spec for a single cluster member.
+ */
+export type ClusterMemberRequest = {
+    /**
+     * Target worker node ID. Omit or null to run on the control plane.
+     */
+    node_id?: number | null;
+    /**
+     * Service-type-specific role (e.g., "monitor", "primary", "replica")
+     */
+    role: string;
+};
+
 export type CommitExistsResponse = {
     commit_sha?: string | null;
     exists: boolean;
@@ -1098,6 +1127,35 @@ export type CopyBlobRequest = {
     toPathname: string;
 };
 
+export type CreateAlertRuleRequest = {
+    /**
+     * Minimum minutes between notifications for same rule+group
+     */
+    cooldown_minutes?: number;
+    enabled?: boolean;
+    /**
+     * Optional environment ID to filter alerts
+     */
+    environment_filter?: number | null;
+    /**
+     * Optional error type/level filter
+     */
+    error_level_filter?: string | null;
+    name: string;
+    /**
+     * Notification priority: Low, Normal, High, Critical
+     */
+    notification_priority?: string;
+    /**
+     * Trigger-specific configuration (e.g., {"count": 100, "window_minutes": 60} for frequency)
+     */
+    trigger_config?: unknown;
+    /**
+     * Trigger type: new_issue, regression, frequency, new_user, user_count, status_change
+     */
+    trigger_type: string;
+};
+
 export type CreateApiKeyRequest = {
     expires_at?: string | null;
     name: string;
@@ -1212,11 +1270,23 @@ export type CreateEnvironmentVariableRequest = {
 };
 
 export type CreateExternalServiceRequest = {
+    /**
+     * Cluster member specifications. Required when topology is "cluster".
+     */
+    members?: Array<ClusterMemberRequest>;
     name: string;
+    /**
+     * Target node ID for the service. Omit or null to run on the control plane.
+     */
+    node_id?: number | null;
     parameters: {
         [key: string]: unknown;
     };
     service_type: ServiceTypeRoute;
+    /**
+     * Service topology: "standalone" (default) or "cluster" (HA multi-member).
+     */
+    topology?: string;
     version?: string | null;
 };
 
@@ -3062,12 +3132,22 @@ export type EnvironmentResponse = {
     created_at: number;
     current_deployment_id?: number | null;
     deployment_config?: null | DeploymentConfig;
+    /**
+     * Estimated time (epoch millis) when the environment will go to sleep
+     * based on last activity + idle timeout. NULL when sleeping or on-demand disabled.
+     */
+    estimated_sleep_at?: number | null;
     id: number;
     /**
      * Indicates if this is a preview environment (auto-created per branch)
      * For preview environments, 'branch' contains the feature branch name
      */
     is_preview: boolean;
+    /**
+     * Last proxied request timestamp (epoch millis) for on-demand environments.
+     * NULL when on-demand is disabled or no traffic has been received yet.
+     */
+    last_activity_at?: number | null;
     main_url: string;
     name: string;
     project_id: number;
@@ -3726,10 +3806,26 @@ export type ExternalServiceDetails = {
 export type ExternalServiceInfo = {
     connection_info?: string | null;
     created_at: string;
+    /**
+     * Error message from failed initialization.
+     */
+    error_message?: string | null;
     id: number;
+    /**
+     * Cluster members (empty for standalone services).
+     */
+    members?: Array<ServiceMemberInfo>;
     name: string;
+    /**
+     * Node ID where the service runs. Null means control plane (local).
+     */
+    node_id?: number | null;
     service_type: ServiceTypeRoute;
     status: string;
+    /**
+     * Service topology: "standalone" (single container) or "cluster" (HA multi-member).
+     */
+    topology: string;
     updated_at: string;
     version?: string | null;
 };
@@ -6498,6 +6594,24 @@ export type PaginationParams = {
     per_page?: number;
 };
 
+/**
+ * Password protection configuration
+ *
+ * When enabled, the proxy shows an HTML password form before allowing access.
+ * After the user enters the correct password, an HMAC-signed cookie is set
+ * so subsequent requests pass through without re-entering the password.
+ */
+export type PasswordProtectionConfig = {
+    /**
+     * Whether password protection is enabled
+     */
+    enabled: boolean;
+    /**
+     * The bcrypt-hashed password (never stored or returned in plaintext)
+     */
+    passwordHash: string;
+};
+
 export type PathVisitors = {
     name: string;
     percentage: number;
@@ -7288,6 +7402,16 @@ export type PublicRepositoryInfo = {
     stars: number;
 };
 
+/**
+ * Public settings response containing only non-sensitive feature flags
+ */
+export type PublicSettingsResponse = {
+    /**
+     * Whether demo mode is enabled
+     */
+    demo_enabled: boolean;
+};
+
 export type PurgeLogsRequest = {
     /**
      * Delete all logs before this timestamp (ISO 8601)
@@ -7688,6 +7812,18 @@ export type ResourceLimitsResponse = {
 };
 
 /**
+ * Request body for retrying a failed cluster initialization.
+ */
+export type RetryClusterRequest = {
+    /**
+     * Cluster member specifications (same format as create).
+     * If omitted, the original member configuration is reconstructed from
+     * the preserved service_members records.
+     */
+    members?: Array<ClusterMemberRequest>;
+};
+
+/**
  * Risk level for a migration step
  */
 export type RiskLevel = 'none' | 'low' | 'medium' | 'high' | 'critical';
@@ -7762,6 +7898,18 @@ export type RunExternalServiceBackupRequest = {
      * ID of the S3 source to store the backup
      */
     s3_source_id: number;
+};
+
+/**
+ * S3 credentials distributed to agents for backup/restore operations.
+ */
+export type S3CredentialsResponse = {
+    access_key_id: string;
+    bucket_name: string;
+    endpoint?: string | null;
+    force_path_style: boolean;
+    region: string;
+    secret_key: string;
 };
 
 /**
@@ -7893,6 +8041,7 @@ export type SecurityConfig = {
     enabled?: boolean | null;
     geoRestrictions?: null | GeoRestrictionsConfig;
     headers?: null | SecurityHeadersConfig;
+    passwordProtection?: null | PasswordProtectionConfig;
     rateLimiting?: null | RateLimitConfig;
 };
 
@@ -8085,6 +8234,20 @@ export type ServiceAccessInfo = {
  * What to do with a service during migration
  */
 export type ServiceAction = 'create' | 'link-external' | 'skip';
+
+/**
+ * Public info about a cluster member.
+ */
+export type ServiceMemberInfo = {
+    container_name: string;
+    hostname?: string | null;
+    id: number;
+    node_id?: number | null;
+    ordinal: number;
+    port?: number | null;
+    role: string;
+    status: string;
+};
 
 export type ServiceParameter = {
     choices?: Array<string> | null;
@@ -9402,6 +9565,17 @@ export type UnsupportedFeature = {
     reason: string;
 };
 
+export type UpdateAlertRuleRequest = {
+    cooldown_minutes?: number | null;
+    enabled?: boolean | null;
+    environment_filter?: number | null;
+    error_level_filter?: string | null;
+    name?: string | null;
+    notification_priority?: string | null;
+    trigger_config?: unknown;
+    trigger_type?: string | null;
+};
+
 export type UpdateApiKeyRequest = {
     expires_at?: string | null;
     is_active?: boolean | null;
@@ -9522,6 +9696,13 @@ export type UpdateEnvironmentSettingsRequest = {
      * idle_timeout_seconds of no traffic and started on the next request.
      */
     on_demand?: boolean | null;
+    /**
+     * Set a password to protect this environment. The proxy will show an HTML
+     * password form before allowing access. The password is bcrypt-hashed
+     * server-side and never stored in plaintext.
+     * Send an empty string to remove password protection.
+     */
+    password?: string | null;
     /**
      * Enable/disable performance metrics collection
      */
@@ -16443,6 +16624,39 @@ export type GetServiceEnvironmentVariableResponses = {
 
 export type GetServiceEnvironmentVariableResponse = GetServiceEnvironmentVariableResponses[keyof GetServiceEnvironmentVariableResponses];
 
+export type RetryClusterData = {
+    body: RetryClusterRequest;
+    path: {
+        id: number;
+    };
+    query?: never;
+    url: '/external-services/{id}/retry';
+};
+
+export type RetryClusterErrors = {
+    /**
+     * Service is not a failed cluster
+     */
+    400: unknown;
+    /**
+     * Service not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type RetryClusterResponses = {
+    /**
+     * Cluster retry initiated
+     */
+    200: ExternalServiceInfo;
+};
+
+export type RetryClusterResponse = RetryClusterResponses[keyof RetryClusterResponses];
+
 export type StartServiceData = {
     body?: never;
     path: {
@@ -18485,6 +18699,46 @@ export type NodeHeartbeatResponses = {
 };
 
 export type NodeHeartbeatResponse = NodeHeartbeatResponses[keyof NodeHeartbeatResponses];
+
+export type GetS3CredentialsData = {
+    body?: never;
+    path: {
+        /**
+         * Node ID
+         */
+        node_id: number;
+        /**
+         * S3 source ID
+         */
+        s3_source_id: number;
+    };
+    query?: never;
+    url: '/internal/nodes/{node_id}/s3-credentials/{s3_source_id}';
+};
+
+export type GetS3CredentialsErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * S3 source not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GetS3CredentialsResponses = {
+    /**
+     * S3 credentials
+     */
+    200: S3CredentialsResponse;
+};
+
+export type GetS3CredentialsResponse = GetS3CredentialsResponses[keyof GetS3CredentialsResponses];
 
 export type ListIpAccessControlData = {
     body?: never;
@@ -23381,6 +23635,10 @@ export type SleepEnvironmentErrors = {
      */
     404: unknown;
     /**
+     * Too many state transitions, retry after cooldown
+     */
+    429: unknown;
+    /**
      * Internal server error
      */
     500: unknown;
@@ -23456,6 +23714,10 @@ export type WakeEnvironmentErrors = {
      * Environment not found
      */
     404: unknown;
+    /**
+     * Too many state transitions, retry after cooldown
+     */
+    429: unknown;
     /**
      * Internal server error
      */
@@ -24001,6 +24263,178 @@ export type DeployFromStaticResponses = {
 };
 
 export type DeployFromStaticResponse = DeployFromStaticResponses[keyof DeployFromStaticResponses];
+
+export type ListAlertRulesData = {
+    body?: never;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/error-alert-rules';
+};
+
+export type ListAlertRulesErrors = {
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type ListAlertRulesResponses = {
+    /**
+     * List of alert rules
+     */
+    200: Array<AlertRuleResponse>;
+};
+
+export type ListAlertRulesResponse = ListAlertRulesResponses[keyof ListAlertRulesResponses];
+
+export type CreateAlertRuleData = {
+    body: CreateAlertRuleRequest;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/error-alert-rules';
+};
+
+export type CreateAlertRuleErrors = {
+    /**
+     * Validation error
+     */
+    400: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type CreateAlertRuleResponses = {
+    /**
+     * Alert rule created
+     */
+    201: AlertRuleResponse;
+};
+
+export type CreateAlertRuleResponse = CreateAlertRuleResponses[keyof CreateAlertRuleResponses];
+
+export type DeleteAlertRuleData = {
+    body?: never;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * Alert rule ID
+         */
+        rule_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/error-alert-rules/{rule_id}';
+};
+
+export type DeleteAlertRuleErrors = {
+    /**
+     * Alert rule not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type DeleteAlertRuleResponses = {
+    /**
+     * Alert rule deleted
+     */
+    204: void;
+};
+
+export type DeleteAlertRuleResponse = DeleteAlertRuleResponses[keyof DeleteAlertRuleResponses];
+
+export type GetAlertRuleData = {
+    body?: never;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * Alert rule ID
+         */
+        rule_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/error-alert-rules/{rule_id}';
+};
+
+export type GetAlertRuleErrors = {
+    /**
+     * Alert rule not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GetAlertRuleResponses = {
+    /**
+     * Alert rule details
+     */
+    200: AlertRuleResponse;
+};
+
+export type GetAlertRuleResponse = GetAlertRuleResponses[keyof GetAlertRuleResponses];
+
+export type UpdateAlertRuleData = {
+    body: UpdateAlertRuleRequest;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * Alert rule ID
+         */
+        rule_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/error-alert-rules/{rule_id}';
+};
+
+export type UpdateAlertRuleErrors = {
+    /**
+     * Validation error
+     */
+    400: unknown;
+    /**
+     * Alert rule not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type UpdateAlertRuleResponses = {
+    /**
+     * Alert rule updated
+     */
+    200: AlertRuleResponse;
+};
+
+export type UpdateAlertRuleResponse = UpdateAlertRuleResponses[keyof UpdateAlertRuleResponses];
 
 export type GetErrorDashboardStatsData = {
     body?: never;
@@ -27780,6 +28214,29 @@ export type GetJoinTokenStatusResponses = {
 };
 
 export type GetJoinTokenStatusResponse = GetJoinTokenStatusResponses[keyof GetJoinTokenStatusResponses];
+
+export type GetPublicSettingsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/settings/public';
+};
+
+export type GetPublicSettingsErrors = {
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GetPublicSettingsResponses = {
+    /**
+     * Public settings
+     */
+    200: PublicSettingsResponse;
+};
+
+export type GetPublicSettingsResponse = GetPublicSettingsResponses[keyof GetPublicSettingsResponses];
 
 export type ListTemplatesData = {
     body?: never;

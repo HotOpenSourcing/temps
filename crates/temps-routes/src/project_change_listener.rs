@@ -10,7 +10,7 @@
 use crate::route_table::CachedPeerTable;
 use anyhow::Result;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 /// Listens for project route changes and updates the route cache
 pub struct ProjectChangeListener {
@@ -51,35 +51,70 @@ impl ProjectChangeListener {
         let queue = self.queue.clone();
 
         let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
+            // Don't pile up missed ticks if a reload takes longer than 10s
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // Skip the first immediate tick (routes already loaded by RouteTableListener)
+            interval.tick().await;
+
             loop {
-                match pg_listener.recv().await {
-                    Ok(notification) => {
-                        Self::handle_project_change_static(
-                            &peer_table,
-                            &queue,
-                            notification.payload(),
-                        )
-                        .await;
-                    }
-                    Err(e) => {
-                        error!("Error receiving project change notification: {}", e);
-
-                        // Attempt to reconnect after error
-                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-
-                        match PgListener::connect_with(&pool).await {
-                            Ok(mut new_listener) => {
-                                if let Err(e) = new_listener.listen("project_route_change").await {
-                                    error!("Failed to re-subscribe to project_route_change: {}", e);
-                                } else {
-                                    pg_listener = new_listener;
-                                    info!("Reconnected to project_route_change listener");
-                                }
+                tokio::select! {
+                    notification = pg_listener.recv() => {
+                        match notification {
+                            Ok(n) => {
+                                // Handle the specific change payload for logging
+                                Self::handle_project_change_static(
+                                    &peer_table,
+                                    &queue,
+                                    n.payload(),
+                                )
+                                .await;
+                                // handle_project_change_static already calls load_routes + sends event
+                                continue;
                             }
                             Err(e) => {
-                                error!("Failed to reconnect project_route_change listener: {}", e);
+                                error!("Error receiving project change notification: {}", e);
+
+                                // Attempt to reconnect after error
+                                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+                                match PgListener::connect_with(&pool).await {
+                                    Ok(mut new_listener) => {
+                                        if let Err(e) = new_listener.listen("project_route_change").await {
+                                            error!("Failed to re-subscribe to project_route_change: {}", e);
+                                        } else {
+                                            pg_listener = new_listener;
+                                            info!("Reconnected to project_route_change listener");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to reconnect project_route_change listener: {}", e);
+                                    }
+                                }
+                                // Fall through to periodic reload below
                             }
                         }
+                    }
+                    _ = interval.tick() => {
+                        debug!("Periodic project route sync triggered");
+                    }
+                }
+
+                // Periodic self-healing reload (timer tick or error recovery)
+                if let Err(e) = peer_table.load_routes().await {
+                    error!("Failed to reload routes during periodic sync: {}", e);
+                } else {
+                    let route_count = peer_table.len();
+                    debug!("Project route table synchronized ({} entries)", route_count);
+
+                    let event =
+                        temps_core::Job::RouteTableUpdated(temps_core::RouteTableUpdatedJob {
+                            environment_id: None,
+                            deployment_id: None,
+                            route_count,
+                        });
+                    if let Err(e) = queue.send(event).await {
+                        error!("Failed to send RouteTableUpdated event: {}", e);
                     }
                 }
             }
@@ -175,20 +210,33 @@ impl Drop for ProjectChangeListener {
 }
 
 /// Unified payload structure for route changes (project or environment)
+///
+/// IMPORTANT: `Environment` must be listed before `Project` because with
+/// `#[serde(untagged)]`, serde tries variants in order. `EnvironmentChangePayload`
+/// has a required `environment_id` field that acts as a discriminator.
+/// `ProjectChangePayload` uses `#[serde(default)]` on most fields, so it would
+/// greedily match environment payloads too if listed first.
 #[derive(Debug, serde::Deserialize)]
 #[serde(untagged)]
 enum RouteChangePayload {
-    Project(ProjectChangePayload),
     Environment(EnvironmentChangePayload),
+    Project(ProjectChangePayload),
 }
 
 /// Payload from project triggers
+///
+/// Fields are optional with defaults because the INSERT/DELETE trigger sends a
+/// minimal payload (`action`, `project_id`, `field`) that lacks `is_deleted`,
+/// `slug`, and `timestamp`. Only UPDATEEs send the full payload.
 #[derive(Debug, serde::Deserialize)]
 struct ProjectChangePayload {
     action: String, // INSERT, UPDATE, or DELETE
     project_id: i32,
+    #[serde(default)]
     is_deleted: bool,
+    #[serde(default)]
     slug: String,
+    #[serde(default)]
     #[allow(dead_code)]
     timestamp: String, // Included for debugging/auditing
 }
@@ -260,6 +308,37 @@ mod tests {
                 assert_eq!(env.deployment_id, None);
             }
             _ => panic!("Expected Environment payload"),
+        }
+    }
+
+    #[test]
+    fn test_parse_project_insert_payload_minimal() {
+        // INSERT/DELETE triggers send minimal payloads without is_deleted, slug, timestamp.
+        // These must parse successfully with defaults — this was a bug that caused
+        // route reloads to be silently skipped for new project deployments.
+        let payload = r#"{"action":"INSERT","project_id":42,"field":"project"}"#;
+        let change: RouteChangePayload = serde_json::from_str(payload).unwrap();
+        match change {
+            RouteChangePayload::Project(project) => {
+                assert_eq!(project.project_id, 42);
+                assert_eq!(project.action, "INSERT");
+                assert!(!project.is_deleted); // default
+                assert_eq!(project.slug, ""); // default
+            }
+            _ => panic!("Expected Project payload, got {:?}", change),
+        }
+    }
+
+    #[test]
+    fn test_parse_project_delete_payload_minimal() {
+        let payload = r#"{"action":"DELETE","project_id":7,"field":"project"}"#;
+        let change: RouteChangePayload = serde_json::from_str(payload).unwrap();
+        match change {
+            RouteChangePayload::Project(project) => {
+                assert_eq!(project.project_id, 7);
+                assert_eq!(project.action, "DELETE");
+            }
+            _ => panic!("Expected Project payload, got {:?}", change),
         }
     }
 

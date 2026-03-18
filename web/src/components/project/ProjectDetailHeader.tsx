@@ -3,9 +3,22 @@ import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
 import { Button, buttonVariants } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
+import { useDashboardHealth } from '@/hooks/useDashboardHealth'
 import { Menu, Github, ExternalLink, Users } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useMobileSidebar } from './ProjectDetailSidebar'
+
+const healthDotColors: Record<string, string> = {
+  operational: 'bg-emerald-500',
+  degraded: 'bg-amber-500',
+  down: 'bg-red-500',
+}
+
+const healthLabels: Record<string, string> = {
+  operational: 'Operational',
+  degraded: 'Degraded',
+  down: 'Down',
+}
 
 interface ProjectDetailHeaderProps {
   project: ProjectResponse
@@ -24,6 +37,8 @@ export function ProjectDetailHeader({
 }: ProjectDetailHeaderProps) {
   const { setIsOpen } = useMobileSidebar()
   const navigate = useNavigate()
+  const healthQuery = useDashboardHealth([project.id])
+  const health = healthQuery.data?.projects?.[String(project.id)]
 
   const handleVisitorsClick = () => {
     if ((activeVisitorsCount?.active_visitors ?? 0) > 0) {
@@ -32,7 +47,7 @@ export function ProjectDetailHeader({
   }
 
   return (
-    <header className="flex h-16 shrink-0 items-center gap-2 border-b px-4">
+    <header className="flex h-12 sm:h-16 shrink-0 items-center gap-2 border-b px-3 sm:px-4">
       <Button
         variant="outline"
         size="icon"
@@ -48,11 +63,19 @@ export function ProjectDetailHeader({
             <AvatarImage src={`/api/projects/${project.id}/favicon`} />
             <AvatarFallback>{project.name.charAt(0)}</AvatarFallback>
           </Avatar>
-          <div className="flex flex-wrap items-center gap-2">
-            <h1 className="text-lg font-semibold">{project.slug}</h1>
-            <Badge variant={project.last_deployment ? 'default' : 'outline'}>
+          <div className="flex items-center gap-2 min-w-0">
+            <h1 className="text-base sm:text-lg font-semibold truncate">{project.slug}</h1>
+            <Badge variant={project.last_deployment ? 'default' : 'outline'} className="hidden sm:inline-flex shrink-0">
               {project.last_deployment ? 'Deployed' : 'Not deployed'}
             </Badge>
+            {health && health.status !== 'no_monitors' && (
+              <Link to={`/projects/${project.slug}/monitors`}>
+                <Badge variant="outline" className="hidden sm:inline-flex shrink-0 gap-1.5">
+                  <span className={`inline-block h-2 w-2 rounded-full ${healthDotColors[health.status] || 'bg-zinc-400'}`} />
+                  {healthLabels[health.status] || health.status}
+                </Badge>
+              </Link>
+            )}
           </div>
         </div>
         <div className="flex items-center gap-2">

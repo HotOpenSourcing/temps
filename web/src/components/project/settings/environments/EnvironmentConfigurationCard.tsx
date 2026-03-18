@@ -26,7 +26,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { GitBranch, Loader2, Moon, Network, Plus, Shield, X } from 'lucide-react'
+import { GitBranch, KeyRound, Loader2, Moon, Network, Plus, Shield, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
 
@@ -81,6 +81,8 @@ export function EnvironmentConfigurationCard({
     on_demand: environment.deployment_config?.onDemand ?? false,
     idle_timeout_seconds: environment.deployment_config?.idleTimeoutSeconds?.toString() ?? '300',
     wake_timeout_seconds: environment.deployment_config?.wakeTimeoutSeconds?.toString() ?? '30',
+    password_enabled: environment.deployment_config?.security?.passwordProtection?.enabled ?? false,
+    password: '',
     security: {
       enabled: environment.deployment_config?.security?.enabled ?? false,
       headers: {
@@ -132,6 +134,8 @@ export function EnvironmentConfigurationCard({
       on_demand: environment.deployment_config?.onDemand ?? false,
       idle_timeout_seconds: environment.deployment_config?.idleTimeoutSeconds?.toString() ?? '300',
       wake_timeout_seconds: environment.deployment_config?.wakeTimeoutSeconds?.toString() ?? '30',
+      password_enabled: environment.deployment_config?.security?.passwordProtection?.enabled ?? false,
+      password: '',
       security: {
         enabled: environment.deployment_config?.security?.enabled ?? false,
         headers: {
@@ -213,6 +217,11 @@ export function EnvironmentConfigurationCard({
           ? parseInt(formData.wake_timeout_seconds)
           : null,
         security: formData.security,
+        password: formData.password_enabled
+          ? (formData.password || null)
+          : (formData.password_enabled === false && environment.deployment_config?.security?.passwordProtection?.enabled
+            ? ''
+            : null),
       },
     })
   }
@@ -394,12 +403,12 @@ export function EnvironmentConfigurationCard({
                 <h3 className="text-sm font-medium">On-Demand (Scale-to-Zero)</h3>
               </div>
               <div className="space-y-4">
-                <div className="flex items-center gap-3 p-3 border rounded-lg">
-                  <div className="flex-1">
+                <div className="flex items-start sm:items-center gap-3 p-3 border rounded-lg">
+                  <div className="flex-1 min-w-0">
                     <Label className="text-sm font-medium">Enable On-Demand</Label>
                     <p className="text-xs text-muted-foreground">
-                      Automatically stop containers after a period of inactivity
-                      and start them when a new request arrives.
+                      Automatically stop containers after idle timeout
+                      and restart on the next request.
                     </p>
                   </div>
                   <Switch
@@ -473,15 +482,14 @@ export function EnvironmentConfigurationCard({
                 </div>
                 <div className="space-y-4">
                   {/* Protected environment toggle */}
-                  <div className="flex items-center gap-3 p-3 border rounded-lg">
-                    <div className="flex-1">
+                  <div className="flex items-start sm:items-center gap-3 p-3 border rounded-lg">
+                    <div className="flex-1 min-w-0">
                       <Label className="text-sm font-medium flex items-center gap-1.5">
-                        <Shield className="h-4 w-4" />
+                        <Shield className="h-4 w-4 shrink-0" />
                         Protected
                       </Label>
                       <p className="text-xs text-muted-foreground">
-                        Git pushes will not auto-deploy to this environment.
-                        Deployments must be promoted from another environment.
+                        Git pushes will not auto-deploy. Deployments must be promoted from another environment.
                       </p>
                     </div>
                     <Switch
@@ -496,15 +504,13 @@ export function EnvironmentConfigurationCard({
                   </div>
 
                   {/* Anti-affinity toggle */}
-                  <div className="flex items-center gap-3 p-3 border rounded-lg">
-                    <div className="flex-1">
+                  <div className="flex items-start sm:items-center gap-3 p-3 border rounded-lg">
+                    <div className="flex-1 min-w-0">
                       <Label className="text-sm font-medium">
                         Anti-affinity
                       </Label>
                       <p className="text-xs text-muted-foreground">
-                        Spread replicas across different nodes. When enabled,
-                        no two replicas of this environment land on the same
-                        node (best-effort if more replicas than nodes).
+                        Spread replicas across different nodes (best-effort).
                       </p>
                     </div>
                     <Switch
@@ -625,7 +631,7 @@ export function EnvironmentConfigurationCard({
                     )}
 
                     {/* Add label */}
-                    <div className="flex gap-2">
+                    <div className="flex flex-col sm:flex-row gap-2">
                       <Input
                         placeholder="Key (e.g., region)"
                         value={newLabelKey}
@@ -642,6 +648,7 @@ export function EnvironmentConfigurationCard({
                         type="button"
                         variant="outline"
                         size="icon"
+                        className="shrink-0 self-end sm:self-auto"
                         disabled={!newLabelKey.trim() || !newLabelValue.trim()}
                         onClick={() => {
                           if (newLabelKey.trim() && newLabelValue.trim()) {
@@ -673,8 +680,8 @@ export function EnvironmentConfigurationCard({
               </div>
 
               <div className="space-y-4">
-                <div className="flex items-center gap-3 p-3 border rounded-lg">
-                  <div className="flex-1">
+                <div className="flex items-start sm:items-center gap-3 p-3 border rounded-lg">
+                  <div className="flex-1 min-w-0">
                     <Label className="text-sm font-medium">Attack Mode</Label>
                     <p className="text-xs text-muted-foreground">
                       Enable attack mode for development/testing
@@ -691,8 +698,8 @@ export function EnvironmentConfigurationCard({
                   />
                 </div>
 
-                <div className="flex items-center gap-3 p-3 border rounded-lg">
-                  <div className="flex-1">
+                <div className="flex items-start sm:items-center gap-3 p-3 border rounded-lg">
+                  <div className="flex-1 min-w-0">
                     <Label className="text-sm font-medium">
                       Security Headers
                     </Label>
@@ -744,6 +751,57 @@ export function EnvironmentConfigurationCard({
                       </Select>
                       <p className="text-xs text-muted-foreground mt-1">
                         Choose a preset or customize headers manually
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Password Protection */}
+                <div className="flex items-start sm:items-center gap-3 p-3 border rounded-lg">
+                  <div className="flex-1 min-w-0">
+                    <Label className="text-sm font-medium flex items-center gap-1.5">
+                      <KeyRound className="h-4 w-4 shrink-0" />
+                      Password Protection
+                    </Label>
+                    <p className="text-xs text-muted-foreground">
+                      Require a password to access this environment.
+                    </p>
+                  </div>
+                  <Switch
+                    checked={formData.password_enabled}
+                    onCheckedChange={(checked) =>
+                      setFormData((prev) => ({
+                        ...prev,
+                        password_enabled: checked,
+                        password: checked ? prev.password : '',
+                      }))
+                    }
+                  />
+                </div>
+
+                {formData.password_enabled && (
+                  <div className="space-y-3 p-4 border rounded-lg bg-muted/30">
+                    <div>
+                      <Label>Password</Label>
+                      <Input
+                        type="password"
+                        value={formData.password}
+                        onChange={(e) =>
+                          setFormData((prev) => ({
+                            ...prev,
+                            password: e.target.value,
+                          }))
+                        }
+                        placeholder={
+                          environment.deployment_config?.security?.passwordProtection?.enabled
+                            ? 'Leave empty to keep current password'
+                            : 'Enter a password'
+                        }
+                      />
+                      <p className="text-xs text-muted-foreground mt-1">
+                        {environment.deployment_config?.security?.passwordProtection?.enabled
+                          ? 'A password is currently set. Enter a new one to change it, or leave empty to keep the current password.'
+                          : 'Set a password that visitors must enter to access this environment. The password is securely hashed.'}
                       </p>
                     </div>
                   </div>
@@ -809,6 +867,7 @@ export function EnvironmentConfigurationCard({
 
             <Button
               type="submit"
+              className="w-full sm:w-auto"
               disabled={updateEnvironmentSettings.isPending}
             >
               {updateEnvironmentSettings.isPending && (

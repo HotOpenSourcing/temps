@@ -51,6 +51,7 @@ pub mod repositories;
 pub mod request_sessions;
 pub mod roles;
 pub mod s3_sources;
+pub mod service_members;
 pub mod sessions;
 pub mod source_type;
 pub mod static_bundles;
@@ -70,6 +71,8 @@ pub mod settings;
 pub mod visitor;
 
 // Error tracking entities
+pub mod error_alert_fires;
+pub mod error_alert_rules;
 pub mod error_events;
 pub mod error_groups;
 pub mod project_dsns;

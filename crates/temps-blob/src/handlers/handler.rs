@@ -586,6 +586,9 @@ pub async fn blob_enable(
             service_type: ServiceType::Blob,
             version,
             parameters,
+            node_id: None,
+            topology: "standalone".to_string(),
+            members: Vec::new(),
         };
 
         // Create the service through ExternalServiceManager

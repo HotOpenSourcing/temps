@@ -112,6 +112,14 @@ pub struct SleepingEnvironmentEntry {
     pub wake_timeout_seconds: i32,
 }
 
+/// On-demand config for an awake environment that should be tracked for idle timeout.
+#[derive(Clone, Debug)]
+pub struct OnDemandConfigEntry {
+    pub environment_id: i32,
+    pub idle_timeout_seconds: i32,
+    pub wake_timeout_seconds: i32,
+}
+
 /// A single backend entry: network address plus container metadata for tracking.
 #[derive(Clone, Debug)]
 pub struct BackendEntry {
@@ -261,8 +269,9 @@ impl RouteInfo {
 /// - `http_wildcards`: Wildcard patterns for HTTP Host header routing
 /// - `tls_wildcards`: Wildcard patterns for TLS SNI routing
 ///
-/// Callback invoked after each route table reload with the list of sleeping environments.
-pub type OnSleepingCallback = Arc<dyn Fn(Vec<SleepingEnvironmentEntry>) + Send + Sync>;
+/// Callback invoked after each route table reload with sleeping environments and on-demand configs.
+pub type OnSleepingCallback =
+    Arc<dyn Fn(Vec<SleepingEnvironmentEntry>, Vec<OnDemandConfigEntry>) + Send + Sync>;
 
 pub struct CachedPeerTable {
     /// Exact hostname -> RouteInfo for HTTP routes (route_type = 'http')
@@ -799,15 +808,17 @@ impl CachedPeerTable {
                     .entry(env.id)
                     .or_insert_with(|| Arc::new(env.clone()));
 
-                // Fetch deployment if not cached
+                // Fetch deployment if not cached.
+                // Accept any state — if current_deployment_id points here, it should be routable.
+                // The previous "completed" filter caused a race: mark_deployment_complete sets
+                // current_deployment_id (fires PG NOTIFY) BEFORE setting state="completed",
+                // so the route table reload would skip the deployment and never confirm.
                 if !deployments_cache.contains_key(&deployment_id) {
                     if let Ok(Some(dep)) = deployments::Entity::find_by_id(deployment_id)
                         .one(self.db.as_ref())
                         .await
                     {
-                        if dep.state == "completed" {
-                            deployments_cache.insert(dep.id, Arc::new(dep));
-                        }
+                        deployments_cache.insert(dep.id, Arc::new(dep));
                     }
                 }
 
@@ -957,15 +968,13 @@ impl CachedPeerTable {
                 .or_insert_with(|| Arc::new(env.clone()));
 
             if let Some(deployment_id) = env.current_deployment_id {
-                // Fetch deployment if not cached
+                // Fetch deployment if not cached (accept any state — same rationale as section 4)
                 if !deployments_cache.contains_key(&deployment_id) {
                     if let Ok(Some(dep)) = deployments::Entity::find_by_id(deployment_id)
                         .one(self.db.as_ref())
                         .await
                     {
-                        if dep.state == "completed" {
-                            deployments_cache.insert(dep.id, Arc::new(dep));
-                        }
+                        deployments_cache.insert(dep.id, Arc::new(dep));
                     }
                 }
 
@@ -1084,13 +1093,36 @@ impl CachedPeerTable {
             );
         }
 
-        debug!(
+        info!(
             "Route table loaded with {} total entries ({} HTTP exact, {} TLS exact, {} HTTP wildcards, {} TLS wildcards)",
             route_count, http_routes_count, tls_routes_count, http_wildcards_count, tls_wildcards_count
         );
-        // Notify callback with sleeping environments (for on-demand wake-on-request)
+        // Collect on-demand configs for awake environments so the idle sweep can track them.
+        let on_demand_configs: Vec<OnDemandConfigEntry> = environments_cache
+            .values()
+            .filter(|env| !env.sleeping)
+            .filter_map(|env| {
+                let dc = env.deployment_config.as_ref()?;
+                if dc.on_demand {
+                    Some(OnDemandConfigEntry {
+                        environment_id: env.id,
+                        idle_timeout_seconds: dc.idle_timeout_seconds,
+                        wake_timeout_seconds: dc.wake_timeout_seconds,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        debug!(
+            "Found {} on-demand configs for idle tracking",
+            on_demand_configs.len()
+        );
+
+        // Notify callback with sleeping environments and on-demand configs
         if let Some(callback) = self.on_sleeping_callback.lock().as_ref() {
-            callback(sleeping_environments.clone());
+            callback(sleeping_environments.clone(), on_demand_configs);
         }
 
         Ok(sleeping_environments)
@@ -1109,6 +1141,30 @@ impl CachedPeerTable {
     /// Check if the route table is empty
     pub fn is_empty(&self) -> bool {
         self.routes.read().is_empty()
+    }
+
+    /// Check if any route in the table points to a specific deployment.
+    ///
+    /// Used by `mark_deployment_complete` to verify the proxy's in-memory route
+    /// table has actually loaded the new deployment — not just that the DB row
+    /// was written (which would always be true since we just wrote it).
+    pub fn has_route_for_deployment(&self, deployment_id: i32) -> bool {
+        let routes = self.routes.read();
+        routes.values().any(|route| {
+            route
+                .deployment
+                .as_ref()
+                .is_some_and(|d| d.id == deployment_id)
+        })
+    }
+}
+
+#[temps_core::async_trait::async_trait]
+impl temps_core::route_table::RouteTableRefresher for CachedPeerTable {
+    async fn refresh_routes(&self) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+        self.load_routes().await?;
+        let count = self.len() + self.http_routes.read().len() + self.tls_routes.read().len();
+        Ok(count)
     }
 }
 
@@ -1154,62 +1210,75 @@ impl RouteTableListener {
             "Started listening for route table changes on PostgreSQL channel 'route_table_changes'"
         );
 
-        // Spawn background task to handle notifications
+        // Spawn background task that combines:
+        // 1. PG NOTIFY events for immediate reloads (low latency)
+        // 2. Periodic sync every 10 seconds as self-healing fallback
+        //
+        // This ensures the route table stays in sync even if NOTIFY events
+        // are lost (connection drops, reconnect windows, parse failures).
         let peer_table = self.peer_table.clone();
         let queue = self.queue.clone();
         let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
+            // Don't pile up missed ticks if a reload takes longer than 10s
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // Skip the first immediate tick (we already loaded above)
+            interval.tick().await;
+
             loop {
-                match listener.recv().await {
-                    Ok(notification) => {
-                        debug!(
-                            "Received route table change notification: {}",
-                            notification.payload()
-                        );
+                tokio::select! {
+                    notification = listener.recv() => {
+                        match notification {
+                            Ok(n) => {
+                                debug!(
+                                    "Received route table change notification: {}",
+                                    n.payload()
+                                );
+                            }
+                            Err(e) => {
+                                error!("Listener error: {}", e);
 
-                        debug!("Route table synchronizing...");
+                                // Attempt to reconnect after error
+                                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
 
-                        if let Err(e) = peer_table.load_routes().await {
-                            error!("Failed to reload routes: {}", e);
-                        } else {
-                            let route_count = peer_table.len();
-                            debug!("Route table synchronized ({} entries)", route_count);
-
-                            // Notify via queue that routes have been reloaded.
-                            // This channel handles generic route_table_changes
-                            // (domains, custom_routes, etc.) so we don't have
-                            // environment/deployment context — those fields are None.
-                            let event = temps_core::Job::RouteTableUpdated(
-                                temps_core::RouteTableUpdatedJob {
-                                    environment_id: None,
-                                    deployment_id: None,
-                                    route_count,
-                                },
-                            );
-                            if let Err(e) = queue.send(event).await {
-                                error!("Failed to send RouteTableUpdated event: {}", e);
+                                match PgListener::connect_with(&pool).await {
+                                    Ok(mut new_listener) => {
+                                        if let Err(e) = new_listener.listen("route_table_changes").await {
+                                            error!("Failed to re-subscribe to notifications: {}", e);
+                                        } else {
+                                            listener = new_listener;
+                                            info!("Reconnected to route table notification listener");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to reconnect listener: {}", e);
+                                        warn!("Route table updates will not be received until reconnection succeeds");
+                                    }
+                                }
+                                // Still fall through to reload routes below
                             }
                         }
                     }
-                    Err(e) => {
-                        error!("Listener error: {}", e);
+                    _ = interval.tick() => {
+                        debug!("Periodic route table sync triggered");
+                    }
+                }
 
-                        // Attempt to reconnect after error
-                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                // Reload routes regardless of whether triggered by NOTIFY or timer
+                if let Err(e) = peer_table.load_routes().await {
+                    error!("Failed to reload routes: {}", e);
+                } else {
+                    let route_count = peer_table.len();
+                    debug!("Route table synchronized ({} entries)", route_count);
 
-                        match PgListener::connect_with(&pool).await {
-                            Ok(mut new_listener) => {
-                                if let Err(e) = new_listener.listen("route_table_changes").await {
-                                    error!("Failed to re-subscribe to notifications: {}", e);
-                                } else {
-                                    listener = new_listener;
-                                    info!("Reconnected to route table notification listener");
-                                }
-                            }
-                            Err(e) => {
-                                error!("Failed to reconnect listener: {}", e);
-                                warn!("Route table updates will not be received until reconnection succeeds");
-                            }
-                        }
+                    let event =
+                        temps_core::Job::RouteTableUpdated(temps_core::RouteTableUpdatedJob {
+                            environment_id: None,
+                            deployment_id: None,
+                            route_count,
+                        });
+                    if let Err(e) = queue.send(event).await {
+                        error!("Failed to send RouteTableUpdated event: {}", e);
                     }
                 }
             }

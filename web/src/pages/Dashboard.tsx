@@ -13,6 +13,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { useDashboardAnalytics } from '@/hooks/useDashboardAnalytics'
+import { useDashboardHealth } from '@/hooks/useDashboardHealth'
 import { usePageTitle } from '@/hooks/usePageTitle'
 import { useQuery } from '@tanstack/react-query'
 import { subDays } from 'date-fns'
@@ -115,6 +116,9 @@ export function Dashboard() {
     startDate,
     endDate
   )
+
+  // Batch fetch health summaries for all visible projects
+  const dashboardHealth = useDashboardHealth(projectIds)
 
   // Fetch general stats
   const generalStatsQuery = useQuery({
@@ -311,6 +315,11 @@ export function Dashboard() {
                   }
                   analyticsLoading={dashboardAnalytics.isLoading}
                   analyticsError={dashboardAnalytics.isError}
+                  health={
+                    dashboardHealth.data?.projects?.[
+                      String(project.id)
+                    ]
+                  }
                 />
               ))}
             </div>

@@ -555,36 +555,6 @@ impl LoadBalancer {
         }
     }
 
-    /// Generate HTML for the "waking up" interstitial page.
-    /// Displayed when a request hits a sleeping on-demand environment.
-    /// Auto-refreshes every 3 seconds until the environment is awake.
-    fn generate_waking_html() -> String {
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="refresh" content="3">
-    <title>Waking Up</title>
-    <style>
-        body { font-family: system-ui, -apple-system, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background: #0f172a; color: #e2e8f0; }
-        .container { text-align: center; max-width: 480px; padding: 40px; }
-        .spinner { width: 48px; height: 48px; border: 4px solid #334155; border-top-color: #3b82f6; border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 24px; }
-        @keyframes spin { to { transform: rotate(360deg); } }
-        h1 { font-size: 1.5rem; margin-bottom: 12px; color: #f1f5f9; }
-        p { color: #94a3b8; line-height: 1.6; margin: 0; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="spinner"></div>
-        <h1>Waking Up</h1>
-        <p>This environment is starting up. The page will refresh automatically.</p>
-    </div>
-</body>
-</html>"#.to_string()
-    }
-
     /// Generate HTML for CAPTCHA challenge page
     fn generate_challenge_html(
         project_name: &str,
@@ -1968,6 +1938,10 @@ impl ProxyHttp for LoadBalancer {
             ctx.ip_address = Some(client_ip.to_string());
         }
 
+        // SECURITY: Strip client-supplied X-Temps-Demo-Mode header to prevent
+        // bypass of authentication. Only the proxy should set this header.
+        let _ = session.req_header_mut().remove_header("X-Temps-Demo-Mode");
+
         // Detect demo subdomain and add demo mode header
         // This allows the auth middleware to auto-authenticate as demo user
         // Demo mode must be explicitly enabled in settings
@@ -2015,53 +1989,64 @@ impl ProxyHttp for LoadBalancer {
 
         // On-demand: check if this host maps to a sleeping environment.
         // Sleeping environments are excluded from the route table, so we must
-        // check before project context resolution. Serve a "waking up" page and
-        // trigger an async wake.
+        // check before project context resolution. Wake the environment inline
+        // and hold the request until the container is ready and routes are reloaded.
         if let Some(ref on_demand) = self.on_demand_manager {
             let host_without_port = ctx.host.split(':').next().unwrap_or(&ctx.host);
             if let Some(sleeping_info) = on_demand.get_sleeping_environment(host_without_port) {
                 info!(
                     environment_id = sleeping_info.environment_id,
                     host = %ctx.host,
-                    "Request hit sleeping environment, serving wake page"
+                    "Request hit sleeping environment, waking inline"
                 );
 
-                // Trigger async wake (doesn't block the response)
-                let on_demand_clone = Arc::clone(on_demand);
                 let env_id = sleeping_info.environment_id;
                 let wake_timeout = sleeping_info.wake_timeout_seconds;
-                tokio::spawn(async move {
-                    match on_demand_clone.wake_environment(env_id, wake_timeout).await {
-                        Ok(()) => {
-                            info!(environment_id = env_id, "Environment woke up successfully");
-                        }
-                        Err(e) => {
-                            error!(
-                                environment_id = env_id,
-                                error = %e,
-                                "Failed to wake environment"
-                            );
-                        }
+
+                // Block until the environment is fully awake (containers healthy)
+                match on_demand.wake_environment(env_id, wake_timeout).await {
+                    Ok(()) => {
+                        info!(
+                            environment_id = env_id,
+                            "Environment woke up, waiting for route reload"
+                        );
+
+                        // Wait for the route table to reload so resolve_context works
+                        let reload_timeout = std::time::Duration::from_secs(10);
+                        let _ = on_demand.wait_for_route_reload(reload_timeout).await;
+
+                        // Fall through to normal request handling — don't return Ok(true)
                     }
-                });
+                    Err(e) => {
+                        error!(
+                            environment_id = env_id,
+                            error = %e,
+                            "Failed to wake environment"
+                        );
 
-                // Serve a "waking up" HTML page with auto-refresh
-                let html = Self::generate_waking_html();
-                let html_bytes = Bytes::from(html);
+                        // Wake failed — return 503 with Retry-After
+                        let mut response =
+                            ResponseHeader::build(StatusCode::SERVICE_UNAVAILABLE, None)?;
+                        response.insert_header("Retry-After", "5")?;
+                        response.insert_header("Cache-Control", "no-store")?;
+                        response.insert_header("X-Request-ID", &ctx.request_id)?;
+                        response.insert_header("Content-Type", "application/json")?;
 
-                let mut response = ResponseHeader::build(StatusCode::SERVICE_UNAVAILABLE, None)?;
-                response.insert_header("Content-Type", "text/html; charset=utf-8")?;
-                response.insert_header("Retry-After", "3")?;
-                response.insert_header("Cache-Control", "no-store")?;
-                response.insert_header("X-Request-ID", &ctx.request_id)?;
+                        let body_bytes = Bytes::from(format!(
+                            r#"{{"status":"wake_failed","environment_id":{},"message":"Failed to start environment: {}"}}"#,
+                            env_id,
+                            e.to_string().replace('"', "\\\"")
+                        ));
 
-                session
-                    .write_response_header(Box::new(response), false)
-                    .await?;
-                session.write_response_body(Some(html_bytes), true).await?;
+                        session
+                            .write_response_header(Box::new(response), false)
+                            .await?;
+                        session.write_response_body(Some(body_bytes), true).await?;
 
-                ctx.routing_status = "sleeping".to_string();
-                return Ok(true);
+                        ctx.routing_status = "wake_failed".to_string();
+                        return Ok(true);
+                    }
+                }
             }
         }
 
@@ -2197,6 +2182,142 @@ impl ProxyHttp for LoadBalancer {
                         "Challenge required",
                         pingora_core::Error::new(pingora::ErrorType::HTTPStatus(403)),
                     ));
+                }
+            }
+
+            // Password wall: check if environment has password protection enabled
+            let password_protection = project_ctx
+                .environment
+                .deployment_config
+                .as_ref()
+                .and_then(|dc| dc.security.as_ref())
+                .and_then(|s| s.password_protection.as_ref())
+                .filter(|pp| pp.enabled);
+
+            if let Some(pp) = password_protection {
+                let password_hash = pp.password_hash.clone();
+                let env_id = project_ctx.environment.id;
+                let project_name = &project_ctx.project.name;
+                let environment_name = &project_ctx.environment.name;
+
+                // Check if this is the password verify POST endpoint
+                if ctx.path == "/_temps/password-verify" && ctx.method == "POST" {
+                    // Read the POST body to get the password
+                    let body = session.read_request_body().await.map_err(|e| {
+                        error!("Failed to read password verify body: {}", e);
+                        e
+                    })?;
+
+                    let body_str = body
+                        .as_ref()
+                        .map(|b| String::from_utf8_lossy(b).to_string())
+                        .unwrap_or_default();
+
+                    // Parse form data (application/x-www-form-urlencoded)
+                    let params: Vec<(String, String)> =
+                        url::form_urlencoded::parse(body_str.as_bytes())
+                            .into_owned()
+                            .collect();
+
+                    let password = params
+                        .iter()
+                        .find(|(k, _)| k == "password")
+                        .map(|(_, v)| v.as_str())
+                        .unwrap_or("");
+
+                    let redirect = params
+                        .iter()
+                        .find(|(k, _)| k == "redirect")
+                        .map(|(_, v)| v.as_str())
+                        .unwrap_or("/");
+
+                    if crate::handler::password_wall::verify_password(password, &password_hash) {
+                        // Password correct — set cookie and redirect
+                        let host = ctx.host.clone();
+                        let set_cookie = crate::handler::password_wall::build_set_cookie_header(
+                            env_id,
+                            &password_hash,
+                            &host,
+                        );
+
+                        let mut resp = ResponseHeader::build(303, None)?;
+                        resp.insert_header("Location", redirect)?;
+                        resp.insert_header("Set-Cookie", &set_cookie)?;
+                        resp.insert_header("Cache-Control", "no-store")?;
+                        resp.insert_header("X-Request-ID", &ctx.request_id)?;
+
+                        session.write_response_header(Box::new(resp), true).await?;
+                        ctx.routing_status = "password_verified".to_string();
+                        return Ok(true);
+                    } else {
+                        // Wrong password — show form again with error
+                        let html = crate::handler::password_wall::generate_password_form_html(
+                            redirect,
+                            true,
+                            project_name,
+                            environment_name,
+                        );
+                        let html_bytes = Bytes::from(html);
+
+                        let mut resp = ResponseHeader::build(StatusCode::OK, None)?;
+                        resp.insert_header("Content-Type", "text/html; charset=utf-8")?;
+                        resp.insert_header("Cache-Control", "no-store")?;
+                        resp.insert_header("X-Request-ID", &ctx.request_id)?;
+
+                        session.write_response_header(Box::new(resp), false).await?;
+                        session.write_response_body(Some(html_bytes), true).await?;
+                        ctx.routing_status = "password_wrong".to_string();
+                        return Ok(true);
+                    }
+                }
+
+                // Check for valid password cookie
+                let has_valid_cookie = session
+                    .req_header()
+                    .headers
+                    .get_all("Cookie")
+                    .iter()
+                    .filter_map(|h| h.to_str().ok())
+                    .flat_map(|s| Cookie::split_parse(s).filter_map(Result::ok))
+                    .find(|c| c.name() == crate::handler::password_wall::PASSWORD_COOKIE_NAME)
+                    .map(|c| {
+                        crate::handler::password_wall::validate_cookie(
+                            c.value(),
+                            env_id,
+                            &password_hash,
+                        )
+                    })
+                    .unwrap_or(false);
+
+                if !has_valid_cookie {
+                    // No valid cookie — show password form
+                    let current_path = if let Some(ref qs) = ctx.query_string {
+                        if qs.is_empty() {
+                            ctx.path.clone()
+                        } else {
+                            format!("{}?{}", ctx.path, qs)
+                        }
+                    } else {
+                        ctx.path.clone()
+                    };
+
+                    let html = crate::handler::password_wall::generate_password_form_html(
+                        &current_path,
+                        false,
+                        project_name,
+                        environment_name,
+                    );
+                    let html_bytes = Bytes::from(html);
+
+                    let mut resp = ResponseHeader::build(StatusCode::OK, None)?;
+                    resp.insert_header("Content-Type", "text/html; charset=utf-8")?;
+                    resp.insert_header("Cache-Control", "no-store")?;
+                    resp.insert_header("X-Request-ID", &ctx.request_id)?;
+
+                    session.write_response_header(Box::new(resp), false).await?;
+                    session.write_response_body(Some(html_bytes), true).await?;
+                    ctx.routing_status = "password_wall".to_string();
+                    return Ok(true);
                 }
             }
         } else {
@@ -3003,6 +3124,9 @@ impl ProxyHttp for LoadBalancer {
         if let Err(e) = header.insert_header(header::CACHE_CONTROL, "private, no-store") {
             error!("Failed to insert CACHE_CONTROL header: {:?}", e);
         }
+        if let Err(e) = header.insert_header("content-type", "text/html; charset=utf-8") {
+            error!("Failed to insert content-type header: {:?}", e);
+        }
 
         if let Err(e) = session.write_response_header(Box::new(header), false).await {
             error!("Failed to write response header: {:?}", e);
@@ -3012,8 +3136,20 @@ impl ProxyHttp for LoadBalancer {
             };
         }
 
+        const SERVICE_UNAVAILABLE_BODY: &str = concat!(
+            "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Service Unavailable</title>",
+            "<style>body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;display:flex;",
+            "justify-content:center;align-items:center;min-height:100vh;margin:0;background:#0a0a0a;",
+            "color:#e5e5e5}div{text-align:center;max-width:480px;padding:2rem}h1{font-size:1.5rem;",
+            "margin:0 0 .5rem}p{color:#a3a3a3;margin:.5rem 0;font-size:.9rem}</style></head>",
+            "<body><div><h1>Service Unavailable</h1>",
+            "<p>This application is temporarily unable to handle requests.</p>",
+            "<p style=\"color:#737373;font-size:.8rem\">If you are the site owner, check that your deployment is running.</p>",
+            "</div></body></html>"
+        );
+
         if let Err(e) = session
-            .write_response_body(Some(Bytes::from("Service Unavailable")), true)
+            .write_response_body(Some(Bytes::from(SERVICE_UNAVAILABLE_BODY)), true)
             .await
         {
             error!("Failed to write response body: {:?}", e);
@@ -3031,7 +3167,7 @@ impl ProxyHttp for LoadBalancer {
                 .and_then(|v| v.parse::<i64>().ok());
 
             // For failed requests, response size is the error message size
-            let response_size = Some("Service Unavailable".len() as i64);
+            let response_size = Some(SERVICE_UNAVAILABLE_BODY.len() as i64);
 
             let proxy_log_request = CreateProxyLogRequest {
                 method: ctx.method.clone(),

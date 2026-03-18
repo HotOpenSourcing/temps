@@ -12,6 +12,9 @@ pub struct AppState {
     pub env_var_service: Arc<EnvVarService>,
     pub audit_service: Arc<dyn AuditLogger>,
     pub deployment_service: Arc<dyn DeploymentCanceller>,
+    /// Optional on-demand waker for starting/stopping containers during wake/sleep.
+    /// Only available when the proxy's OnDemandManager is registered.
+    pub on_demand_waker: Option<Arc<dyn temps_core::OnDemandWaker>>,
 }
 
 pub fn create_environment_app_state(
@@ -19,12 +22,14 @@ pub fn create_environment_app_state(
     env_var_service: Arc<EnvVarService>,
     audit_service: Arc<dyn AuditLogger>,
     deployment_service: Arc<dyn DeploymentCanceller>,
+    on_demand_waker: Option<Arc<dyn temps_core::OnDemandWaker>>,
 ) -> Arc<AppState> {
     Arc::new(AppState {
         environment_service,
         env_var_service,
         audit_service,
         deployment_service,
+        on_demand_waker,
     })
 }
 
@@ -90,10 +95,35 @@ pub struct EnvironmentResponse {
     /// When true, the environment's containers are currently stopped due to
     /// inactivity (on-demand mode) and will start on the next request.
     pub sleeping: bool,
+    /// Last proxied request timestamp (epoch millis) for on-demand environments.
+    /// NULL when on-demand is disabled or no traffic has been received yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<i64>,
+    /// Estimated time (epoch millis) when the environment will go to sleep
+    /// based on last activity + idle timeout. NULL when sleeping or on-demand disabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_sleep_at: Option<i64>,
 }
 
 impl From<temps_entities::environments::Model> for EnvironmentResponse {
     fn from(env: temps_entities::environments::Model) -> Self {
+        let last_activity_at = env.last_activity_at.map(|t| t.timestamp_millis());
+
+        // Compute estimated sleep time: last_activity + idle_timeout
+        // Only when on-demand is enabled, env is awake, and we have activity data
+        let estimated_sleep_at = if !env.sleeping {
+            env.deployment_config
+                .as_ref()
+                .filter(|dc| dc.on_demand)
+                .and_then(|dc| {
+                    env.last_activity_at.map(|last| {
+                        last.timestamp_millis() + (dc.idle_timeout_seconds as i64 * 1000)
+                    })
+                })
+        } else {
+            None
+        };
+
         Self {
             id: env.id,
             project_id: env.project_id,
@@ -108,6 +138,8 @@ impl From<temps_entities::environments::Model> for EnvironmentResponse {
             deployment_config: env.deployment_config,
             protected: env.protected,
             sleeping: env.sleeping,
+            last_activity_at,
+            estimated_sleep_at,
         }
     }
 }
@@ -191,6 +223,12 @@ pub struct UpdateEnvironmentSettingsRequest {
     /// Max seconds to wait for containers to start on wake (5-120). Default: 30.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wake_timeout_seconds: Option<i32>,
+    /// Set a password to protect this environment. The proxy will show an HTML
+    /// password form before allowing access. The password is bcrypt-hashed
+    /// server-side and never stored in plaintext.
+    /// Send an empty string to remove password protection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]

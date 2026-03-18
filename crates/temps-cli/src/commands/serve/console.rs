@@ -430,10 +430,21 @@ async fn serve_static_file(req: Request) -> Response {
                 .first_or_octet_stream()
                 .to_string();
 
+            // Hashed assets (JS/CSS bundles from Rsbuild) get aggressive caching.
+            // index.html and other non-hashed files must revalidate every time so
+            // deploying a new Temps version immediately picks up new bundle references.
+            let cache_control = if path == "index.html" || path == "/" {
+                "no-cache, no-store, must-revalidate"
+            } else if path.starts_with("static/") || path.starts_with("assets/") {
+                "public, max-age=31536000, immutable"
+            } else {
+                "public, max-age=0, must-revalidate"
+            };
+
             Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, mime_type)
-                .header(header::CACHE_CONTROL, "public, max-age=3600")
+                .header(header::CACHE_CONTROL, cache_control)
                 .body(Body::from(file.contents()))
                 .unwrap()
         }
@@ -518,6 +529,7 @@ pub struct ConsoleApiParams {
     pub queue: Arc<dyn temps_core::JobQueue>,
     pub ready_signal: Option<tokio::sync::oneshot::Sender<()>>,
     pub additional_templates: Vec<std::path::PathBuf>,
+    pub on_demand_waker: Option<Arc<dyn temps_core::OnDemandWaker>>,
 }
 
 /// Initialize and start the console API server
@@ -531,6 +543,7 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
         queue,
         ready_signal,
         additional_templates,
+        on_demand_waker,
     } = params;
     // PRE-VALIDATE all plugin dependencies BEFORE initializing plugin manager
     // This ensures clear error messages if any critical resources are missing
@@ -608,6 +621,9 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
     // This is used by analytics-events and other plugins that need to resolve hosts
     // Note: Route table listener is started in serve/mod.rs to avoid duplicate listeners
     service_context.register_service(route_table.clone());
+    service_context.register_service(
+        route_table.clone() as Arc<dyn temps_core::route_table::RouteTableRefresher>
+    );
 
     // Register TemplateService - provides project templates from YAML configuration
     // Bundled templates are loaded automatically; external file in data_dir can override them
@@ -631,6 +647,12 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
     }
 
     service_context.register_service(template_service);
+
+    // Register OnDemandWaker so environment wake/sleep endpoints can manage containers
+    if let Some(waker) = on_demand_waker {
+        service_context.register_service(waker as Arc<dyn temps_core::OnDemandWaker>);
+        debug!("Registered OnDemandWaker for environment wake/sleep endpoints");
+    }
 
     // Register plugins in dependency order:
     // 1. ConfigPlugin - provides configuration services

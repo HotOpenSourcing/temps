@@ -26,6 +26,12 @@ use temps_entities::{backup_schedules::Model as BackupSchedule, s3_sources::Mode
 use temps_providers::ExternalServiceManager;
 use tokio_stream::StreamExt;
 
+/// POSIX-safe shell escaping: wraps value in single quotes, escaping any
+/// embedded single quotes. Safe for use in `sh -c` command strings.
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 #[derive(Error, Debug)]
 pub enum BackupError {
     #[error("Database error: {0}")]
@@ -1190,7 +1196,7 @@ impl BackupService {
         let stderr_path = format!("/backup/{}.stderr", uuid::Uuid::new_v4());
         let pg_dump_shell_cmd = format!(
             "pg_dump --format=plain --clean --if-exists --no-password --host={} --port={} --username={} --dbname={} 2>{} | gzip > {}",
-            host, port_str, username, database, stderr_path, container_backup_path
+            shell_escape(host), shell_escape(&port_str), shell_escape(username), shell_escape(database), stderr_path, container_backup_path
         );
 
         let exec = docker
@@ -2234,14 +2240,18 @@ impl BackupService {
             // These errors are benign — the actual CREATE TABLE and COPY statements succeed.
             let cmd = format!(
                 "psql --no-password --host={} --port={} --username={} --dbname={} --file={}",
-                host, port_str, username, database, container_restore_path
+                shell_escape(host),
+                shell_escape(&port_str),
+                shell_escape(username),
+                shell_escape(database),
+                container_restore_path
             );
             ("psql", cmd)
         } else {
             // Custom format: use pg_restore
             let cmd = format!(
                 "pg_restore --verbose --clean --if-exists --no-password --host={} --port={} --username={} --dbname={} {}",
-                host, port_str, username, database, container_restore_path
+                shell_escape(host), shell_escape(&port_str), shell_escape(username), shell_escape(database), container_restore_path
             );
             ("pg_restore", cmd)
         };
@@ -2876,6 +2886,47 @@ impl BackupService {
         for backup in old_backups {
             if let Err(e) = self.delete_backup(&backup.backup_id).await {
                 error!("Failed to delete old backup {}: {}", backup.backup_id, e);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Enforce retention for every active backup schedule.
+    /// Deletes backups that are older than each schedule's `retention_period` days.
+    async fn enforce_retention(&self) -> Result<()> {
+        let schedules = temps_entities::backup_schedules::Entity::find()
+            .filter(temps_entities::backup_schedules::Column::Enabled.eq(true))
+            .all(self.db.as_ref())
+            .await?;
+
+        for schedule in &schedules {
+            if schedule.retention_period > 0 {
+                let cutoff = Utc::now() - Duration::days(schedule.retention_period as i64);
+                let old_backups = temps_entities::backups::Entity::find()
+                    .filter(temps_entities::backups::Column::ScheduleId.eq(Some(schedule.id)))
+                    .filter(temps_entities::backups::Column::StartedAt.lt(cutoff))
+                    .all(self.db.as_ref())
+                    .await?;
+
+                if !old_backups.is_empty() {
+                    info!(
+                        "Retention cleanup: deleting {} backup(s) older than {} days for schedule {} ({})",
+                        old_backups.len(),
+                        schedule.retention_period,
+                        schedule.id,
+                        schedule.name
+                    );
+                }
+
+                for backup in old_backups {
+                    if let Err(e) = self.delete_backup(&backup.backup_id).await {
+                        error!(
+                            "Failed to delete expired backup {} for schedule {}: {}",
+                            backup.backup_id, schedule.id, e
+                        );
+                    }
+                }
             }
         }
 
@@ -3622,6 +3673,19 @@ impl BackupService {
                 }
                 _ = cancellation_token.cancelled() => {
                     info!("Backup scheduler received cancellation signal");
+                    return Ok(());
+                }
+            }
+
+            // Enforce retention: delete backups older than the schedule's retention period
+            tokio::select! {
+                result = self.enforce_retention() => {
+                    if let Err(e) = result {
+                        error!("Error enforcing backup retention: {}", e);
+                    }
+                }
+                _ = cancellation_token.cancelled() => {
+                    info!("Backup scheduler received cancellation signal during retention cleanup");
                     return Ok(());
                 }
             }

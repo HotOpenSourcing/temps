@@ -23,6 +23,7 @@ use utoipa::{OpenApi, ToSchema};
 pub struct SettingsState {
     pub config_service: Arc<ConfigService>,
     pub audit_service: Arc<dyn AuditLogger>,
+    pub route_table_refresher: Option<Arc<dyn temps_core::route_table::RouteTableRefresher>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -68,6 +69,13 @@ pub struct GenerateJoinTokenResponse {
 pub struct JoinTokenStatusResponse {
     /// Whether a join token has been configured
     pub has_token: bool,
+}
+
+/// Public settings response containing only non-sensitive feature flags
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct PublicSettingsResponse {
+    /// Whether demo mode is enabled
+    pub demo_enabled: bool,
 }
 
 /// Safe response for application settings that masks sensitive fields
@@ -156,11 +164,13 @@ impl From<AppSettings> for AppSettingsResponse {
 #[derive(OpenApi)]
 #[openapi(
     paths(
+        get_public_settings,
         get_settings,
         update_settings,
         generate_join_token,
         revoke_join_token,
         get_join_token_status,
+        refresh_route_table,
     ),
     components(schemas(
         AppSettings,
@@ -168,9 +178,11 @@ impl From<AppSettings> for AppSettingsResponse {
         ContainerLogSettings,
         DnsProviderSettingsMasked,
         DockerRegistrySettingsMasked,
+        PublicSettingsResponse,
         SettingsUpdateResponse,
         GenerateJoinTokenResponse,
         JoinTokenStatusResponse,
+        RouteRefreshResponse,
     )),
     info(
         title = "Settings API",
@@ -183,11 +195,44 @@ pub struct SettingsApiDoc;
 
 pub fn configure_routes() -> Router<Arc<SettingsState>> {
     Router::new()
+        .route("/settings/public", get(get_public_settings))
         .route("/settings", get(get_settings))
         .route("/settings", put(update_settings))
         .route("/settings/join-token/generate", post(generate_join_token))
         .route("/settings/join-token", delete(revoke_join_token))
         .route("/settings/join-token/status", get(get_join_token_status))
+        .route("/settings/routes/refresh", post(refresh_route_table))
+}
+
+/// Get public settings (no authentication required)
+///
+/// Returns non-sensitive feature flags like demo mode status.
+/// This endpoint is intentionally unauthenticated so the login page can use it.
+#[utoipa::path(
+    tag = "Settings",
+    get,
+    path = "/settings/public",
+    responses(
+        (status = 200, description = "Public settings", body = PublicSettingsResponse),
+        (status = 500, description = "Internal server error")
+    )
+)]
+async fn get_public_settings(
+    State(app_state): State<Arc<SettingsState>>,
+) -> Result<impl IntoResponse, Problem> {
+    match app_state.config_service.get_settings().await {
+        Ok(settings) => Ok(Json(PublicSettingsResponse {
+            demo_enabled: settings.demo_mode.enabled,
+        })),
+        Err(e) => {
+            tracing::error!("Failed to get public settings: {}", e);
+            Err(ErrorBuilder::new(StatusCode::INTERNAL_SERVER_ERROR)
+                .type_("https://temps.sh/probs/settings-error")
+                .title("Settings Error")
+                .detail("Failed to get public settings".to_string())
+                .build())
+        }
+    }
 }
 
 /// Get application settings
@@ -521,5 +566,65 @@ async fn get_join_token_status(
 
     Ok(Json(JoinTokenStatusResponse {
         has_token: settings.multi_node.join_token_hash.is_some(),
+    }))
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct RouteRefreshResponse {
+    /// Number of routes loaded
+    route_count: usize,
+    /// Human-readable message
+    message: String,
+}
+
+/// Manually refresh the proxy route table
+///
+/// Reloads all routes from the database into the in-memory proxy cache.
+/// Useful as a workaround when routes are out of sync.
+#[utoipa::path(
+    tag = "Settings",
+    post,
+    path = "/settings/routes/refresh",
+    responses(
+        (status = 200, description = "Route table refreshed", body = RouteRefreshResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Insufficient permissions"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn refresh_route_table(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<SettingsState>>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsWrite);
+
+    let refresher = app_state.route_table_refresher.as_ref().ok_or_else(|| {
+        ErrorBuilder::new(StatusCode::INTERNAL_SERVER_ERROR)
+            .title("Route Table Unavailable")
+            .detail("Route table refresher is not configured")
+            .build()
+    })?;
+
+    let route_count = refresher.refresh_routes().await.map_err(|e| {
+        error!("Failed to refresh route table: {}", e);
+        ErrorBuilder::new(StatusCode::INTERNAL_SERVER_ERROR)
+            .title("Route Refresh Failed")
+            .detail(format!("Failed to refresh route table: {}", e))
+            .build()
+    })?;
+
+    info!(
+        "Route table manually refreshed by user {} ({} routes loaded)",
+        auth.user_id(),
+        route_count
+    );
+
+    Ok(Json(RouteRefreshResponse {
+        route_count,
+        message: format!(
+            "Route table refreshed successfully ({} routes loaded)",
+            route_count
+        ),
     }))
 }

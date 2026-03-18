@@ -1,0 +1,80 @@
+use async_trait::async_trait;
+use sea_orm::entity::prelude::*;
+use sea_orm::{ActiveValue::Set, ConnectionTrait, DbErr};
+use serde::{Deserialize, Serialize};
+use temps_core::DBDateTime;
+
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq, Serialize, Deserialize)]
+#[sea_orm(table_name = "service_members")]
+pub struct Model {
+    #[sea_orm(primary_key)]
+    pub id: i32,
+    pub service_id: i32,
+    /// Node this member runs on. NULL = local node (control plane).
+    pub node_id: Option<i32>,
+    /// Service-type-specific role: 'primary', 'replica', 'monitor', 'arbiter', 'sentinel', 'node'
+    pub role: String,
+    pub container_id: Option<String>,
+    pub container_name: String,
+    /// WireGuard IP or DNS name for inter-member communication
+    pub hostname: Option<String>,
+    pub port: Option<i32>,
+    pub status: String,
+    /// Stable member identity (member-0, member-1, etc.)
+    pub ordinal: i32,
+    /// Encrypted member-specific config overrides
+    pub config: Option<String>,
+    pub created_at: DBDateTime,
+    pub updated_at: DBDateTime,
+}
+
+#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+pub enum Relation {
+    #[sea_orm(
+        belongs_to = "super::external_services::Entity",
+        from = "Column::ServiceId",
+        to = "super::external_services::Column::Id"
+    )]
+    Service,
+    #[sea_orm(
+        belongs_to = "super::nodes::Entity",
+        from = "Column::NodeId",
+        to = "super::nodes::Column::Id"
+    )]
+    Node,
+}
+
+impl Related<super::external_services::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Service.def()
+    }
+}
+
+impl Related<super::nodes::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Node.def()
+    }
+}
+
+#[async_trait]
+impl ActiveModelBehavior for ActiveModel {
+    async fn before_save<C>(mut self, _db: &C, insert: bool) -> Result<Self, DbErr>
+    where
+        C: ConnectionTrait,
+    {
+        let now = chrono::Utc::now();
+
+        if insert {
+            if self.created_at.is_not_set() {
+                self.created_at = Set(now);
+            }
+            if self.updated_at.is_not_set() {
+                self.updated_at = Set(now);
+            }
+        } else {
+            self.updated_at = Set(now);
+        }
+
+        Ok(self)
+    }
+}

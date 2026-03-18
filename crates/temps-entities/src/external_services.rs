@@ -20,6 +20,11 @@ pub struct Model {
     pub config: Option<String>,
     /// Node this service runs on. NULL = local node (single-node mode).
     pub node_id: Option<i32>,
+    /// Service topology: 'standalone' (single container) or 'cluster' (multiple members).
+    #[sea_orm(default_value = "standalone")]
+    pub topology: String,
+    /// Error message from failed initialization (null if no error).
+    pub error_message: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -28,6 +33,8 @@ pub enum Relation {
     Backups,
     #[sea_orm(has_many = "super::project_services::Entity")]
     ProjectServices,
+    #[sea_orm(has_many = "super::service_members::Entity")]
+    Members,
     #[sea_orm(
         belongs_to = "super::nodes::Entity",
         from = "Column::NodeId",
@@ -45,6 +52,12 @@ impl Related<super::external_service_backups::Entity> for Entity {
 impl Related<super::project_services::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::ProjectServices.def()
+    }
+}
+
+impl Related<super::service_members::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Members.def()
     }
 }
 

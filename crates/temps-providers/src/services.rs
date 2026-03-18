@@ -1,22 +1,28 @@
 use crate::externalsvc::{
-    mongodb::MongodbService, postgres::PostgresService, redis::RedisService, rustfs::RustfsService,
-    s3::S3Service, AvailableContainer, ExternalService, ServiceConfig, ServiceType,
+    mongodb::MongodbService, postgres::PostgresService, postgres_cluster::PostgresClusterService,
+    redis::RedisService, rustfs::RustfsService, s3::S3Service, AvailableContainer,
+    ClusterMemberSpec, ExternalService, ServiceConfig, ServiceType,
 };
 use crate::parameter_strategies;
+use crate::remote_service_client::{
+    RemotePortMapping, RemoteServiceClient, RemoteServiceCreateParams,
+};
 use crate::types::EnvironmentVariableInfo;
 use anyhow::Result;
 use bollard::Docker;
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
-    QueryOrder, Set, TransactionTrait,
+    sea_query::Expr, ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait,
+    PaginatorTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use temps_entities::{external_service_backups, external_services, project_services, projects};
+use temps_entities::{
+    external_service_backups, external_services, nodes, project_services, projects, service_members,
+};
 use thiserror::Error;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 // use crate::routes::types::external_services::EnvironmentVariableInfo;
 use temps_core::EncryptionService;
 // Add these constants at the top of the file proper key management
@@ -133,6 +139,29 @@ pub struct CreateExternalServiceRequest {
     pub service_type: ServiceType,
     pub version: Option<String>,
     pub parameters: HashMap<String, serde_json::Value>,
+    /// Target node ID for the service. None = local (control plane).
+    /// For cluster topology, this is ignored (members specify their own node_ids).
+    pub node_id: Option<i32>,
+    /// Service topology: "standalone" (default, single container) or "cluster" (HA multi-member).
+    #[serde(default = "default_topology")]
+    pub topology: String,
+    /// Cluster member specifications. Required when topology is "cluster".
+    /// Each member specifies a role, target node, and ordinal.
+    #[serde(default)]
+    pub members: Vec<ClusterMemberRequest>,
+}
+
+fn default_topology() -> String {
+    "standalone".to_string()
+}
+
+/// Request spec for a single cluster member.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ClusterMemberRequest {
+    /// Service-type-specific role (e.g., "monitor", "primary", "replica")
+    pub role: String,
+    /// Target worker node ID. None = local (control plane).
+    pub node_id: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -190,6 +219,29 @@ pub struct ExternalServiceInfo {
     pub connection_info: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// Node ID where the service runs. None = control plane (local).
+    /// For cluster topology, this is None (members have their own node_ids).
+    pub node_id: Option<i32>,
+    /// Service topology: "standalone" or "cluster".
+    pub topology: String,
+    /// Cluster members (empty for standalone services).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<ServiceMemberInfo>,
+    /// Error message from failed initialization (None if no error).
+    pub error_message: Option<String>,
+}
+
+/// Public info about a cluster member.
+#[derive(Debug, Clone, Serialize)]
+pub struct ServiceMemberInfo {
+    pub id: i32,
+    pub role: String,
+    pub node_id: Option<i32>,
+    pub container_name: String,
+    pub hostname: Option<String>,
+    pub port: Option<i32>,
+    pub status: String,
+    pub ordinal: i32,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -223,6 +275,23 @@ impl ExternalServiceManager {
             encryption_service,
             docker,
         }
+    }
+
+    /// Determine the local machine's private IP address for inter-node communication.
+    ///
+    /// Uses a UDP socket to determine which interface would be used to reach
+    /// a public address (without actually sending any data). This gives us the
+    /// correct source IP for the machine's default route.
+    fn get_local_private_ip() -> Result<String, String> {
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0")
+            .map_err(|e| format!("Failed to bind UDP socket: {}", e))?;
+        socket
+            .connect("8.8.8.8:80")
+            .map_err(|e| format!("Failed to connect UDP socket: {}", e))?;
+        let local_addr = socket
+            .local_addr()
+            .map_err(|e| format!("Failed to get local address: {}", e))?;
+        Ok(local_addr.ip().to_string())
     }
 
     pub async fn get_local_address(
@@ -272,6 +341,7 @@ impl ExternalServiceManager {
         match service_type {
             ServiceType::Mongodb => Box::new(MongodbService::new(name, self.docker.clone())),
             ServiceType::Postgres => Box::new(PostgresService::new(name, self.docker.clone())),
+            // Note: PostgresCluster is handled via create_cluster_service_instance, not here
             ServiceType::Redis => Box::new(RedisService::new(name, self.docker.clone())),
             // S3 now uses RustFS by default (high-performance S3-compatible storage)
             ServiceType::S3 => Box::new(RustfsService::new(
@@ -303,6 +373,238 @@ impl ExternalServiceManager {
                 self.encryption_service.clone(),
             )),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Remote-node helpers
+    // -----------------------------------------------------------------------
+
+    /// Look up a node by ID and return a `RemoteServiceClient` ready to call
+    /// the agent's service endpoints.
+    async fn get_remote_client(
+        &self,
+        node_id: i32,
+    ) -> Result<RemoteServiceClient, ExternalServiceError> {
+        let node = nodes::Entity::find_by_id(node_id)
+            .one(self.db.as_ref())
+            .await?
+            .ok_or(ExternalServiceError::InternalError {
+                reason: format!("Node {} not found", node_id),
+            })?;
+
+        let token = node
+            .token_encrypted
+            .as_deref()
+            .ok_or(ExternalServiceError::InternalError {
+                reason: format!(
+                    "Node {} ({}) has no encrypted token — cannot authenticate",
+                    node_id, node.name
+                ),
+            })
+            .and_then(|encrypted| {
+                self.encryption_service
+                    .decrypt_string(encrypted)
+                    .map_err(|e| ExternalServiceError::InternalError {
+                        reason: format!(
+                            "Failed to decrypt token for node {} ({}): {}",
+                            node_id, node.name, e
+                        ),
+                    })
+            })?;
+
+        RemoteServiceClient::new(node.address.clone(), token, node.name.clone())
+    }
+
+    /// Build the `RemoteServiceCreateParams` that the agent needs to create a
+    /// Docker container for a given service type and parameters.
+    fn build_remote_create_params(
+        &self,
+        service_name: &str,
+        service_type: &ServiceType,
+        parameters: &HashMap<String, String>,
+    ) -> Result<RemoteServiceCreateParams, ExternalServiceError> {
+        let (image, container_port, env, volume_path, command) = match service_type {
+            ServiceType::Postgres => {
+                let image = parameters
+                    .get("docker_image")
+                    .cloned()
+                    .unwrap_or_else(|| "gotempsh/postgres-walg:18-bookworm".to_string());
+                let password = parameters.get("password").cloned().unwrap_or_default();
+                let database = parameters
+                    .get("database")
+                    .cloned()
+                    .unwrap_or_else(|| "postgres".to_string());
+                let username = parameters
+                    .get("username")
+                    .cloned()
+                    .unwrap_or_else(|| "postgres".to_string());
+                let max_connections = parameters
+                    .get("max_connections")
+                    .cloned()
+                    .unwrap_or_else(|| "100".to_string());
+
+                let env = HashMap::from([
+                    ("POSTGRES_USER".to_string(), username),
+                    ("POSTGRES_PASSWORD".to_string(), password),
+                    ("POSTGRES_DB".to_string(), database),
+                    ("POSTGRES_HOST_AUTH_METHOD".to_string(), "md5".to_string()),
+                ]);
+                let cmd = vec![
+                    "postgres".to_string(),
+                    "-c".to_string(),
+                    format!("max_connections={}", max_connections),
+                    "-c".to_string(),
+                    "wal_level=replica".to_string(),
+                    "-c".to_string(),
+                    "archive_mode=on".to_string(),
+                    "-c".to_string(),
+                    "archive_timeout=60".to_string(),
+                ];
+                (
+                    image,
+                    5432u16,
+                    env,
+                    "/var/lib/postgresql".to_string(),
+                    Some(cmd),
+                )
+            }
+            ServiceType::Redis => {
+                let image = parameters
+                    .get("docker_image")
+                    .cloned()
+                    .unwrap_or_else(|| "gotempsh/redis-walg:8-bookworm".to_string());
+                let password = parameters.get("password").cloned().unwrap_or_default();
+                let env = HashMap::new();
+                let cmd = if password.is_empty() {
+                    vec!["redis-server".to_string()]
+                } else {
+                    vec![
+                        "redis-server".to_string(),
+                        "--requirepass".to_string(),
+                        password,
+                    ]
+                };
+                (image, 6379u16, env, "/data".to_string(), Some(cmd))
+            }
+            ServiceType::Mongodb => {
+                let image = parameters
+                    .get("docker_image")
+                    .cloned()
+                    .unwrap_or_else(|| "mongo:7".to_string());
+                let username = parameters
+                    .get("username")
+                    .cloned()
+                    .unwrap_or_else(|| "admin".to_string());
+                let password = parameters.get("password").cloned().unwrap_or_default();
+                let database = parameters
+                    .get("database")
+                    .cloned()
+                    .unwrap_or_else(|| "admin".to_string());
+                let env = HashMap::from([
+                    ("MONGO_INITDB_ROOT_USERNAME".to_string(), username),
+                    ("MONGO_INITDB_ROOT_PASSWORD".to_string(), password),
+                    ("MONGO_INITDB_DATABASE".to_string(), database),
+                ]);
+                (image, 27017u16, env, "/data/db".to_string(), None)
+            }
+            ServiceType::S3 | ServiceType::Rustfs | ServiceType::Blob => {
+                let image = parameters
+                    .get("docker_image")
+                    .cloned()
+                    .unwrap_or_else(|| "ghcr.io/rustfs/rustfs:latest".to_string());
+                let access_key = parameters
+                    .get("access_key")
+                    .cloned()
+                    .unwrap_or_else(|| "minioadmin".to_string());
+                let secret_key = parameters.get("secret_key").cloned().unwrap_or_default();
+                let env = HashMap::from([
+                    ("RUSTFS_ROOT_USER".to_string(), access_key),
+                    ("RUSTFS_ROOT_PASSWORD".to_string(), secret_key),
+                ]);
+                let cmd = vec![
+                    "rustfs".to_string(),
+                    "server".to_string(),
+                    "/data".to_string(),
+                ];
+                (image, 9000u16, env, "/data".to_string(), Some(cmd))
+            }
+            ServiceType::Kv => {
+                // KV is Redis-backed
+                let image = parameters
+                    .get("docker_image")
+                    .cloned()
+                    .unwrap_or_else(|| "gotempsh/redis-walg:8-bookworm".to_string());
+                let password = parameters.get("password").cloned().unwrap_or_default();
+                let env = HashMap::new();
+                let cmd = if password.is_empty() {
+                    vec!["redis-server".to_string()]
+                } else {
+                    vec![
+                        "redis-server".to_string(),
+                        "--requirepass".to_string(),
+                        password,
+                    ]
+                };
+                (image, 6379u16, env, "/data".to_string(), Some(cmd))
+            }
+            #[allow(deprecated)]
+            ServiceType::Minio => {
+                let image = parameters
+                    .get("docker_image")
+                    .cloned()
+                    .unwrap_or_else(|| "minio/minio:latest".to_string());
+                let access_key = parameters
+                    .get("access_key")
+                    .cloned()
+                    .unwrap_or_else(|| "minioadmin".to_string());
+                let secret_key = parameters.get("secret_key").cloned().unwrap_or_default();
+                let env = HashMap::from([
+                    ("MINIO_ROOT_USER".to_string(), access_key),
+                    ("MINIO_ROOT_PASSWORD".to_string(), secret_key),
+                ]);
+                let cmd = vec![
+                    "minio".to_string(),
+                    "server".to_string(),
+                    "/data".to_string(),
+                ];
+                (image, 9000u16, env, "/data".to_string(), Some(cmd))
+            }
+        };
+
+        let host_port: u16 = parameters
+            .get("port")
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(container_port);
+
+        let container_name = self
+            .create_service_instance(service_name.to_string(), *service_type)
+            .get_name();
+        let container_name_for_volume = format!("{}-{}", service_type, service_name);
+        let volume_name = format!("{}_data", container_name_for_volume);
+
+        Ok(RemoteServiceCreateParams {
+            name: container_name,
+            service_type: service_type.to_string(),
+            image,
+            environment: env,
+            port_mappings: vec![RemotePortMapping {
+                host_port,
+                container_port,
+            }],
+            volumes: HashMap::from([(volume_name, volume_path)]),
+            network: Some(temps_core::NETWORK_NAME.to_string()),
+            command,
+        })
+    }
+
+    /// Get the container name for a service (used for remote operations).
+    fn get_container_name_for_service(
+        &self,
+        service_name: &str,
+        service_type: &ServiceType,
+    ) -> String {
+        self.create_service_instance(service_name.to_string(), *service_type)
+            .get_name()
     }
 
     pub async fn get_service_by_name(
@@ -375,6 +677,9 @@ impl ExternalServiceManager {
                 reason: format!("Failed to encrypt config: {}", e),
             })?;
 
+        let topology = request.topology.clone();
+        let topology_for_txn = topology.clone();
+
         // Start transaction
         let service = self
             .db
@@ -388,6 +693,8 @@ impl ExternalServiceManager {
                         version: Set(request.version.clone()),
                         status: Set("pending".to_string()),
                         config: Set(Some(encrypted_config)),
+                        node_id: Set(request.node_id),
+                        topology: Set(topology_for_txn),
                         created_at: Set(Utc::now()),
                         updated_at: Set(Utc::now()),
                         ..Default::default()
@@ -401,33 +708,96 @@ impl ExternalServiceManager {
             .await
             .map_err(ExternalServiceError::from)?;
 
-        // Initialize the service - if this fails, delete the service record to maintain consistency
-        let init_result = self.initialize_service(service.id).await;
-        if let Err(e) = init_result {
-            // Initialization failed - clean up the database record
-            error!(
-                "Service initialization failed for service {}: {}. Rolling back database record.",
-                service.id, e
-            );
+        // Initialize the service
+        if topology == "cluster" {
+            // Cluster creation is async — update status to "creating" and spawn background task.
+            // The frontend polls GET /external-services/{id} to track progress.
+            let mut service_update: external_services::ActiveModel = service.clone().into();
+            service_update.status = Set("creating".to_string());
+            service_update.update(self.db.as_ref()).await?;
 
-            // Delete the service record
-            if let Err(delete_err) = external_services::Entity::delete_by_id(service.id)
-                .exec(self.db.as_ref())
-                .await
-            {
+            let db = self.db.clone();
+            let docker = self.docker.clone();
+            let encryption_service = self.encryption_service.clone();
+            let service_id = service.id;
+            let members = request.members.clone();
+
+            tokio::spawn(async move {
+                let manager = ExternalServiceManager::new(db.clone(), encryption_service, docker);
+                let result = manager.initialize_cluster(service_id, &members).await;
+
+                match result {
+                    Ok(()) => {
+                        info!(
+                            "Cluster service {} initialized successfully (background)",
+                            service_id
+                        );
+                        // Status already set to "running" inside initialize_cluster
+                    }
+                    Err(e) => {
+                        error!(
+                            "Background cluster creation failed for service {}: {}",
+                            service_id, e
+                        );
+
+                        // Update service status to "failed" with error message
+                        let update_result: Result<_, sea_orm::DbErr> = async {
+                            let mut svc: external_services::ActiveModel =
+                                external_services::Entity::find_by_id(service_id)
+                                    .one(db.as_ref())
+                                    .await?
+                                    .ok_or(sea_orm::DbErr::RecordNotFound(
+                                        "Service not found during rollback".to_string(),
+                                    ))?
+                                    .into();
+                            svc.status = Set("failed".to_string());
+                            svc.error_message = Set(Some(e.to_string()));
+                            svc.updated_at = Set(Utc::now());
+                            svc.update(db.as_ref()).await?;
+                            Ok(())
+                        }
+                        .await;
+
+                        if let Err(db_err) = update_result {
+                            error!(
+                                "Failed to update service {} status to 'failed': {}",
+                                service_id, db_err
+                            );
+                        }
+                    }
+                }
+            });
+
+            // Return immediately with "creating" status
+            self.get_service_info(service.id).await
+        } else {
+            // Standalone: initialize synchronously
+            let init_result = self.initialize_service(service.id).await;
+
+            if let Err(e) = init_result {
                 error!(
-                    "Failed to clean up service {} after initialization failure: {}",
-                    service.id, delete_err
+                    "Service initialization failed for service {}: {}. Rolling back database record.",
+                    service.id, e
                 );
+
+                if let Err(delete_err) = external_services::Entity::delete_by_id(service.id)
+                    .exec(self.db.as_ref())
+                    .await
+                {
+                    error!(
+                        "Failed to clean up service {} after initialization failure: {}",
+                        service.id, delete_err
+                    );
+                }
+
+                return Err(ExternalServiceError::InitializationFailed {
+                    id: service.id,
+                    reason: e.to_string(),
+                });
             }
 
-            return Err(ExternalServiceError::InitializationFailed {
-                id: service.id,
-                reason: e.to_string(),
-            });
+            self.get_service_info(service.id).await
         }
-
-        self.get_service_info(service.id).await
     }
 
     pub async fn get_service_config(
@@ -689,7 +1059,7 @@ impl ExternalServiceManager {
         let service_type_enum = ServiceType::from_str(&service.service_type).map_err(|_| {
             ExternalServiceError::InvalidServiceType {
                 id: service_id,
-                service_type: service.service_type,
+                service_type: service.service_type.clone(),
             }
         })?;
 
@@ -706,26 +1076,32 @@ impl ExternalServiceManager {
             });
         }
 
-        let service_instance =
-            self.create_service_instance(service.name.clone(), service_type_enum);
+        // Load cluster members BEFORE deleting DB records (needed for container cleanup)
+        let members = service_members::Entity::find()
+            .filter(service_members::Column::ServiceId.eq(service_id))
+            .all(self.db.as_ref())
+            .await?;
+        let is_cluster = !members.is_empty();
 
-        // Delete from database
+        // Delete from database first
         self.db
             .transaction::<_, (), ExternalServiceError>(|txn| {
                 Box::pin(async move {
-                    // Delete project links (should be empty due to check above)
                     project_services::Entity::delete_many()
                         .filter(project_services::Column::ServiceId.eq(service_id))
                         .exec(txn)
                         .await?;
 
-                    // Delete service backups
                     external_service_backups::Entity::delete_many()
                         .filter(external_service_backups::Column::ServiceId.eq(service_id))
                         .exec(txn)
                         .await?;
 
-                    // Delete service
+                    service_members::Entity::delete_many()
+                        .filter(service_members::Column::ServiceId.eq(service_id))
+                        .exec(txn)
+                        .await?;
+
                     external_services::Entity::delete_by_id(service_id)
                         .exec(txn)
                         .await?;
@@ -736,15 +1112,108 @@ impl ExternalServiceManager {
             .await
             .map_err(ExternalServiceError::from)?;
 
-        // Stop the service
-        info!("Stopping service {} before deletion", service_id);
-        service_instance
-            .remove()
-            .await
-            .map_err(|e| ExternalServiceError::DeletionFailed {
-                id: service_id,
-                reason: e.to_string(),
-            })?;
+        // Remove containers
+        if is_cluster {
+            // Cluster: remove each member container (best-effort, log failures)
+            info!(
+                "Removing {} cluster member container(s) for service {}",
+                members.len(),
+                service_id
+            );
+            let mut errors = Vec::new();
+
+            for member in &members {
+                if let Some(node_id) = member.node_id {
+                    match self.get_remote_client(node_id).await {
+                        Ok(client) => {
+                            if let Err(e) = client.remove_service(&member.container_name).await {
+                                let msg = format!(
+                                    "Failed to remove remote container '{}' on node {}: {}",
+                                    member.container_name, node_id, e
+                                );
+                                error!("{}", msg);
+                                errors.push(msg);
+                            }
+                        }
+                        Err(e) => {
+                            let msg = format!(
+                                "Failed to connect to node {} to remove '{}': {}",
+                                node_id, member.container_name, e
+                            );
+                            error!("{}", msg);
+                            errors.push(msg);
+                        }
+                    }
+                } else {
+                    // Local container
+                    if let Err(e) = self
+                        .docker
+                        .remove_container(
+                            &member.container_name,
+                            Some(bollard::query_parameters::RemoveContainerOptions {
+                                force: true,
+                                ..Default::default()
+                            }),
+                        )
+                        .await
+                    {
+                        let msg = format!(
+                            "Failed to remove local container '{}': {}",
+                            member.container_name, e
+                        );
+                        error!("{}", msg);
+                        errors.push(msg);
+                    }
+
+                    // Also remove the volume
+                    let volume_name = format!("{}_data", member.container_name);
+                    if let Err(e) = self
+                        .docker
+                        .remove_volume(
+                            &volume_name,
+                            None::<bollard::query_parameters::RemoveVolumeOptions>,
+                        )
+                        .await
+                    {
+                        warn!("Failed to remove volume '{}': {}", volume_name, e);
+                    }
+                }
+            }
+
+            if !errors.is_empty() {
+                return Err(ExternalServiceError::DeletionFailed {
+                    id: service_id,
+                    reason: format!(
+                        "Service deleted from database but {} container(s) failed to remove: {}",
+                        errors.len(),
+                        errors.join("; ")
+                    ),
+                });
+            }
+        } else {
+            // Standalone: remove single container
+            info!("Removing service {} container", service_id);
+            if let Some(node_id) = service.node_id {
+                let client = self.get_remote_client(node_id).await?;
+                let container_name =
+                    self.get_container_name_for_service(&service.name, &service_type_enum);
+                client.remove_service(&container_name).await.map_err(|e| {
+                    ExternalServiceError::DeletionFailed {
+                        id: service_id,
+                        reason: e.to_string(),
+                    }
+                })?;
+            } else {
+                let service_instance =
+                    self.create_service_instance(service.name.clone(), service_type_enum);
+                service_instance.remove().await.map_err(|e| {
+                    ExternalServiceError::DeletionFailed {
+                        id: service_id,
+                        reason: e.to_string(),
+                    }
+                })?;
+            }
+        }
 
         Ok(())
     }
@@ -772,6 +1241,13 @@ impl ExternalServiceManager {
     ) -> Result<ExternalServiceInfo, ExternalServiceError> {
         let service = self.get_service(service_id).await?;
 
+        // Load cluster members if this is a cluster topology
+        let members = if service.topology == "cluster" {
+            self.get_service_members(service_id).await?
+        } else {
+            Vec::new()
+        };
+
         Ok(ExternalServiceInfo {
             id: service.id,
             name: service.name,
@@ -786,7 +1262,191 @@ impl ExternalServiceManager {
             connection_info: None,
             created_at: service.created_at.to_rfc3339(),
             updated_at: service.updated_at.to_rfc3339(),
+            node_id: service.node_id,
+            topology: service.topology,
+            members,
+            error_message: service.error_message,
         })
+    }
+
+    /// Get all members for a cluster service.
+    pub async fn get_service_members(
+        &self,
+        service_id: i32,
+    ) -> Result<Vec<ServiceMemberInfo>, ExternalServiceError> {
+        let members = service_members::Entity::find()
+            .filter(service_members::Column::ServiceId.eq(service_id))
+            .order_by_asc(service_members::Column::Ordinal)
+            .all(self.db.as_ref())
+            .await?;
+
+        Ok(members
+            .into_iter()
+            .map(|m| ServiceMemberInfo {
+                id: m.id,
+                role: m.role,
+                node_id: m.node_id,
+                container_name: m.container_name,
+                hostname: m.hostname,
+                port: m.port,
+                status: m.status,
+                ordinal: m.ordinal,
+            })
+            .collect())
+    }
+
+    /// Get the primary data node's connection address for a cluster service.
+    ///
+    /// Returns `Some((host, port))` if the service is a cluster with a running primary.
+    /// Returns `None` if the service is standalone (not a cluster).
+    ///
+    /// For local clusters, `host` is the container name (Docker DNS).
+    /// For remote clusters, `host` is the member's hostname (private/WireGuard IP).
+    pub async fn get_cluster_primary_address(
+        &self,
+        service_id: i32,
+    ) -> Result<Option<(String, u16)>, ExternalServiceError> {
+        let service = self.get_service(service_id).await?;
+        if service.topology != "cluster" {
+            return Ok(None);
+        }
+
+        let members = self.get_service_members(service_id).await?;
+
+        // Find the primary data node (not monitor, not replica)
+        let primary = members
+            .iter()
+            .find(|m| m.role == "primary" && m.status == "running");
+
+        if let Some(primary) = primary {
+            let port = primary.port.unwrap_or(5432) as u16;
+
+            // For local members (no node_id), the hostname is a Docker-internal IP
+            // (e.g. 192.168.1.x) which is unreachable from the host. Since the
+            // container port is mapped to the same host port, use localhost instead.
+            // For remote members, use the node's private address.
+            let host = if let Some(node_id) = primary.node_id {
+                // Remote node — resolve via node's private address
+                let node = nodes::Entity::find_by_id(node_id)
+                    .one(self.db.as_ref())
+                    .await?;
+                node.map(|n| n.private_address).unwrap_or_else(|| {
+                    primary
+                        .hostname
+                        .clone()
+                        .unwrap_or_else(|| primary.container_name.clone())
+                })
+            } else {
+                // Local node — use localhost since Docker maps host_port:container_port
+                "localhost".to_string()
+            };
+
+            Ok(Some((host, port)))
+        } else {
+            Err(ExternalServiceError::InternalError {
+                reason: format!(
+                    "Cluster service {} has no running primary data node",
+                    service_id
+                ),
+            })
+        }
+    }
+
+    /// Build runtime environment variables for a cluster service.
+    ///
+    /// For cluster topology, the standard `ExternalService::get_runtime_env_vars()` returns
+    /// empty because the cluster service doesn't have access to the database to look up
+    /// member addresses. This method queries `service_members` and builds the multi-host
+    /// connection string with `target_session_attrs=read-write` for automatic failover.
+    ///
+    /// Returns `None` if the service is not a cluster (caller should fall through to
+    /// the standard `get_runtime_env_vars` path).
+    async fn build_cluster_env_vars(
+        &self,
+        service: &external_services::Model,
+        parameters: &HashMap<String, serde_json::Value>,
+    ) -> Result<Option<HashMap<String, String>>, ExternalServiceError> {
+        if service.topology != "cluster" {
+            return Ok(None);
+        }
+
+        let members = self.get_service_members(service.id).await?;
+        let params_str = Self::params_to_strings(parameters);
+
+        // Extract credentials from parameters
+        let username = params_str
+            .get("username")
+            .cloned()
+            .unwrap_or_else(|| "postgres".to_string());
+        let password = params_str.get("password").cloned().unwrap_or_default();
+        let database = params_str
+            .get("database")
+            .cloned()
+            .unwrap_or_else(|| "postgres".to_string());
+
+        // Build multi-host connection string from running data nodes (not monitor)
+        let data_nodes: Vec<&ServiceMemberInfo> = members
+            .iter()
+            .filter(|m| m.role != "monitor" && m.status == "running")
+            .collect();
+
+        let mut env_vars = HashMap::new();
+        env_vars.insert("POSTGRES_USER".to_string(), username.clone());
+        env_vars.insert("POSTGRES_PASSWORD".to_string(), password.clone());
+        env_vars.insert("POSTGRES_DB".to_string(), database.clone());
+
+        if data_nodes.is_empty() {
+            // No running data nodes — still return credentials but no URL
+            warn!(
+                "Cluster service {} has no running data nodes, POSTGRES_URL will be empty",
+                service.id
+            );
+            return Ok(Some(env_vars));
+        }
+
+        let hosts: Vec<String> = data_nodes
+            .iter()
+            .map(|n| {
+                let host = n
+                    .hostname
+                    .clone()
+                    .unwrap_or_else(|| n.container_name.clone());
+                let port = n.port.unwrap_or(5432);
+                format!("{}:{}", host, port)
+            })
+            .collect();
+
+        let encoded_password = urlencoding::encode(&password);
+
+        let postgres_url = format!(
+            "postgresql://{}:{}@{}/{}?target_session_attrs=read-write",
+            urlencoding::encode(&username),
+            encoded_password,
+            hosts.join(","),
+            database,
+        );
+
+        let host_list = data_nodes
+            .iter()
+            .map(|n| {
+                n.hostname
+                    .clone()
+                    .unwrap_or_else(|| n.container_name.clone())
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let port = data_nodes
+            .first()
+            .and_then(|n| n.port)
+            .unwrap_or(5432)
+            .to_string();
+
+        env_vars.insert("POSTGRES_URL".to_string(), postgres_url);
+        env_vars.insert("POSTGRES_HOST".to_string(), host_list);
+        env_vars.insert("POSTGRES_PORT".to_string(), port);
+
+        Ok(Some(env_vars))
     }
 
     async fn get_service_parameters(
@@ -837,6 +1497,20 @@ impl ExternalServiceManager {
             }
         })?;
 
+        // Remote node — delegate to agent
+        if let Some(node_id) = service.node_id {
+            return self
+                .initialize_service_remote(
+                    service_id,
+                    node_id,
+                    &service,
+                    &parameters,
+                    &service_type_enum,
+                )
+                .await;
+        }
+
+        // Local node — use existing Docker-based service logic
         let service_instance =
             self.create_service_instance(service.name.clone(), service_type_enum);
 
@@ -891,6 +1565,873 @@ impl ExternalServiceManager {
         service_update.update(self.db.as_ref()).await?;
 
         Ok(())
+    }
+
+    /// Initialize a service on a remote node via the agent API.
+    async fn initialize_service_remote(
+        &self,
+        service_id: i32,
+        node_id: i32,
+        service: &external_services::Model,
+        parameters: &HashMap<String, serde_json::Value>,
+        service_type: &ServiceType,
+    ) -> Result<(), ExternalServiceError> {
+        info!(
+            "Initializing service {} on remote node {}",
+            service_id, node_id
+        );
+        let client = self.get_remote_client(node_id).await?;
+
+        // Flatten serde_json::Value parameters to strings for the builder
+        let string_params: HashMap<String, String> = parameters
+            .iter()
+            .map(|(k, v)| {
+                let s = match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                (k.clone(), s)
+            })
+            .collect();
+
+        let create_params =
+            self.build_remote_create_params(&service.name, service_type, &string_params)?;
+
+        // Try to stop existing container first (ignore errors — may not exist)
+        let container_name = create_params.name.clone();
+        if let Err(e) = client.stop_service(&container_name).await {
+            info!(
+                "Could not stop remote container {} (may not exist): {}",
+                container_name, e
+            );
+        }
+
+        // Create the container on the remote node
+        let response = client.create_service(create_params).await.map_err(|e| {
+            ExternalServiceError::InitializationFailed {
+                id: service_id,
+                reason: format!("Remote agent create_service failed: {}", e),
+            }
+        })?;
+
+        info!(
+            "Service {} created on node {} — container {} (port {})",
+            service_id, node_id, response.container_name, response.host_port
+        );
+
+        // Store the host_port as an inferred parameter so env-var generation works
+        let mut inferred = HashMap::new();
+        inferred.insert("port".to_string(), response.host_port.to_string());
+        inferred.insert("container_id".to_string(), response.container_id.clone());
+
+        // Persist inferred parameters
+        let mut current_params = self.get_service_parameters(service_id).await?;
+        for (key, value) in inferred {
+            if Self::is_inferred_parameter(&key) || !current_params.contains_key(&key) {
+                current_params.insert(key, serde_json::Value::String(value));
+            }
+        }
+        let config_json = serde_json::to_string(&current_params).map_err(|e| {
+            ExternalServiceError::InternalError {
+                reason: format!("Failed to serialize updated params: {}", e),
+            }
+        })?;
+        let encrypted_config = self
+            .encryption_service
+            .encrypt_string(&config_json)
+            .map_err(|e| ExternalServiceError::InternalError {
+                reason: format!("Failed to encrypt updated params: {}", e),
+            })?;
+
+        let mut service_update: external_services::ActiveModel = service.clone().into();
+        service_update.status = Set("running".to_string());
+        service_update.config = Set(Some(encrypted_config));
+        service_update.updated_at = Set(Utc::now());
+        service_update.update(self.db.as_ref()).await?;
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Cluster initialization
+    // -----------------------------------------------------------------------
+
+    /// Create a cluster-aware service instance for the given service type.
+    fn create_cluster_service_instance(
+        &self,
+        name: String,
+        service_type: ServiceType,
+    ) -> Option<Box<dyn ExternalService>> {
+        match service_type {
+            ServiceType::Postgres => Some(Box::new(PostgresClusterService::new(
+                name,
+                self.docker.clone(),
+            ))),
+            // Future: Redis Sentinel, MongoDB Replica Set, RustFS distributed
+            _ => None,
+        }
+    }
+
+    /// Initialize a cluster service: create member containers across nodes,
+    /// then record them in the service_members table.
+    async fn initialize_cluster(
+        &self,
+        service_id: i32,
+        member_requests: &[ClusterMemberRequest],
+    ) -> Result<(), ExternalServiceError> {
+        info!("Initializing cluster for service {}", service_id);
+        let service = self.get_service(service_id).await?;
+        let parameters = self.get_service_parameters(service_id).await?;
+        let service_type = ServiceType::from_str(&service.service_type).map_err(|_| {
+            ExternalServiceError::InvalidServiceType {
+                id: service_id,
+                service_type: service.service_type.clone(),
+            }
+        })?;
+
+        let cluster_instance = self
+            .create_cluster_service_instance(service.name.clone(), service_type)
+            .ok_or_else(|| ExternalServiceError::InitializationFailed {
+                id: service_id,
+                reason: format!(
+                    "Service type '{}' does not support cluster topology",
+                    service.service_type
+                ),
+            })?;
+
+        // Validate roles
+        let valid_roles = cluster_instance.valid_cluster_roles();
+        for (i, member) in member_requests.iter().enumerate() {
+            if !valid_roles.contains(&member.role.as_str()) {
+                return Err(ExternalServiceError::ParameterValidationFailed {
+                    service_id,
+                    reason: format!(
+                        "Invalid role '{}' for member {}. Valid roles: {:?}",
+                        member.role, i, valid_roles
+                    ),
+                });
+            }
+        }
+
+        // Build member specs with ordinals and hostnames.
+        //
+        // When the cluster spans multiple nodes (has any remote members),
+        // local members must advertise a routable IP instead of a Docker
+        // container name — remote workers cannot resolve container names
+        // from another host's Docker network.
+        let has_remote_members = member_requests.iter().any(|m| m.node_id.is_some());
+        let local_private_ip: Option<String> = if has_remote_members {
+            Some(Self::get_local_private_ip().map_err(|e| {
+                ExternalServiceError::InitializationFailed {
+                    id: service_id,
+                    reason: format!(
+                        "Cluster has remote members but could not determine local private IP: {}",
+                        e
+                    ),
+                }
+            })?)
+        } else {
+            None
+        };
+
+        let mut member_specs = Vec::new();
+        for (i, member) in member_requests.iter().enumerate() {
+            let hostname: Option<String> = if let Some(node_id) = member.node_id {
+                // Look up the node's private address for inter-member communication
+                let node = nodes::Entity::find_by_id(node_id)
+                    .one(self.db.as_ref())
+                    .await?
+                    .ok_or(ExternalServiceError::InternalError {
+                        reason: format!("Node {} not found", node_id),
+                    })?;
+                Some(node.private_address.clone())
+            } else {
+                // Local member: use control plane's private IP if available
+                // (so remote workers can reach it), otherwise None (Docker DNS)
+                local_private_ip.clone()
+            };
+
+            member_specs.push(ClusterMemberSpec {
+                role: member.role.clone(),
+                node_id: member.node_id,
+                ordinal: i as i32,
+                hostname,
+            });
+        }
+
+        // Get the cluster config for building member-specific params
+        let service_config = ServiceConfig {
+            name: service.name.clone(),
+            service_type,
+            version: service.version.clone(),
+            parameters: serde_json::to_value(&parameters).map_err(|e| {
+                ExternalServiceError::InternalError {
+                    reason: format!("Failed to serialize parameters: {}", e),
+                }
+            })?,
+        };
+
+        // Call init_cluster to get the container specs (names, ports)
+        let member_results = cluster_instance
+            .init_cluster(service_config.clone(), member_specs.clone())
+            .await
+            .map_err(|e| ExternalServiceError::InitializationFailed {
+                id: service_id,
+                reason: format!("Cluster init_cluster failed: {}", e),
+            })?;
+
+        // Get the Postgres cluster service for building member params
+        let pg_cluster = match service_type {
+            ServiceType::Postgres => Some(PostgresClusterService::new(
+                service.name.clone(),
+                self.docker.clone(),
+            )),
+            _ => None,
+        };
+
+        let cluster_config_parsed: crate::externalsvc::postgres_cluster::PostgresClusterConfig =
+            serde_json::from_value(service_config.parameters.clone()).map_err(|e| {
+                ExternalServiceError::InternalError {
+                    reason: format!("Failed to parse cluster config: {}", e),
+                }
+            })?;
+
+        // Find the monitor hostname for data node configuration.
+        // For remote workers, use the node's private/WireGuard address.
+        // For local (no node_id), use the monitor container name so Docker DNS resolves it.
+        let monitor_spec = member_specs.iter().find(|m| m.role == "monitor");
+        let pg_cluster_name = service.name.clone();
+        let monitor_container_fallback = format!("postgres-{}-monitor", pg_cluster_name);
+        let monitor_hostname = monitor_spec
+            .and_then(|m| m.hostname.as_deref())
+            .unwrap_or(&monitor_container_fallback);
+
+        // Assign unique host ports for each cluster member to avoid conflicts
+        // with other services (e.g., the platform's own TimescaleDB on 5432).
+        // Base port is derived from service_id to keep ports stable across restarts.
+        // Range: 6000 + (service_id * 10) + ordinal, giving 10 ports per cluster.
+        let base_port = 6000u16 + (service_id as u16 * 10);
+        // Monitor gets base_port, data nodes get base_port + 1, +2, etc.
+        let monitor_port = base_port;
+        info!(
+            "Cluster '{}' port assignment: monitor={}, data nodes start at {}",
+            pg_cluster_name,
+            monitor_port,
+            base_port + 1
+        );
+
+        // Track successfully created members for rollback on failure
+        struct CreatedMember {
+            container_name: String,
+            node_id: Option<i32>,
+        }
+        let mut created_members: Vec<CreatedMember> = Vec::new();
+
+        // Create each member container (in order: monitor first, then data nodes)
+        let create_result: Result<(), ExternalServiceError> = async {
+            for (result, spec) in member_results.iter().zip(member_specs.iter()) {
+                info!(
+                    "Creating cluster member: {} (role: {}, ordinal: {}, node: {:?})",
+                    result.container_name, result.role, result.ordinal, spec.node_id
+                );
+
+                // Insert member record with "creating" status so frontend can track progress
+                let member_record = service_members::ActiveModel {
+                    service_id: Set(service_id),
+                    node_id: Set(spec.node_id),
+                    role: Set(result.role.clone()),
+                    container_id: Set(None),
+                    container_name: Set(result.container_name.clone()),
+                    hostname: Set(spec.hostname.clone()),
+                    port: Set(None),
+                    status: Set("creating".to_string()),
+                    ordinal: Set(result.ordinal),
+                    config: Set(None),
+                    created_at: Set(Utc::now()),
+                    updated_at: Set(Utc::now()),
+                    ..Default::default()
+                };
+                let member_model = member_record.insert(self.db.as_ref()).await?;
+
+                // Assign port: monitor gets base_port, data nodes get base + ordinal
+                let member_port = if spec.role == "monitor" {
+                    monitor_port
+                } else {
+                    base_port + spec.ordinal as u16
+                };
+
+                let (container_id, host_port) = if let Some(node_id) = spec.node_id {
+                    // Remote: dispatch to agent
+                    let client = self.get_remote_client(node_id).await?;
+
+                    // Build member-specific create params
+                    let member_params = if let Some(ref pg) = pg_cluster {
+                        pg.build_member_params(
+                            spec,
+                            &cluster_config_parsed,
+                            monitor_hostname,
+                            monitor_port,
+                            member_port,
+                        )
+                    } else {
+                        return Err(ExternalServiceError::InitializationFailed {
+                            id: service_id,
+                            reason: "Only Postgres clusters are currently supported".to_string(),
+                        });
+                    };
+
+                    // Each cluster member uses a unique port assigned by the
+                    // manager. Map container_port = host_port to avoid conflicts.
+                    let volume_name = format!("{}_data", result.container_name);
+                    let remote_params = RemoteServiceCreateParams {
+                        name: result.container_name.clone(),
+                        service_type: "postgres".to_string(),
+                        image: member_params.image,
+                        environment: member_params.environment,
+                        port_mappings: vec![RemotePortMapping {
+                            host_port: member_params.container_port,
+                            container_port: member_params.container_port,
+                        }],
+                        volumes: HashMap::from([(volume_name, member_params.volume_path)]),
+                        network: Some(temps_core::NETWORK_NAME.to_string()),
+                        command: member_params.command,
+                    };
+
+                    let response = client.create_service(remote_params).await.map_err(|e| {
+                        ExternalServiceError::InitializationFailed {
+                            id: service_id,
+                            reason: format!(
+                                "Failed to create cluster member '{}' on node {}: {}",
+                                result.container_name, node_id, e
+                            ),
+                        }
+                    })?;
+
+                    (response.container_id, Some(response.host_port as i32))
+                } else {
+                    // Local: create container directly via Docker
+                    // For now, use the agent-style approach via local Docker
+                    let member_params = if let Some(ref pg) = pg_cluster {
+                        pg.build_member_params(
+                            spec,
+                            &cluster_config_parsed,
+                            monitor_hostname,
+                            monitor_port,
+                            member_port,
+                        )
+                    } else {
+                        return Err(ExternalServiceError::InitializationFailed {
+                            id: service_id,
+                            reason: "Only Postgres clusters are currently supported".to_string(),
+                        });
+                    };
+
+                    // Pull image, create and start container locally
+                    self.create_local_cluster_member(&result.container_name, &member_params)
+                        .await
+                        .map_err(|e| ExternalServiceError::InitializationFailed {
+                            id: service_id,
+                            reason: format!(
+                                "Failed to create local cluster member '{}': {}",
+                                result.container_name, e
+                            ),
+                        })?
+                };
+
+                // Track this member for potential rollback
+                created_members.push(CreatedMember {
+                    container_name: result.container_name.clone(),
+                    node_id: spec.node_id,
+                });
+
+                // Wait for the member to be healthy before proceeding to the next
+                // This is important: monitor must be healthy before data nodes register
+                if spec.role == "monitor" {
+                    info!(
+                        "Waiting for monitor '{}' to become healthy...",
+                        result.container_name
+                    );
+                    self.wait_for_container_health(&result.container_name, 60)
+                        .await
+                        .map_err(|e| ExternalServiceError::InitializationFailed {
+                            id: service_id,
+                            reason: format!("Monitor failed health check: {}", e),
+                        })?;
+                }
+
+                // Update member record with container info and "running" status
+                let mut member_update: service_members::ActiveModel = member_model.into();
+                member_update.container_id = Set(Some(container_id));
+                member_update.port = Set(host_port);
+                member_update.status = Set("running".to_string());
+                member_update.updated_at = Set(Utc::now());
+                member_update.update(self.db.as_ref()).await?;
+            }
+            Ok(())
+        }
+        .await;
+
+        // If any member failed, roll back all previously created containers
+        if let Err(e) = create_result {
+            error!(
+                "Cluster member creation failed for service {}: {}. Rolling back {} created container(s).",
+                service_id, e, created_members.len()
+            );
+
+            for member in &created_members {
+                if let Some(node_id) = member.node_id {
+                    // Remote: ask agent to remove the container
+                    match self.get_remote_client(node_id).await {
+                        Ok(client) => {
+                            if let Err(rm_err) = client.remove_service(&member.container_name).await
+                            {
+                                error!(
+                                    "Rollback: failed to remove remote container '{}' on node {}: {}",
+                                    member.container_name, node_id, rm_err
+                                );
+                            } else {
+                                info!(
+                                    "Rollback: removed remote container '{}' on node {}",
+                                    member.container_name, node_id
+                                );
+                            }
+                        }
+                        Err(client_err) => {
+                            error!(
+                                "Rollback: failed to get remote client for node {}: {}",
+                                node_id, client_err
+                            );
+                        }
+                    }
+                } else {
+                    // Local: remove container directly via Docker
+                    if let Err(rm_err) = self
+                        .docker
+                        .remove_container(
+                            &member.container_name,
+                            Some(bollard::query_parameters::RemoveContainerOptions {
+                                force: true,
+                                ..Default::default()
+                            }),
+                        )
+                        .await
+                    {
+                        error!(
+                            "Rollback: failed to remove local container '{}': {}",
+                            member.container_name, rm_err
+                        );
+                    } else {
+                        info!(
+                            "Rollback: removed local container '{}'",
+                            member.container_name
+                        );
+                    }
+
+                    // Also remove the volume
+                    let volume_name = format!("{}_data", member.container_name);
+                    if let Err(vol_err) = self
+                        .docker
+                        .remove_volume(
+                            &volume_name,
+                            None::<bollard::query_parameters::RemoveVolumeOptions>,
+                        )
+                        .await
+                    {
+                        warn!(
+                            "Rollback: failed to remove volume '{}': {}",
+                            volume_name, vol_err
+                        );
+                    }
+                }
+            }
+
+            // Mark remaining service_members as "failed" instead of deleting them.
+            // This preserves the original member topology so the retry endpoint can
+            // reconstruct the member specs without user re-input.
+            if let Err(db_err) = service_members::Entity::update_many()
+                .col_expr(service_members::Column::Status, Expr::value("failed"))
+                .col_expr(service_members::Column::UpdatedAt, Expr::value(Utc::now()))
+                .filter(service_members::Column::ServiceId.eq(service_id))
+                .exec(self.db.as_ref())
+                .await
+            {
+                error!(
+                    "Rollback: failed to update service_members status for service {}: {}",
+                    service_id, db_err
+                );
+            }
+
+            return Err(e);
+        }
+
+        // Update parent service status
+        let mut service_update: external_services::ActiveModel = service.into();
+        service_update.status = Set("running".to_string());
+        service_update.updated_at = Set(Utc::now());
+        service_update.update(self.db.as_ref()).await?;
+
+        info!("Cluster service {} initialized successfully", service_id);
+        Ok(())
+    }
+
+    /// Retry a failed cluster service initialization.
+    ///
+    /// Cleans up any leftover containers and service_members from the previous
+    /// attempt, then re-runs `initialize_cluster`.
+    ///
+    /// If `member_requests` is empty, the original member configuration is
+    /// reconstructed from the preserved `service_members` records (which are
+    /// now kept with "failed" status instead of being deleted on rollback).
+    pub async fn retry_cluster(
+        &self,
+        service_id: i32,
+        member_requests: &[ClusterMemberRequest],
+    ) -> Result<ExternalServiceInfo, ExternalServiceError> {
+        let service = self.get_service(service_id).await?;
+
+        if service.topology != "cluster" {
+            return Err(ExternalServiceError::ParameterValidationFailed {
+                service_id,
+                reason: "retry_cluster is only valid for cluster topology services".to_string(),
+            });
+        }
+
+        if service.status != "failed" && service.status != "creating" {
+            return Err(ExternalServiceError::ParameterValidationFailed {
+                service_id,
+                reason: format!(
+                    "Service must be in 'failed' or 'creating' status to retry, current status: '{}'",
+                    service.status
+                ),
+            });
+        }
+
+        info!(
+            "Retrying cluster initialization for service {} (current status: {})",
+            service_id, service.status
+        );
+
+        // Clean up any leftover service_members and their containers
+        let leftover_members = service_members::Entity::find()
+            .filter(service_members::Column::ServiceId.eq(service_id))
+            .order_by_asc(service_members::Column::Ordinal)
+            .all(self.db.as_ref())
+            .await?;
+
+        // Reconstruct member specs from preserved records if none were provided
+        let effective_members: Vec<ClusterMemberRequest> = if member_requests.is_empty() {
+            if leftover_members.is_empty() {
+                return Err(ExternalServiceError::ParameterValidationFailed {
+                    service_id,
+                    reason:
+                        "No member configuration provided and no previous member records found. \
+                             Please provide the members array in the retry request."
+                            .to_string(),
+                });
+            }
+            info!(
+                "Reconstructing member config from {} preserved records for service {}",
+                leftover_members.len(),
+                service_id
+            );
+            leftover_members
+                .iter()
+                .map(|m| ClusterMemberRequest {
+                    role: m.role.clone(),
+                    node_id: m.node_id,
+                })
+                .collect()
+        } else {
+            member_requests.to_vec()
+        };
+
+        for member in &leftover_members {
+            // Try to remove the container (ignore errors — it may not exist)
+            if let Some(node_id) = member.node_id {
+                if let Ok(client) = self.get_remote_client(node_id).await {
+                    if let Err(e) = client.remove_service(&member.container_name).await {
+                        warn!(
+                            "Retry cleanup: failed to remove remote container '{}' on node {}: {}",
+                            member.container_name, node_id, e
+                        );
+                    }
+                }
+            } else {
+                let _ = self
+                    .docker
+                    .remove_container(
+                        &member.container_name,
+                        Some(bollard::query_parameters::RemoveContainerOptions {
+                            force: true,
+                            ..Default::default()
+                        }),
+                    )
+                    .await;
+
+                // Also remove the volume
+                let volume_name = format!("{}_data", member.container_name);
+                let _ = self
+                    .docker
+                    .remove_volume(
+                        &volume_name,
+                        None::<bollard::query_parameters::RemoveVolumeOptions>,
+                    )
+                    .await;
+            }
+        }
+
+        // Delete leftover member records
+        if !leftover_members.is_empty() {
+            service_members::Entity::delete_many()
+                .filter(service_members::Column::ServiceId.eq(service_id))
+                .exec(self.db.as_ref())
+                .await?;
+            info!(
+                "Retry cleanup: removed {} leftover member records for service {}",
+                leftover_members.len(),
+                service_id
+            );
+        }
+
+        // Update status to "creating" and clear previous error
+        let mut service_update: external_services::ActiveModel = service.into();
+        service_update.status = Set("creating".to_string());
+        service_update.error_message = Set(None);
+        service_update.updated_at = Set(Utc::now());
+        service_update.update(self.db.as_ref()).await?;
+
+        // Spawn background task to re-initialize (same pattern as create)
+        let db = self.db.clone();
+        let docker = self.docker.clone();
+        let encryption_service = self.encryption_service.clone();
+        let members = effective_members;
+
+        tokio::spawn(async move {
+            let manager = ExternalServiceManager::new(db.clone(), encryption_service, docker);
+            let result = manager.initialize_cluster(service_id, &members).await;
+
+            match result {
+                Ok(()) => {
+                    info!(
+                        "Cluster service {} retry succeeded (background)",
+                        service_id
+                    );
+                }
+                Err(e) => {
+                    error!(
+                        "Cluster service {} retry failed (background): {}",
+                        service_id, e
+                    );
+
+                    let update_result: Result<_, sea_orm::DbErr> = async {
+                        let mut svc: external_services::ActiveModel =
+                            external_services::Entity::find_by_id(service_id)
+                                .one(db.as_ref())
+                                .await?
+                                .ok_or(sea_orm::DbErr::RecordNotFound(
+                                    "Service not found during retry rollback".to_string(),
+                                ))?
+                                .into();
+                        svc.status = Set("failed".to_string());
+                        svc.error_message = Set(Some(e.to_string()));
+                        svc.updated_at = Set(Utc::now());
+                        svc.update(db.as_ref()).await?;
+                        Ok(())
+                    }
+                    .await;
+
+                    if let Err(db_err) = update_result {
+                        error!(
+                            "Failed to update service {} status to 'failed' after retry: {}",
+                            service_id, db_err
+                        );
+                    }
+                }
+            }
+        });
+
+        self.get_service_info(service_id).await
+    }
+
+    /// Create a cluster member container on the local Docker daemon.
+    async fn create_local_cluster_member(
+        &self,
+        container_name: &str,
+        params: &crate::externalsvc::postgres_cluster::ClusterMemberCreateParams,
+    ) -> Result<(String, Option<i32>), ExternalServiceError> {
+        use bollard::models::*;
+        use bollard::query_parameters::*;
+        use futures::TryStreamExt;
+
+        // Ensure network exists
+        crate::utils::ensure_network_exists(&self.docker)
+            .await
+            .map_err(|e| ExternalServiceError::DockerError {
+                id: 0,
+                reason: format!("Failed to ensure network: {}", e),
+            })?;
+
+        // Pull image
+        self.docker
+            .create_image(
+                Some(CreateImageOptions {
+                    from_image: Some(params.image.clone()),
+                    ..Default::default()
+                }),
+                None,
+                None,
+            )
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| ExternalServiceError::DockerError {
+                id: 0,
+                reason: format!("Failed to pull image {}: {}", params.image, e),
+            })?;
+
+        // Create volume
+        let volume_name = format!("{}_data", container_name);
+        let _ = self
+            .docker
+            .create_volume(bollard::models::VolumeCreateRequest {
+                name: Some(volume_name.clone()),
+                ..Default::default()
+            })
+            .await;
+
+        // Build env vars
+        let env: Vec<String> = params
+            .environment
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect();
+
+        // Port bindings: map the container port to the same host port.
+        // Each cluster member uses a unique port assigned by the manager so
+        // there are no conflicts even when multiple members run on the same host.
+        let mut port_bindings = std::collections::HashMap::new();
+        let container_port_key = format!("{}/tcp", params.container_port);
+        port_bindings.insert(
+            container_port_key.clone(),
+            Some(vec![PortBinding {
+                host_ip: Some("0.0.0.0".to_string()),
+                host_port: Some(params.container_port.to_string()),
+            }]),
+        );
+
+        // Create container
+        let container_config = ContainerCreateBody {
+            image: Some(params.image.clone()),
+            env: Some(env),
+            cmd: params.command.clone(),
+            host_config: Some(HostConfig {
+                binds: Some(vec![format!("{}:{}", volume_name, params.volume_path)]),
+                port_bindings: Some(port_bindings),
+                restart_policy: Some(RestartPolicy {
+                    name: Some(RestartPolicyNameEnum::UNLESS_STOPPED),
+                    maximum_retry_count: None,
+                }),
+                network_mode: Some(temps_core::NETWORK_NAME.to_string()),
+                ..Default::default()
+            }),
+            labels: Some(HashMap::from([
+                ("sh.temps.managed".to_string(), "true".to_string()),
+                ("sh.temps.service".to_string(), "true".to_string()),
+                (
+                    "sh.temps.service.type".to_string(),
+                    "postgres-cluster".to_string(),
+                ),
+                (
+                    "sh.temps.service.name".to_string(),
+                    container_name.to_string(),
+                ),
+            ])),
+            ..Default::default()
+        };
+
+        let response = self
+            .docker
+            .create_container(
+                Some(
+                    CreateContainerOptionsBuilder::new()
+                        .name(container_name)
+                        .build(),
+                ),
+                container_config,
+            )
+            .await
+            .map_err(|e| ExternalServiceError::DockerError {
+                id: 0,
+                reason: format!("Failed to create container {}: {}", container_name, e),
+            })?;
+
+        // Start container
+        self.docker
+            .start_container(container_name, None::<StartContainerOptions>)
+            .await
+            .map_err(|e| ExternalServiceError::DockerError {
+                id: 0,
+                reason: format!("Failed to start container {}: {}", container_name, e),
+            })?;
+
+        // Each member uses a unique port — container_port == host_port
+        let host_port = Some(params.container_port as i32);
+
+        Ok((response.id, host_port))
+    }
+
+    /// Wait for a container to become healthy (Docker health check).
+    async fn wait_for_container_health(
+        &self,
+        container_name: &str,
+        timeout_secs: u64,
+    ) -> Result<(), ExternalServiceError> {
+        use bollard::query_parameters::InspectContainerOptions;
+        use std::time::{Duration, Instant};
+
+        let start = Instant::now();
+        let timeout = Duration::from_secs(timeout_secs);
+
+        loop {
+            if start.elapsed() > timeout {
+                return Err(ExternalServiceError::InitializationFailed {
+                    id: 0,
+                    reason: format!(
+                        "Container {} did not become healthy within {}s",
+                        container_name, timeout_secs
+                    ),
+                });
+            }
+
+            if let Ok(info) = self
+                .docker
+                .inspect_container(container_name, None::<InspectContainerOptions>)
+                .await
+            {
+                let running = info.state.as_ref().and_then(|s| s.running).unwrap_or(false);
+
+                if running {
+                    // Check if container has a healthcheck and if it's healthy
+                    let health_status = info
+                        .state
+                        .as_ref()
+                        .and_then(|s| s.health.as_ref())
+                        .and_then(|h| h.status.as_ref())
+                        .map(|s| format!("{:?}", s));
+
+                    match health_status.as_deref() {
+                        Some("\"HEALTHY\"") | Some("Healthy") => return Ok(()),
+                        None => {
+                            // No healthcheck defined — just check if running
+                            return Ok(());
+                        }
+                        _ => {} // Still starting or unhealthy — keep waiting
+                    }
+                }
+            }
+            // Container not found or not running yet — keep waiting
+
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
     }
 
     async fn store_inferred_parameters(
@@ -994,30 +2535,54 @@ impl ExternalServiceManager {
             }
         })?;
 
-        let service_instance =
-            self.create_service_instance(service.name.clone(), service_type_enum);
+        // Remote node — delegate to agent
+        if let Some(node_id) = service.node_id {
+            let client = self.get_remote_client(node_id).await?;
+            let container_name =
+                self.get_container_name_for_service(&service.name, &service_type_enum);
 
-        // Try to start the existing container first
-        match service_instance.start().await {
-            Ok(()) => {}
-            Err(e) => {
-                // If start failed (e.g., container was removed and in-memory config is empty),
-                // fall back to full initialization which loads config from DB and recreates
-                // the container.
-                info!(
-                    "Direct start failed for service {} ({}), falling back to initialize: {}",
-                    service_id, service.name, e
-                );
-                self.initialize_service(service_id)
-                    .await
-                    .map_err(|init_err| ExternalServiceError::StartFailed {
-                        id: service_id,
-                        reason: format!(
-                            "Start failed: {}. Re-initialize also failed: {}",
-                            e, init_err
-                        ),
-                    })?;
-                return self.get_service_info(service_id).await;
+            match client.start_service(&container_name).await {
+                Ok(()) => {}
+                Err(e) => {
+                    info!(
+                        "Remote start failed for service {} ({}), falling back to initialize: {}",
+                        service_id, service.name, e
+                    );
+                    self.initialize_service(service_id)
+                        .await
+                        .map_err(|init_err| ExternalServiceError::StartFailed {
+                            id: service_id,
+                            reason: format!(
+                                "Start failed: {}. Re-initialize also failed: {}",
+                                e, init_err
+                            ),
+                        })?;
+                    return self.get_service_info(service_id).await;
+                }
+            }
+        } else {
+            // Local node
+            let service_instance =
+                self.create_service_instance(service.name.clone(), service_type_enum);
+
+            match service_instance.start().await {
+                Ok(()) => {}
+                Err(e) => {
+                    info!(
+                        "Direct start failed for service {} ({}), falling back to initialize: {}",
+                        service_id, service.name, e
+                    );
+                    self.initialize_service(service_id)
+                        .await
+                        .map_err(|init_err| ExternalServiceError::StartFailed {
+                            id: service_id,
+                            reason: format!(
+                                "Start failed: {}. Re-initialize also failed: {}",
+                                e, init_err
+                            ),
+                        })?;
+                    return self.get_service_info(service_id).await;
+                }
             }
         }
 
@@ -1042,17 +2607,31 @@ impl ExternalServiceManager {
             }
         })?;
 
-        let service_instance =
-            self.create_service_instance(service.name.clone(), service_type_enum);
+        // Remote node — delegate to agent
+        if let Some(node_id) = service.node_id {
+            let client = self.get_remote_client(node_id).await?;
+            let container_name =
+                self.get_container_name_for_service(&service.name, &service_type_enum);
 
-        // Stop the service
-        service_instance
-            .stop()
-            .await
-            .map_err(|e| ExternalServiceError::StopFailed {
-                id: service_id,
-                reason: e.to_string(),
+            client.stop_service(&container_name).await.map_err(|e| {
+                ExternalServiceError::StopFailed {
+                    id: service_id,
+                    reason: e.to_string(),
+                }
             })?;
+        } else {
+            // Local node
+            let service_instance =
+                self.create_service_instance(service.name.clone(), service_type_enum);
+
+            service_instance
+                .stop()
+                .await
+                .map_err(|e| ExternalServiceError::StopFailed {
+                    id: service_id,
+                    reason: e.to_string(),
+                })?;
+        }
 
         // Update status to stopped
         let mut service_update: external_services::ActiveModel = service.into();
@@ -1141,6 +2720,11 @@ impl ExternalServiceManager {
         })?;
         let parameters = self.get_service_parameters(service_id_val).await?;
 
+        // Cluster services: use multi-host env vars from service_members
+        if let Some(cluster_vars) = self.build_cluster_env_vars(&service, &parameters).await? {
+            return Ok(cluster_vars);
+        }
+
         let service_instance = self.create_service_instance(service.name.clone(), service_type);
 
         // Convert parameters to strings for the service
@@ -1186,14 +2770,20 @@ impl ExternalServiceManager {
             });
         }
 
-        // Create service instance
-        let service_instance = self.create_service_instance(service.name.clone(), service_type);
         let parameters = self.get_service_parameters(service_id_val).await?;
+
+        // Cluster services: build multi-host env vars from service_members
+        if let Some(cluster_vars) = self.build_cluster_env_vars(&service, &parameters).await? {
+            return Ok(cluster_vars);
+        }
+
+        // Standalone: delegate to the service instance's get_runtime_env_vars
+        let service_instance = self.create_service_instance(service.name.clone(), service_type);
         let service_config = ServiceConfig {
             name: service.name.clone(),
             service_type,
             version: service.version,
-            parameters: serde_json::to_value(parameters).map_err(|e| {
+            parameters: serde_json::to_value(&parameters).map_err(|e| {
                 ExternalServiceError::InternalError {
                     reason: format!("Failed to serialize parameters: {}", e),
                 }
@@ -1396,6 +2986,12 @@ impl ExternalServiceManager {
         }
 
         let parameters = self.get_service_parameters(service_id_val).await?;
+
+        // Cluster services: use multi-host env vars from service_members
+        if let Some(cluster_vars) = self.build_cluster_env_vars(&service, &parameters).await? {
+            return Ok(cluster_vars);
+        }
+
         let service_instance = self.create_service_instance(service.name.clone(), service_type);
 
         // Convert parameters to strings for the service
@@ -1751,9 +3347,16 @@ impl ExternalServiceManager {
 
         let mut all_vars = HashMap::new();
 
-        // Get basic environment variables
-        if !options.include_runtime {
-            // Basic localhost env vars
+        // Cluster services: use multi-host env vars from service_members
+        let is_cluster = service.topology == "cluster";
+        if is_cluster {
+            if let Some(cluster_vars) = self.build_cluster_env_vars(&service, &parameters).await? {
+                all_vars.extend(cluster_vars);
+            }
+        }
+
+        // Get basic environment variables (standalone only)
+        if !is_cluster && !options.include_runtime {
             let basic_vars = service_instance
                 .get_environment_variables(&params_str)
                 .map_err(|e| ExternalServiceError::InternalError {
@@ -1762,8 +3365,8 @@ impl ExternalServiceManager {
             all_vars.extend(basic_vars);
         }
 
-        // Get Docker-specific variables if requested
-        if options.include_docker {
+        // Get Docker-specific variables if requested (standalone only)
+        if !is_cluster && options.include_docker {
             if let (Some(proj_id), Some(_env_id)) = (project_id, environment_id) {
                 // Verify service is linked to project
                 let link_exists = project_services::Entity::find()
@@ -1791,8 +3394,8 @@ impl ExternalServiceManager {
             }
         }
 
-        // Get runtime variables if requested
-        if options.include_runtime {
+        // Get runtime variables if requested (standalone only — clusters already populated above)
+        if !is_cluster && options.include_runtime {
             if let (Some(proj_id), Some(env_id)) = (project_id, environment_id) {
                 // Verify service is linked to project
                 let link_exists = project_services::Entity::find()
@@ -1903,6 +3506,11 @@ impl ExternalServiceManager {
         })?;
         let parameters = self.get_service_parameters(service_id_val).await?;
 
+        // Cluster services: use multi-host env vars from service_members
+        if let Some(cluster_vars) = self.build_cluster_env_vars(&service, &parameters).await? {
+            return Ok(cluster_vars.keys().cloned().collect());
+        }
+
         let service_instance = self.create_service_instance(service.name.clone(), service_type);
 
         // Convert parameters to strings for the service
@@ -1931,16 +3539,20 @@ impl ExternalServiceManager {
         })?;
         let parameters = self.get_service_parameters(service_id_val).await?;
 
-        let service_instance = self.create_service_instance(service.name.clone(), service_type);
-
-        // Convert parameters to strings for the service
-        let params_str = Self::params_to_strings(&parameters);
-
-        let env_vars = service_instance
-            .get_environment_variables(&params_str)
-            .map_err(|e| ExternalServiceError::InternalError {
-                reason: format!("Failed to get environment variables: {}", e),
-            })?;
+        // Cluster services: use multi-host env vars from service_members
+        let env_vars = if let Some(cluster_vars) =
+            self.build_cluster_env_vars(&service, &parameters).await?
+        {
+            cluster_vars
+        } else {
+            let service_instance = self.create_service_instance(service.name.clone(), service_type);
+            let params_str = Self::params_to_strings(&parameters);
+            service_instance
+                .get_environment_variables(&params_str)
+                .map_err(|e| ExternalServiceError::InternalError {
+                    reason: format!("Failed to get environment variables: {}", e),
+                })?
+        };
 
         // Mask sensitive values based on variable names
         let masked_vars = env_vars
@@ -2283,6 +3895,10 @@ impl ExternalServiceManager {
             connection_info: None,
             created_at: external_service.created_at.to_rfc3339(),
             updated_at: external_service.updated_at.to_rfc3339(),
+            node_id: external_service.node_id,
+            topology: external_service.topology,
+            members: Vec::new(),
+            error_message: external_service.error_message,
         })
     }
 }
@@ -2396,6 +4012,9 @@ mod tests {
             service_type: ServiceType::Postgres,
             version: Some("18".to_string()),
             parameters: params,
+            node_id: None,
+            topology: "standalone".to_string(),
+            members: Vec::new(),
         };
 
         let result = manager.create_service(request).await;
@@ -2430,6 +4049,9 @@ mod tests {
             service_type: ServiceType::Redis,
             version: Some("7".to_string()),
             parameters: params,
+            node_id: None,
+            topology: "standalone".to_string(),
+            members: Vec::new(),
         };
 
         let result = manager.create_service(request).await;
@@ -2462,6 +4084,9 @@ mod tests {
             service_type: ServiceType::S3,
             version: None,
             parameters: params,
+            node_id: None,
+            topology: "standalone".to_string(),
+            members: Vec::new(),
         };
 
         let result = manager.create_service(request).await;
@@ -2496,6 +4121,9 @@ mod tests {
             service_type: ServiceType::Postgres,
             version: None,
             parameters: params,
+            node_id: None,
+            topology: "standalone".to_string(),
+            members: Vec::new(),
         };
 
         let service = manager.create_service(request).await.unwrap();
@@ -2532,6 +4160,9 @@ mod tests {
             service_type: ServiceType::Redis,
             version: None,
             parameters: params,
+            node_id: None,
+            topology: "standalone".to_string(),
+            members: Vec::new(),
         };
 
         let service = manager.create_service(request).await.unwrap();
@@ -2575,6 +4206,9 @@ mod tests {
             service_type: ServiceType::Postgres,
             version: None,
             parameters: params,
+            node_id: None,
+            topology: "standalone".to_string(),
+            members: Vec::new(),
         };
 
         let service = manager.create_service(request).await.unwrap();
@@ -2626,6 +4260,9 @@ mod tests {
             service_type: ServiceType::Redis,
             version: None,
             parameters: params,
+            node_id: None,
+            topology: "standalone".to_string(),
+            members: Vec::new(),
         };
 
         let service = manager.create_service(request).await.unwrap();
@@ -2657,6 +4294,9 @@ mod tests {
             service_type: ServiceType::Redis,
             version: None,
             parameters: params,
+            node_id: None,
+            topology: "standalone".to_string(),
+            members: Vec::new(),
         };
 
         let service = manager.create_service(request).await.unwrap();
@@ -2692,6 +4332,9 @@ mod tests {
                 service_type: ServiceType::Redis,
                 version: None,
                 parameters: params,
+                node_id: None,
+                topology: "standalone".to_string(),
+                members: Vec::new(),
             };
 
             let service = manager.create_service(request).await.unwrap();
@@ -2749,6 +4392,9 @@ mod tests {
             service_type: ServiceType::Postgres,
             version: Some("16".to_string()),
             parameters: params,
+            node_id: None,
+            topology: "standalone".to_string(),
+            members: Vec::new(),
         };
 
         let service = manager.create_service(request).await.unwrap();
@@ -2812,6 +4458,9 @@ mod tests {
             service_type: ServiceType::Postgres,
             version: None,
             parameters: params,
+            node_id: None,
+            topology: "standalone".to_string(),
+            members: Vec::new(),
         };
 
         let service = manager.create_service(request).await.unwrap();
@@ -2862,6 +4511,9 @@ mod tests {
             service_type: ServiceType::Postgres,
             version: None,
             parameters: params,
+            node_id: None,
+            topology: "standalone".to_string(),
+            members: Vec::new(),
         };
 
         let result = manager.create_service(request).await;
@@ -2949,6 +4601,9 @@ mod tests {
             service_type: ServiceType::Postgres,
             version: Some("18".to_string()),
             parameters: params,
+            node_id: None,
+            topology: "standalone".to_string(),
+            members: Vec::new(),
         };
 
         let service = manager
@@ -3029,6 +4684,9 @@ mod tests {
             service_type: ServiceType::Redis,
             version: Some("7".to_string()),
             parameters: params,
+            node_id: None,
+            topology: "standalone".to_string(),
+            members: Vec::new(),
         };
 
         // Attempt to create the service - should fail
@@ -3112,6 +4770,9 @@ mod tests {
             service_type: ServiceType::Postgres,
             version: None,
             parameters: params,
+            node_id: None,
+            topology: "standalone".to_string(),
+            members: Vec::new(),
         };
 
         let service = manager.create_service(request).await.unwrap();
@@ -3163,6 +4824,9 @@ mod tests {
             service_type: ServiceType::Postgres,
             version: Some("16".to_string()),
             parameters: params,
+            node_id: None,
+            topology: "standalone".to_string(),
+            members: Vec::new(),
         };
 
         let service = manager
@@ -3238,6 +4902,9 @@ mod tests {
             service_type: ServiceType::Postgres,
             version: Some("16".to_string()),
             parameters: params,
+            node_id: None,
+            topology: "standalone".to_string(),
+            members: Vec::new(),
         };
 
         let service = manager
@@ -3297,6 +4964,9 @@ mod tests {
             service_type: ServiceType::Postgres,
             version: Some("16".to_string()),
             parameters: params,
+            node_id: None,
+            topology: "standalone".to_string(),
+            members: Vec::new(),
         };
 
         let service = manager
@@ -3361,6 +5031,9 @@ mod tests {
             service_type: ServiceType::Postgres,
             version: Some("18".to_string()),
             parameters: params,
+            node_id: None,
+            topology: "standalone".to_string(),
+            members: Vec::new(),
         };
 
         let service = manager
@@ -3415,6 +5088,9 @@ mod tests {
             service_type: ServiceType::Redis,
             version: Some("7".to_string()),
             parameters: params,
+            node_id: None,
+            topology: "standalone".to_string(),
+            members: Vec::new(),
         };
 
         let service = manager
@@ -3764,6 +5440,10 @@ mod tests {
             connection_info: Some("postgresql://localhost:5432/postgres".to_string()),
             created_at: "2025-01-12T10:30:00Z".to_string(),
             updated_at: "2025-01-12T10:30:00Z".to_string(),
+            node_id: None,
+            topology: "standalone".to_string(),
+            members: Vec::new(),
+            error_message: None,
         };
 
         assert_eq!(service_info.id, 1);
@@ -4016,5 +5696,209 @@ mod tests {
         assert_eq!(env_vars["DATABASE_HOST"], "10.100.0.5");
         // Plain port string doesn't match any pattern, stays as-is
         assert_eq!(env_vars["DATABASE_PORT"], "5432");
+    }
+
+    // ── Cluster validation tests ──────────────────────────────────────
+
+    #[cfg(feature = "docker-tests")]
+    async fn insert_test_service(
+        db: &DatabaseConnection,
+        name: &str,
+        service_type: &str,
+        topology: &str,
+        status: &str,
+    ) -> i32 {
+        use sea_orm::ActiveValue::Set;
+
+        let model = external_services::ActiveModel {
+            name: Set(name.to_string()),
+            service_type: Set(service_type.to_string()),
+            version: Set(None),
+            status: Set(status.to_string()),
+            config: Set(None),
+            node_id: Set(None),
+            topology: Set(topology.to_string()),
+            error_message: Set(None),
+            ..Default::default()
+        };
+        let result = model.insert(db).await.unwrap();
+        result.id
+    }
+
+    #[cfg(feature = "docker-tests")]
+    #[tokio::test]
+    async fn test_initialize_cluster_not_found() {
+        let (manager, _test_db) = setup_test_manager().await;
+
+        let result = manager
+            .initialize_cluster(
+                99999,
+                &[ClusterMemberRequest {
+                    role: "primary".to_string(),
+                    node_id: None,
+                }],
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ExternalServiceError::ServiceNotFound { id: 99999 }
+        ));
+    }
+
+    #[cfg(feature = "docker-tests")]
+    #[tokio::test]
+    async fn test_initialize_cluster_unsupported_type() {
+        let (manager, _test_db) = setup_test_manager().await;
+
+        // S3 does not support cluster topology
+        let service_id = insert_test_service(
+            manager.db.as_ref(),
+            "test-s3-cluster",
+            "s3",
+            "cluster",
+            "creating",
+        )
+        .await;
+
+        let result = manager
+            .initialize_cluster(
+                service_id,
+                &[ClusterMemberRequest {
+                    role: "primary".to_string(),
+                    node_id: None,
+                }],
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ExternalServiceError::InitializationFailed { .. }
+        ));
+    }
+
+    #[cfg(feature = "docker-tests")]
+    #[tokio::test]
+    async fn test_initialize_cluster_invalid_role() {
+        let (manager, _test_db) = setup_test_manager().await;
+
+        let service_id = insert_test_service(
+            manager.db.as_ref(),
+            "test-pg-bad-role",
+            "postgres",
+            "cluster",
+            "creating",
+        )
+        .await;
+
+        let result = manager
+            .initialize_cluster(
+                service_id,
+                &[ClusterMemberRequest {
+                    role: "invalid_role".to_string(),
+                    node_id: None,
+                }],
+            )
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, ExternalServiceError::ParameterValidationFailed { .. }),
+            "Expected ParameterValidationFailed, got: {:?}",
+            err
+        );
+    }
+
+    #[cfg(feature = "docker-tests")]
+    #[tokio::test]
+    async fn test_retry_cluster_not_found() {
+        let (manager, _test_db) = setup_test_manager().await;
+
+        let result = manager.retry_cluster(99999, &[]).await;
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ExternalServiceError::ServiceNotFound { id: 99999 }
+        ));
+    }
+
+    #[cfg(feature = "docker-tests")]
+    #[tokio::test]
+    async fn test_retry_cluster_standalone_rejected() {
+        let (manager, _test_db) = setup_test_manager().await;
+
+        let service_id = insert_test_service(
+            manager.db.as_ref(),
+            "test-standalone-retry",
+            "postgres",
+            "standalone",
+            "failed",
+        )
+        .await;
+
+        let result = manager.retry_cluster(service_id, &[]).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, ExternalServiceError::ParameterValidationFailed { .. }),
+            "Expected ParameterValidationFailed for standalone topology, got: {:?}",
+            err
+        );
+    }
+
+    #[cfg(feature = "docker-tests")]
+    #[tokio::test]
+    async fn test_retry_cluster_wrong_status() {
+        let (manager, _test_db) = setup_test_manager().await;
+
+        let service_id = insert_test_service(
+            manager.db.as_ref(),
+            "test-running-retry",
+            "postgres",
+            "cluster",
+            "running",
+        )
+        .await;
+
+        let result = manager.retry_cluster(service_id, &[]).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, ExternalServiceError::ParameterValidationFailed { .. }),
+            "Expected ParameterValidationFailed for running status, got: {:?}",
+            err
+        );
+    }
+
+    #[cfg(feature = "docker-tests")]
+    #[tokio::test]
+    async fn test_retry_cluster_no_members() {
+        let (manager, _test_db) = setup_test_manager().await;
+
+        let service_id = insert_test_service(
+            manager.db.as_ref(),
+            "test-no-members-retry",
+            "postgres",
+            "cluster",
+            "failed",
+        )
+        .await;
+
+        // Empty member request + no preserved members in DB
+        let result = manager.retry_cluster(service_id, &[]).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, ExternalServiceError::ParameterValidationFailed { .. }),
+            "Expected ParameterValidationFailed for missing members, got: {:?}",
+            err
+        );
     }
 }
