@@ -22,6 +22,8 @@ pub mod dns_managed_domains;
 pub mod dns_providers;
 pub mod domains;
 pub mod email_domains;
+pub mod email_events;
+pub mod email_links;
 pub mod email_providers;
 pub mod emails;
 pub mod env_var_environments;
