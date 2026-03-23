@@ -724,7 +724,7 @@ export function ProjectConfigurator({
       />
 
       {/* Docker Configuration - Only show for docker/dockerfile preset */}
-      {form.watch('preset')?.toLowerCase() === 'dockerfile' && (
+      {form.watch('preset')?.split('::')[0]?.toLowerCase() === 'dockerfile' && (
         <FormField
           control={form.control}
           name="dockerfilePath"
@@ -748,7 +748,7 @@ export function ProjectConfigurator({
       )}
 
       {/* Docker Compose Configuration */}
-      {form.watch('preset')?.toLowerCase() === 'docker-compose' && (
+      {form.watch('preset')?.split('::')[0]?.toLowerCase() === 'docker-compose' && (
         <FormField
           control={form.control}
           name="composePath"
@@ -759,11 +759,11 @@ export function ProjectConfigurator({
                 <Input
                   {...field}
                   placeholder="docker-compose.yml"
-                  value={field.value || 'docker-compose.yml'}
+                  value={field.value || ''}
                 />
               </FormControl>
               <p className="text-xs text-muted-foreground">
-                Path to your Docker Compose file relative to the root directory.
+                Path to your compose file (e.g., docker-compose.yml, compose.yaml).
                 Each service with exposed ports gets a subdomain automatically.
               </p>
               <FormMessage />
@@ -773,7 +773,7 @@ export function ProjectConfigurator({
       )}
 
       {/* Application Port - hide for docker-compose (multiple services have their own ports) */}
-      {form.watch('preset')?.toLowerCase() !== 'docker-compose' && (
+      {form.watch('preset')?.split('::')[0]?.toLowerCase() !== 'docker-compose' && (
         <FormField
           control={form.control}
           name="port"
