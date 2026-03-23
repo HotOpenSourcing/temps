@@ -40,85 +40,100 @@ export interface UpdateStackRequest {
   env_content?: string | null
 }
 
+function throwIfError<T>(result: { data?: T; error?: unknown }): { data: T } {
+  if (result.error) throw result.error
+  return result as { data: T }
+}
+
 export async function listStacks(page = 1, pageSize = 20) {
-  return client.get<PaginatedStacks>({
-    url: '/stacks',
-    query: { page, page_size: pageSize },
-    throwOnError: true,
-  })
+  return throwIfError(
+    await client.get<PaginatedStacks>({
+      url: '/stacks',
+      query: { page, page_size: pageSize },
+    })
+  )
 }
 
 export async function getStack(id: number) {
-  return client.get<Stack>({
-    url: '/stacks/{id}',
-    path: { id },
-    throwOnError: true,
-  })
+  return throwIfError(
+    await client.get<Stack>({
+      url: '/stacks/{id}',
+      path: { id },
+    })
+  )
 }
 
 export async function createStack(body: CreateStackRequest) {
-  return client.post<Stack>({
-    url: '/stacks',
-    body,
-    throwOnError: true,
-  })
+  return throwIfError(
+    await client.post<Stack>({
+      url: '/stacks',
+      body,
+    })
+  )
 }
 
 export async function updateStack(id: number, body: UpdateStackRequest) {
-  return client.patch<Stack>({
-    url: '/stacks/{id}',
-    path: { id },
-    body,
-    throwOnError: true,
-  })
+  return throwIfError(
+    await client.patch<Stack>({
+      url: '/stacks/{id}',
+      path: { id },
+      body,
+    })
+  )
 }
 
 export async function deleteStack(id: number) {
-  return client.delete<void>({
-    url: '/stacks/{id}',
-    path: { id },
-    throwOnError: true,
-  })
+  return throwIfError(
+    await client.delete<void>({
+      url: '/stacks/{id}',
+      path: { id },
+    })
+  )
 }
 
 export async function deployStack(id: number) {
-  return client.post<Stack>({
-    url: '/stacks/{id}/deploy',
-    path: { id },
-    throwOnError: true,
-  })
+  return throwIfError(
+    await client.post<Stack>({
+      url: '/stacks/{id}/deploy',
+      path: { id },
+    })
+  )
 }
 
 export async function stopStack(id: number) {
-  return client.post<Stack>({
-    url: '/stacks/{id}/stop',
-    path: { id },
-    throwOnError: true,
-  })
+  return throwIfError(
+    await client.post<Stack>({
+      url: '/stacks/{id}/stop',
+      path: { id },
+    })
+  )
 }
 
 export async function restartStack(id: number) {
-  return client.post<Stack>({
-    url: '/stacks/{id}/restart',
-    path: { id },
-    throwOnError: true,
-  })
+  return throwIfError(
+    await client.post<Stack>({
+      url: '/stacks/{id}/restart',
+      path: { id },
+    })
+  )
 }
 
 export async function pullStack(id: number) {
-  return client.post<Stack>({
-    url: '/stacks/{id}/pull',
-    path: { id },
-    throwOnError: true,
-  })
+  return throwIfError(
+    await client.post<Stack>({
+      url: '/stacks/{id}/pull',
+      path: { id },
+    })
+  )
 }
 
 export async function syncStack(id: number) {
-  return client.post<Stack>({
-    url: '/stacks/{id}/sync',
-    path: { id },
-    throwOnError: true,
-  })
+  return throwIfError(
+    await client.post<Stack>({
+      url: '/stacks/{id}/sync',
+      path: { id },
+    })
+  )
 }
 
 export interface DiscoverComposeRequest {
@@ -132,11 +147,12 @@ export interface DiscoverComposeResponse {
 }
 
 export async function discoverComposeFiles(body: DiscoverComposeRequest) {
-  return client.post<DiscoverComposeResponse>({
-    url: '/stacks/discover',
-    body,
-    throwOnError: true,
-  })
+  return throwIfError(
+    await client.post<DiscoverComposeResponse>({
+      url: '/stacks/discover',
+      body,
+    })
+  )
 }
 
 export interface StackContainersResponse {
@@ -159,11 +175,12 @@ export interface ComposeContainer {
 }
 
 export async function getStackContainers(id: number) {
-  return client.get<StackContainersResponse>({
-    url: '/stacks/{id}/containers',
-    path: { id },
-    throwOnError: true,
-  })
+  return throwIfError(
+    await client.get<StackContainersResponse>({
+      url: '/stacks/{id}/containers',
+      path: { id },
+    })
+  )
 }
 
 export async function getStackLogs(
@@ -171,12 +188,13 @@ export async function getStackLogs(
   service?: string,
   tail?: number
 ) {
-  return client.get<StackLogsResponse>({
-    url: '/stacks/{id}/logs',
-    path: { id },
-    query: { service, tail },
-    throwOnError: true,
-  })
+  return throwIfError(
+    await client.get<StackLogsResponse>({
+      url: '/stacks/{id}/logs',
+      path: { id },
+      query: { service, tail },
+    })
+  )
 }
 
 export interface ContainerStats {
@@ -196,11 +214,12 @@ export interface StackStatsResponse {
 }
 
 export async function getStackStats(id: number) {
-  return client.get<StackStatsResponse>({
-    url: '/stacks/{id}/stats',
-    path: { id },
-    throwOnError: true,
-  })
+  return throwIfError(
+    await client.get<StackStatsResponse>({
+      url: '/stacks/{id}/stats',
+      path: { id },
+    })
+  )
 }
 
 export interface StackRoute {
@@ -221,31 +240,34 @@ export interface CreateStackRouteRequest {
 }
 
 export async function listStackRoutes(stackId: number) {
-  return client.get<StackRoute[]>({
-    url: '/stacks/{id}/routes',
-    path: { id: stackId },
-    throwOnError: true,
-  })
+  return throwIfError(
+    await client.get<StackRoute[]>({
+      url: '/stacks/{id}/routes',
+      path: { id: stackId },
+    })
+  )
 }
 
 export async function createStackRoute(
   stackId: number,
   body: CreateStackRouteRequest
 ) {
-  return client.post<StackRoute>({
-    url: '/stacks/{id}/routes',
-    path: { id: stackId },
-    body,
-    throwOnError: true,
-  })
+  return throwIfError(
+    await client.post<StackRoute>({
+      url: '/stacks/{id}/routes',
+      path: { id: stackId },
+      body,
+    })
+  )
 }
 
 export async function deleteStackRoute(stackId: number, routeId: number) {
-  return client.delete<void>({
-    url: '/stacks/{stack_id}/routes/{route_id}',
-    path: { stack_id: stackId, route_id: routeId },
-    throwOnError: true,
-  })
+  return throwIfError(
+    await client.delete<void>({
+      url: '/stacks/{stack_id}/routes/{route_id}',
+      path: { stack_id: stackId, route_id: routeId },
+    })
+  )
 }
 
 export async function toggleStackRoute(
@@ -253,10 +275,11 @@ export async function toggleStackRoute(
   routeId: number,
   enabled: boolean
 ) {
-  return client.patch<StackRoute>({
-    url: '/stacks/{stack_id}/routes/{route_id}',
-    path: { stack_id: stackId, route_id: routeId },
-    body: { enabled },
-    throwOnError: true,
-  })
+  return throwIfError(
+    await client.patch<StackRoute>({
+      url: '/stacks/{stack_id}/routes/{route_id}',
+      path: { stack_id: stackId, route_id: routeId },
+      body: { enabled },
+    })
+  )
 }
