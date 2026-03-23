@@ -3,6 +3,7 @@ import {
   deleteStack,
   deployStack,
   discoverComposeFiles,
+  listBranches,
   listStacks,
   restartStack,
   stopStack,
@@ -36,6 +37,13 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { Label } from '@/components/ui/label'
 import {
   Table,
@@ -89,9 +97,29 @@ function CreateStackDialog({
   const [mode, setMode] = useState<'compose' | 'repo'>('compose')
   const [pathMode, setPathMode] = useState<'auto' | 'manual'>('auto')
   const [discoveredFiles, setDiscoveredFiles] = useState<string[]>([])
+  const [branches, setBranches] = useState<string[]>([])
+  const [defaultBranch, setDefaultBranch] = useState<string | null>(null)
   const [form, setForm] = useState<CreateStackRequest>({
     name: '',
     compose_content: '',
+  })
+
+  const branchesMutation = useMutation({
+    mutationFn: () =>
+      listBranches({
+        repo_url: form.repo_url!,
+        repo_access_token: form.repo_access_token,
+      }),
+    meta: { errorTitle: 'Failed to fetch branches' },
+    onSuccess: (res) => {
+      const b = res.data?.branches ?? []
+      const def = res.data?.default_branch ?? null
+      setBranches(b)
+      setDefaultBranch(def)
+      if (def) {
+        setForm((f) => ({ ...f, repo_branch: def }))
+      }
+    },
   })
 
   const discoverMutation = useMutation({
@@ -125,6 +153,8 @@ function CreateStackDialog({
       setMode('compose')
       setPathMode('auto')
       setDiscoveredFiles([])
+      setBranches([])
+      setDefaultBranch(null)
       toast.success('Stack created successfully')
     },
   })
@@ -142,6 +172,8 @@ function CreateStackDialog({
           setMode('compose')
           setPathMode('auto')
           setDiscoveredFiles([])
+          setBranches([])
+          setDefaultBranch(null)
         }
         onOpenChange(v)
       }}
@@ -231,20 +263,31 @@ function CreateStackDialog({
                     id="repo-url"
                     placeholder="https://github.com/user/repo.git"
                     value={form.repo_url ?? ''}
+                    autoComplete="off"
                     onChange={(e) =>
                       setForm({
                         ...form,
                         repo_url: e.target.value || undefined,
                       })
                     }
+                    onBlur={() => {
+                      if (form.repo_url && !branchesMutation.isPending && branches.length === 0) {
+                        branchesMutation.mutate()
+                      }
+                    }}
                   />
                   <Button
                     type="button"
                     variant="outline"
-                    disabled={!form.repo_url || discoverMutation.isPending}
-                    onClick={() => discoverMutation.mutate()}
+                    disabled={!form.repo_url || discoverMutation.isPending || branchesMutation.isPending}
+                    onClick={() => {
+                      if (branches.length === 0) {
+                        branchesMutation.mutate()
+                      }
+                      discoverMutation.mutate()
+                    }}
                   >
-                    {discoverMutation.isPending ? (
+                    {discoverMutation.isPending || branchesMutation.isPending ? (
                       <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                     ) : (
                       <Search className="mr-2 h-4 w-4" />
@@ -255,18 +298,47 @@ function CreateStackDialog({
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
-                  <Label htmlFor="repo-branch">Branch</Label>
-                  <Input
-                    id="repo-branch"
-                    placeholder="main (default)"
-                    value={form.repo_branch ?? ''}
-                    onChange={(e) =>
-                      setForm({
-                        ...form,
-                        repo_branch: e.target.value || undefined,
-                      })
-                    }
-                  />
+                  <Label>Branch</Label>
+                  {branches.length > 0 ? (
+                    <Select
+                      value={form.repo_branch ?? defaultBranch ?? ''}
+                      onValueChange={(v) =>
+                        setForm({ ...form, repo_branch: v || undefined })
+                      }
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select branch" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {branches.map((b) => (
+                          <SelectItem key={b} value={b}>
+                            {b}
+                            {b === defaultBranch && (
+                              <span className="text-muted-foreground ml-1">(default)</span>
+                            )}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <Input
+                        placeholder={branchesMutation.isPending ? 'Loading...' : 'main (default)'}
+                        autoComplete="off"
+                        disabled={branchesMutation.isPending}
+                        value={form.repo_branch ?? ''}
+                        onChange={(e) =>
+                          setForm({
+                            ...form,
+                            repo_branch: e.target.value || undefined,
+                          })
+                        }
+                      />
+                      {branchesMutation.isPending && (
+                        <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                      )}
+                    </div>
+                  )}
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="repo-token">
@@ -275,6 +347,7 @@ function CreateStackDialog({
                   <Input
                     id="repo-token"
                     type="password"
+                    autoComplete="off"
                     placeholder="Optional access token"
                     value={form.repo_access_token ?? ''}
                     onChange={(e) =>

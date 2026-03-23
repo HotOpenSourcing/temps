@@ -147,6 +147,25 @@ export interface DiscoverComposeResponse {
   files: string[]
 }
 
+export interface ListBranchesRequest {
+  repo_url: string
+  repo_access_token?: string
+}
+
+export interface ListBranchesResponse {
+  branches: string[]
+  default_branch: string | null
+}
+
+export async function listBranches(body: ListBranchesRequest) {
+  return throwIfError(
+    await client.post<ListBranchesResponse>({
+      url: '/stacks/branches',
+      body,
+    })
+  )
+}
+
 export async function discoverComposeFiles(body: DiscoverComposeRequest) {
   return throwIfError(
     await client.post<DiscoverComposeResponse>({

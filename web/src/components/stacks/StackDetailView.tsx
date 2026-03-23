@@ -780,6 +780,7 @@ function parseServicePorts(composeContent: string): ServicePort[] {
   let inPorts = false
   let servicesIndent = -1
   let serviceIndent = -1
+  let portsIndent = -1
 
   for (const line of lines) {
     const trimmed = line.trimEnd()
@@ -788,7 +789,7 @@ function parseServicePorts(composeContent: string): ServicePort[] {
     const indent = line.search(/\S/)
 
     // Detect "services:" top-level key
-    if (/^services\s*:/.test(trimmed)) {
+    if (/^\s*services\s*:/.test(line)) {
       inServices = true
       servicesIndent = indent
       continue
@@ -796,10 +797,25 @@ function parseServicePorts(composeContent: string): ServicePort[] {
 
     if (!inServices) continue
 
-    // A key at servicesIndent+2 level is a service name
-    if (indent === servicesIndent + 2 && trimmed.endsWith(':') && !trimmed.startsWith('-') && !trimmed.startsWith('#')) {
+    // A key deeper than services that ends with ":" and isn't a list item is a service name
+    if (
+      indent > servicesIndent &&
+      (serviceIndent === -1 || indent <= serviceIndent) &&
+      /^\s*[\w][\w.-]*\s*:\s*$/.test(line) &&
+      !trimmed.startsWith('-') &&
+      !trimmed.startsWith('#')
+    ) {
       currentService = trimmed.replace(':', '').trim()
       serviceIndent = indent
+      inPorts = false
+      portsIndent = -1
+      continue
+    }
+
+    // If we hit something at or before service level, reset
+    if (indent <= servicesIndent && !trimmed.startsWith('#')) {
+      inServices = false
+      currentService = null
       inPorts = false
       continue
     }
@@ -807,12 +823,14 @@ function parseServicePorts(composeContent: string): ServicePort[] {
     // Detect "ports:" under a service
     if (currentService && indent > serviceIndent && /^\s*ports\s*:/.test(line)) {
       inPorts = true
+      portsIndent = indent
       continue
     }
 
-    // Exit ports block if we hit another key at the same level
-    if (inPorts && indent <= serviceIndent + 4 && !trimmed.startsWith('-')) {
+    // Exit ports block if we hit another key at or before ports level
+    if (inPorts && indent <= portsIndent && !trimmed.startsWith('-') && !trimmed.startsWith('#')) {
       inPorts = false
+      portsIndent = -1
     }
 
     // Parse port entries like "- 8080:80" or "- '3000:3000'" or "- \"8080:80\""
@@ -821,7 +839,7 @@ function parseServicePorts(composeContent: string): ServicePort[] {
         .replace(/^-\s*/, '')
         .replace(/['"]/g, '')
         .trim()
-      const match = portStr.match(/^(\d+):(\d+)/)
+      const match = portStr.match(/^(?:[\d.]+:)?(\d+):(\d+)/)
       if (match) {
         ports.push({
           service: currentService,

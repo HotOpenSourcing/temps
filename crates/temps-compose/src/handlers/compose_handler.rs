@@ -71,6 +71,7 @@ impl From<ComposeError> for Problem {
         get_stack_stats,
         sync_stack,
         discover_compose_files,
+        list_branches,
         update_port_overrides,
         list_stack_routes,
         create_stack_route,
@@ -91,6 +92,8 @@ impl From<ComposeError> for Problem {
             ToggleStackRouteRequest,
             DiscoverComposeRequest,
             DiscoverComposeResponse,
+            ListBranchesRequest,
+            ListBranchesResponse,
             UpdatePortOverridesRequest,
         )
     ),
@@ -809,6 +812,61 @@ async fn discover_compose_files(
     Ok(Json(DiscoverComposeResponse { files }))
 }
 
+// --- Branch listing ---
+
+#[derive(Deserialize, ToSchema, Clone)]
+pub struct ListBranchesRequest {
+    pub repo_url: String,
+    pub repo_access_token: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct ListBranchesResponse {
+    pub branches: Vec<String>,
+    pub default_branch: Option<String>,
+}
+
+/// List branches from a git repository (lightweight ls-remote, no clone)
+#[utoipa::path(
+    tag = "Stacks",
+    post,
+    path = "/stacks/branches",
+    request_body = ListBranchesRequest,
+    responses(
+        (status = 200, description = "Branches listed", body = ListBranchesResponse),
+        (status = 400, description = "Validation error", body = ProblemDetails),
+        (status = 401, description = "Unauthorized", body = ProblemDetails),
+        (status = 403, description = "Insufficient permissions", body = ProblemDetails),
+        (status = 502, description = "Repository connection failed", body = ProblemDetails),
+        (status = 500, description = "Internal server error", body = ProblemDetails)
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn list_branches(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<ComposeAppState>>,
+    Json(request): Json<ListBranchesRequest>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, StacksRead);
+
+    if request.repo_url.is_empty() {
+        return Err(ComposeError::Validation {
+            message: "Repository URL cannot be empty".into(),
+        }
+        .into());
+    }
+
+    let (branches, default_branch) = app_state
+        .compose_service
+        .list_branches(&request.repo_url, request.repo_access_token.as_deref())
+        .await?;
+
+    Ok(Json(ListBranchesResponse {
+        branches,
+        default_branch,
+    }))
+}
+
 /// Update port overrides for a compose stack
 #[utoipa::path(
     tag = "Stacks",
@@ -1040,6 +1098,7 @@ pub fn configure_routes() -> Router<Arc<ComposeAppState>> {
     Router::new()
         .route("/stacks", get(list_stacks).post(create_stack))
         .route("/stacks/discover", post(discover_compose_files))
+        .route("/stacks/branches", post(list_branches))
         .route(
             "/stacks/{id}",
             get(get_stack).patch(update_stack).delete(delete_stack),

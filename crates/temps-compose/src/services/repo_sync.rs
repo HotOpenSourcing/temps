@@ -238,6 +238,78 @@ fn walk_for_compose_files(root: &Path, current: &Path, results: &mut Vec<String>
     }
 }
 
+/// List branches from a remote git repository using ls-remote (no clone needed).
+/// Returns (branches, default_branch) where default_branch is the HEAD ref.
+pub async fn list_branches(
+    repo_url: &str,
+    access_token: Option<&str>,
+) -> Result<(Vec<String>, Option<String>), RepoSyncError> {
+    let repo_url = repo_url.to_string();
+    let access_token = access_token.map(|s| s.to_string());
+
+    tokio::task::spawn_blocking(move || list_branches_blocking(&repo_url, access_token.as_deref()))
+        .await
+        .map_err(|e| RepoSyncError::CloneFailed {
+            url: "unknown".into(),
+            reason: format!("Task join error: {}", e),
+        })?
+}
+
+fn list_branches_blocking(
+    url: &str,
+    access_token: Option<&str>,
+) -> Result<(Vec<String>, Option<String>), RepoSyncError> {
+    let mut remote =
+        git2::Remote::create_detached(url).map_err(|e| RepoSyncError::CloneFailed {
+            url: url.to_string(),
+            reason: e.message().to_string(),
+        })?;
+
+    let mut callbacks = RemoteCallbacks::new();
+    if let Some(token) = access_token {
+        let token = token.to_string();
+        callbacks.credentials(move |_url, _username_from_url, _allowed_types| {
+            Cred::userpass_plaintext("x-access-token", &token)
+        });
+    }
+
+    remote
+        .connect_auth(git2::Direction::Fetch, Some(callbacks), None)
+        .map_err(|e| RepoSyncError::CloneFailed {
+            url: url.to_string(),
+            reason: e.message().to_string(),
+        })?;
+
+    let refs = remote.list().map_err(|e| RepoSyncError::CloneFailed {
+        url: url.to_string(),
+        reason: e.message().to_string(),
+    })?;
+
+    // Find HEAD target to determine default branch
+    let head_oid = refs.iter().find(|r| r.name() == "HEAD").map(|r| r.oid());
+
+    let mut branches = Vec::new();
+    let mut default_branch = None;
+
+    for r in refs {
+        let name = r.name();
+        if let Some(branch) = name.strip_prefix("refs/heads/") {
+            branches.push(branch.to_string());
+            if head_oid == Some(r.oid()) && default_branch.is_none() {
+                default_branch = Some(branch.to_string());
+            }
+        }
+    }
+
+    branches.sort();
+
+    remote.disconnect().ok();
+
+    debug!(url = %url, count = branches.len(), default = ?default_branch, "Listed remote branches");
+
+    Ok((branches, default_branch))
+}
+
 /// Get the default temp directory for repo sync operations
 pub fn repo_sync_work_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("repo-sync")

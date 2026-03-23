@@ -604,6 +604,16 @@ impl ComposeService {
         Ok(files)
     }
 
+    pub async fn list_branches(
+        &self,
+        repo_url: &str,
+        repo_access_token: Option<&str>,
+    ) -> Result<(Vec<String>, Option<String>), ComposeError> {
+        let (branches, default_branch) =
+            repo_sync::list_branches(repo_url, repo_access_token).await?;
+        Ok((branches, default_branch))
+    }
+
     // --- Stack route management ---
 
     pub async fn list_routes(
