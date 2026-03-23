@@ -196,6 +196,23 @@ impl WorkflowTask for DeployComposeJob {
         );
         labels.insert("sh.temps.managed".to_string(), "true".to_string());
 
+        // Tear down previous compose stack before deploying new one
+        // This ensures clean state and avoids orphaned containers
+        if let Some(ref log_id) = self.log_id {
+            let _ = self
+                .log_service
+                .log_info(log_id, "Stopping previous compose stack (if running)")
+                .await;
+        }
+        if let Err(e) = self.compose_executor.destroy(&project_name).await {
+            // Log but don't fail — previous stack might not exist
+            debug!(
+                project = %project_name,
+                error = %e,
+                "Previous compose stack teardown failed (may not exist)"
+            );
+        }
+
         let request = ComposeDeployRequest {
             project_name: project_name.clone(),
             compose_content: self.compose_content.clone(),

@@ -934,6 +934,68 @@ impl CachedPeerTable {
                             }
                         }
                     }
+
+                    // Docker Compose: create per-service routes
+                    // Containers with service_name get routed as {service}-{env_subdomain}.{preview_domain}
+                    let has_compose_services = containers.iter().any(|c| c.service_name.is_some());
+                    if has_compose_services {
+                        // Group containers by service_name
+                        let mut services: HashMap<String, Vec<&deployment_containers::Model>> =
+                            HashMap::new();
+                        for c in &containers {
+                            if let Some(ref svc) = c.service_name {
+                                services.entry(svc.clone()).or_default().push(c);
+                            }
+                        }
+
+                        for (service_name, svc_containers) in &services {
+                            // Only create routes for services with exposed ports
+                            let has_ports = svc_containers.iter().any(|c| c.container_port > 0);
+                            if !has_ports {
+                                continue;
+                            }
+
+                            let mut svc_backends = Vec::with_capacity(svc_containers.len());
+                            for c in svc_containers {
+                                let node_addr = resolve_node_private_address(
+                                    c.node_id,
+                                    &mut nodes_cache,
+                                    self.db.as_ref(),
+                                )
+                                .await;
+                                svc_backends.push(build_backend_entry(c, node_addr.as_deref()));
+                            }
+
+                            let svc_backend = BackendType::Upstream {
+                                backends: svc_backends.clone(),
+                                round_robin_counter: Arc::new(AtomicUsize::new(0)),
+                            };
+
+                            let svc_route_info = RouteInfo {
+                                backend: svc_backend,
+                                redirect_to: None,
+                                status_code: None,
+                                project: project.cloned(),
+                                environment: environment.cloned(),
+                                deployment: Some(Arc::clone(deployment)),
+                            };
+
+                            // Route: {service}-{env_subdomain}.{preview_domain}
+                            let svc_domain =
+                                format!("{}-{}.{}", service_name, main_url, preview_domain);
+                            if let std::collections::hash_map::Entry::Vacant(e) =
+                                routes.entry(svc_domain.clone())
+                            {
+                                let addresses: Vec<&str> =
+                                    svc_backends.iter().map(|b| b.address.as_str()).collect();
+                                debug!(
+                                    "Loaded compose service route: {} -> {:?} (service={}, project={}, env={})",
+                                    svc_domain, addresses, service_name, env.project_id, env.id
+                                );
+                                e.insert(svc_route_info);
+                            }
+                        }
+                    }
                 }
             }
         }

@@ -140,6 +140,7 @@ const formSchema = z.object({
   ),
   storageServices: z.array(z.number()),
   dockerfilePath: z.string().optional(),
+  composePath: z.string().optional(),
   port: z.coerce.number().min(1).max(65535).optional(),
 })
 
@@ -486,6 +487,19 @@ export function ProjectConfigurator({
             environment_variables: finalData.environmentVariables?.map(
               (env) => [env.key, env.value] as [string, string]
             ),
+            preset_config:
+              finalData.preset === 'dockerfile' && finalData.dockerfilePath
+                ? {
+                    preset: 'dockerfile',
+                    dockerfilePath: finalData.dockerfilePath,
+                  }
+                : finalData.preset === 'docker-compose'
+                  ? {
+                      preset: 'docker-compose',
+                      composePath:
+                        finalData.composePath || 'docker-compose.yml',
+                    }
+                  : undefined,
           },
         })
       }
@@ -710,29 +724,52 @@ export function ProjectConfigurator({
       />
 
       {/* Docker Configuration - Only show for docker/dockerfile preset */}
-      {form.watch('preset')?.toLowerCase().includes('docker') && (
-        <>
-          <FormField
-            control={form.control}
-            name="dockerfilePath"
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>Dockerfile Path</FormLabel>
-                <FormControl>
-                  <Input
-                    {...field}
-                    placeholder="Dockerfile"
-                    value={field.value || 'Dockerfile'}
-                  />
-                </FormControl>
-                <p className="text-xs text-muted-foreground">
-                  Path to your Dockerfile relative to the root directory
-                </p>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
-        </>
+      {form.watch('preset')?.toLowerCase() === 'dockerfile' && (
+        <FormField
+          control={form.control}
+          name="dockerfilePath"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Dockerfile Path</FormLabel>
+              <FormControl>
+                <Input
+                  {...field}
+                  placeholder="Dockerfile"
+                  value={field.value || 'Dockerfile'}
+                />
+              </FormControl>
+              <p className="text-xs text-muted-foreground">
+                Path to your Dockerfile relative to the root directory
+              </p>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+      )}
+
+      {/* Docker Compose Configuration */}
+      {form.watch('preset')?.toLowerCase() === 'docker-compose' && (
+        <FormField
+          control={form.control}
+          name="composePath"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Compose File Path</FormLabel>
+              <FormControl>
+                <Input
+                  {...field}
+                  placeholder="docker-compose.yml"
+                  value={field.value || 'docker-compose.yml'}
+                />
+              </FormControl>
+              <p className="text-xs text-muted-foreground">
+                Path to your Docker Compose file relative to the root directory.
+                Each service with exposed ports gets a subdomain automatically.
+              </p>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
       )}
 
       <FormField
