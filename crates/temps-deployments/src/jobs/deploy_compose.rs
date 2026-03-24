@@ -41,6 +41,8 @@ pub struct DeployComposeJob {
     /// Inline compose content (used when no git repo, e.g. manual project)
     compose_content: Option<String>,
     environment_vars: HashMap<String, String>,
+    /// User-provided docker-compose override YAML
+    compose_override: Option<String>,
     /// Job ID of the download_repo job (to read repo_dir from context)
     download_job_id: String,
     log_id: Option<String>,
@@ -56,6 +58,7 @@ pub struct DeployComposeJobBuilder {
     compose_path: Option<String>,
     directory: Option<String>,
     compose_content: Option<String>,
+    compose_override: Option<String>,
     environment_vars: HashMap<String, String>,
     download_job_id: Option<String>,
     log_id: Option<String>,
@@ -79,6 +82,7 @@ impl DeployComposeJobBuilder {
             compose_path: None,
             directory: None,
             compose_content: None,
+            compose_override: None,
             environment_vars: HashMap::new(),
             download_job_id: None,
             log_id: None,
@@ -118,6 +122,10 @@ impl DeployComposeJobBuilder {
         self.compose_content = content;
         self
     }
+    pub fn compose_override(mut self, content: Option<String>) -> Self {
+        self.compose_override = content;
+        self
+    }
     pub fn download_job_id(mut self, id: String) -> Self {
         self.download_job_id = Some(id);
         self
@@ -155,6 +163,7 @@ impl DeployComposeJobBuilder {
             compose_path: self.compose_path,
             directory: self.directory.unwrap_or_else(|| ".".to_string()),
             compose_content: self.compose_content,
+            compose_override: self.compose_override,
             environment_vars: self.environment_vars,
             download_job_id: self
                 .download_job_id
@@ -316,6 +325,7 @@ impl WorkflowTask for DeployComposeJob {
             environment_vars: self.environment_vars.clone(),
             labels,
             repo_dir: repo_path,
+            compose_override: self.compose_override.clone(),
         };
 
         // Deploy

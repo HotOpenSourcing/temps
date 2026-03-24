@@ -837,6 +837,11 @@ pub struct DockerComposeConfig {
     /// Path to compose file relative to project directory (default: "docker-compose.yml")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compose_path: Option<String>,
+    /// User-provided docker-compose.override.yml content.
+    /// Merged with the main compose file at deploy time.
+    /// Use to override ports, volumes, environment, commands, etc.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compose_override: Option<String>,
 }
 
 /// Nixpacks preset configuration

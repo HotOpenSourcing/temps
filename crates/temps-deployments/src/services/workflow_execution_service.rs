@@ -1228,6 +1228,18 @@ impl WorkflowExecutionService {
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
 
+                // User-provided compose override from project preset_config
+                let compose_override = project
+                    .preset_config
+                    .as_ref()
+                    .and_then(|pc| {
+                        if let temps_entities::preset::PresetConfig::DockerCompose(cfg) = pc {
+                            cfg.compose_override.clone()
+                        } else {
+                            None
+                        }
+                    });
+
                 let compose_executor = Arc::new(temps_deployer::compose::ComposeExecutor::new(
                     self.docker.clone(),
                     self.config_service.data_dir(),
@@ -1242,6 +1254,7 @@ impl WorkflowExecutionService {
                     .compose_path(compose_path)
                     .directory(directory)
                     .compose_content(compose_content)
+                    .compose_override(compose_override)
                     .download_job_id(download_job_id)
                     .environment_vars(env_vars)
                     .log_id(Some(db_job.log_id.clone()))

@@ -76,6 +76,7 @@ const gitSettingsSchema = z.object({
   directory: z.string().optional(),
   dockerfilePath: z.string().optional(),
   composePath: z.string().optional(),
+  composeOverride: z.string().optional(),
 })
 
 type GitSettingsFormValues = z.infer<typeof gitSettingsSchema>
@@ -119,6 +120,8 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
         (project?.preset_config as any)?.dockerfilePath || 'Dockerfile',
       composePath:
         (project?.preset_config as any)?.composePath || 'docker-compose.yml',
+      composeOverride:
+        (project?.preset_config as any)?.composeOverride || '',
     },
   })
 
@@ -305,7 +308,11 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
         presetName === 'dockerfile' && values.dockerfilePath
           ? { preset: 'dockerfile', dockerfilePath: values.dockerfilePath }
           : presetName === 'docker-compose'
-            ? { preset: 'docker-compose', composePath: values.composePath || 'docker-compose.yml' }
+            ? {
+                preset: 'docker-compose',
+                composePath: values.composePath || 'docker-compose.yml',
+                composeOverride: values.composeOverride || undefined,
+              }
             : undefined
 
       await updateGithubRepo.mutateAsync({
@@ -928,28 +935,53 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                         />
                       )}
 
-                      {/* Compose path - only shown when Docker Compose preset is selected */}
+                      {/* Compose settings - only shown when Docker Compose preset is selected */}
                       {currentPreset?.split('::')[0] === 'docker-compose' && (
-                        <FormField
-                          control={form.control}
-                          name="composePath"
-                          render={({ field }) => (
-                            <FormItem>
-                              <FormLabel>Compose File Path</FormLabel>
-                              <FormControl>
-                                <Input
-                                  {...field}
-                                  placeholder="docker-compose.yml"
-                                />
-                              </FormControl>
-                              <FormDescription>
-                                Path to your Docker Compose file relative to the
-                                root directory
-                              </FormDescription>
-                              <FormMessage />
-                            </FormItem>
-                          )}
-                        />
+                        <>
+                          <FormField
+                            control={form.control}
+                            name="composePath"
+                            render={({ field }) => (
+                              <FormItem>
+                                <FormLabel>Compose File Path</FormLabel>
+                                <FormControl>
+                                  <Input
+                                    {...field}
+                                    placeholder="docker-compose.yml"
+                                  />
+                                </FormControl>
+                                <FormDescription>
+                                  Path to your Docker Compose file relative to the
+                                  root directory
+                                </FormDescription>
+                                <FormMessage />
+                              </FormItem>
+                            )}
+                          />
+
+                          <FormField
+                            control={form.control}
+                            name="composeOverride"
+                            render={({ field }) => (
+                              <FormItem>
+                                <FormLabel>Compose Override (optional)</FormLabel>
+                                <FormControl>
+                                  <textarea
+                                    {...field}
+                                    className="flex min-h-[120px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                                    placeholder={`# Override ports, volumes, etc.\nservices:\n  clickhouse:\n    ports:\n      - "18123:8123"`}
+                                  />
+                                </FormControl>
+                                <FormDescription>
+                                  YAML override merged with the compose file at deploy time.
+                                  Use to remap ports, add volumes, change commands, etc.
+                                  without modifying the original compose file.
+                                </FormDescription>
+                                <FormMessage />
+                              </FormItem>
+                            )}
+                          />
+                        </>
                       )}
                     </>
                   ) : (
@@ -1003,14 +1035,14 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                           </div>
                         )}
 
-                        {project.preset === 'docker-compose' && (
+                        {(project.preset === 'docker-compose' || project.preset === 'dockercompose') && (
                           <div className="space-y-2">
                             <Label>Compose File Path</Label>
                             <div className="flex items-center gap-2 p-3 rounded-lg border bg-muted/50">
                               <FileIcon className="h-4 w-4 text-muted-foreground" />
                               <span className="font-mono text-sm">
                                 {(project.preset_config as any)
-                                  ?.composePath || 'docker-compose.yml'}
+                                  ?.composePath || (project.preset_config as any)?.compose_path || 'docker-compose.yml'}
                               </span>
                             </div>
                           </div>

@@ -49,6 +49,8 @@ pub struct ComposeDeployRequest {
     pub labels: HashMap<String, String>,
     /// Source repo directory (needed for compose files with build: directives)
     pub repo_dir: Option<PathBuf>,
+    /// User-provided docker-compose.temps-override.yml content
+    pub compose_override: Option<String>,
 }
 
 /// Result for a single compose service after deployment.
@@ -327,19 +329,29 @@ impl ComposeExecutor {
                     reason: e.to_string(),
                 })?;
 
-            // Write compose override that injects .env.temps into every service.
-            // Docker Compose automatically merges docker-compose.override.yml.
-            // This ensures all Temps system env vars (SENTRY_DSN, TEMPS_API_URL, etc.)
-            // are available inside every container without modifying the original compose file.
-            let override_path = project_dir.join("docker-compose.override.yml");
+            // Write Temps env override (auto-generated, injects .env.temps into every service)
+            let temps_override_path = project_dir.join("docker-compose.temps-env.yml");
             let override_content =
                 self.generate_env_override(&request.compose_content, ".env.temps");
-            tokio::fs::write(&override_path, &override_content)
+            tokio::fs::write(&temps_override_path, &override_content)
                 .await
                 .map_err(|e| ComposeError::FileWriteFailed {
-                    path: override_path.display().to_string(),
+                    path: temps_override_path.display().to_string(),
                     reason: e.to_string(),
                 })?;
+        }
+
+        // Write user-provided override if present (ports, volumes, commands, etc.)
+        if let Some(ref user_override) = request.compose_override {
+            if !user_override.trim().is_empty() {
+                let override_path = project_dir.join("docker-compose.temps-override.yml");
+                tokio::fs::write(&override_path, user_override)
+                    .await
+                    .map_err(|e| ComposeError::FileWriteFailed {
+                        path: override_path.display().to_string(),
+                        reason: e.to_string(),
+                    })?;
+            }
         }
 
         debug!(
@@ -447,10 +459,16 @@ impl ComposeExecutor {
         cmd.args(["compose", "-p", project_name])
             .args(["-f", compose_file]);
 
-        // Include override file for env var injection (if it exists)
-        let override_path = project_dir.join("docker-compose.override.yml");
-        if override_path.exists() {
-            cmd.args(["-f", "docker-compose.override.yml"]);
+        // Include Temps env override (auto-generated)
+        let temps_override = project_dir.join("docker-compose.temps-env.yml");
+        if temps_override.exists() {
+            cmd.args(["-f", "docker-compose.temps-env.yml"]);
+        }
+
+        // Include user-provided override (ports, volumes, etc.)
+        let user_override = project_dir.join("docker-compose.temps-override.yml");
+        if user_override.exists() {
+            cmd.args(["-f", "docker-compose.temps-override.yml"]);
         }
 
         // Load .env.temps for YAML variable substitution (${VAR} in compose file)
@@ -620,7 +638,7 @@ impl ComposeExecutor {
         Ok(())
     }
 
-    /// Generate a docker-compose.override.yml that adds env_file to every service.
+    /// Generate a docker-compose.temps-override.yml that adds env_file to every service.
     /// This injects Temps system env vars into all containers without modifying
     /// the original compose file.
     fn generate_env_override(&self, compose_content: &str, env_file: &str) -> String {
