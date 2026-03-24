@@ -373,7 +373,8 @@ impl ComposeExecutor {
         cmd.args(["compose", "-p", project_name])
             .args(["-f", compose_file])
             .args(["build", "--pull"])
-            .current_dir(project_dir);
+            .current_dir(project_dir)
+            .env("PWD", project_dir.to_string_lossy().to_string());
 
         for (key, value) in env_vars {
             cmd.env(key, value);
@@ -473,6 +474,9 @@ impl ComposeExecutor {
             "--force-recreate",
         ])
         .current_dir(project_dir);
+
+        // Set PWD so compose files using ${PWD} resolve correctly
+        cmd.env("PWD", project_dir.to_string_lossy().to_string());
 
         // Pass environment variables for compose YAML substitution (process env)
         for (key, value) in env_vars {
