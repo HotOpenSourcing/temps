@@ -310,11 +310,21 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
       }))
     }
 
-    // Fallback to default presets if no live data
+    // Fallback to all available presets if no live data
     return [
+      { value: 'docker-compose', label: 'Docker Compose', directory: './' },
+      { value: 'dockerfile', label: 'Dockerfile', directory: './' },
       { value: 'nextjs', label: 'Next.js', directory: './' },
       { value: 'vite', label: 'Vite', directory: './' },
       { value: 'rsbuild', label: 'RSBuild', directory: './' },
+      { value: 'astro', label: 'Astro', directory: './' },
+      { value: 'nuxt', label: 'Nuxt', directory: './' },
+      { value: 'remix', label: 'Remix', directory: './' },
+      { value: 'python', label: 'Python', directory: './' },
+      { value: 'go', label: 'Go', directory: './' },
+      { value: 'rust', label: 'Rust', directory: './' },
+      { value: 'nodejs', label: 'Node.js', directory: './' },
+      { value: 'static', label: 'Static', directory: './' },
     ]
   }, [presetQuery.data, publicPresetQuery.data])
 
