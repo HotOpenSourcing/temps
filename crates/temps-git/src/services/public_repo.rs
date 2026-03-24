@@ -59,6 +59,7 @@ pub struct DetectedPreset {
     pub exposed_port: Option<i32>,
     pub icon_url: Option<String>,
     pub project_type: String,
+    pub compose_files: Option<Vec<String>>,
 }
 
 /// Trait for public repository providers
@@ -233,7 +234,10 @@ impl PublicRepoProvider for GitHubPublicProvider {
         owner: &str,
         repo: &str,
     ) -> Result<Vec<PublicBranch>, PublicRepoError> {
-        let url = format!("https://api.github.com/repos/{}/{}/branches", owner, repo);
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/branches?per_page=100",
+            owner, repo
+        );
 
         let response = self.send_with_retry(|| self.client.get(&url)).await?;
 
@@ -620,6 +624,7 @@ pub fn detect_presets_from_files(files: &[String]) -> Vec<DetectedPreset> {
                 exposed_port,
                 icon_url,
                 project_type,
+                compose_files: preset.compose_files,
             }
         })
         .collect()
@@ -737,6 +742,7 @@ mod tests {
             exposed_port: Some(3000),
             icon_url: Some("https://example.com/icon.svg".to_string()),
             project_type: "frontend".to_string(),
+            compose_files: None,
         };
 
         let json = serde_json::to_string(&preset).unwrap();
