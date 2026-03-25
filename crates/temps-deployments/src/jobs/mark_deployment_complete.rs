@@ -253,18 +253,37 @@ impl MarkDeploymentCompleteJob {
 
         // Extract container info from deploy job output and create deployment_container records
         // Try to get container_ids array first (for multi-replica deployments)
-        let container_ids = context
-            .get_output::<Vec<String>>("deploy_container", "container_ids")
-            .ok()
-            .flatten()
-            .or_else(|| {
-                // Fallback to single container_id for backward compatibility
-                context
-                    .get_output::<String>("deploy_container", "container_id")
-                    .ok()
-                    .flatten()
-                    .map(|id| vec![id])
-            });
+        let container_ids = match context.get_output::<Vec<String>>("deploy_container", "container_ids") {
+            Ok(Some(ids)) => {
+                info!("Got {} container_ids from deploy_container output", ids.len());
+                Some(ids)
+            }
+            Ok(None) => {
+                debug!("No container_ids array in deploy_container output, trying single container_id");
+                None
+            }
+            Err(e) => {
+                warn!("Failed to deserialize container_ids from deploy_container: {}. Trying single container_id fallback.", e);
+                None
+            }
+        }
+        .or_else(|| {
+            // Fallback to single container_id for backward compatibility
+            match context.get_output::<String>("deploy_container", "container_id") {
+                Ok(Some(id)) => {
+                    info!("Got single container_id from deploy_container output: {}", id);
+                    Some(vec![id])
+                }
+                Ok(None) => {
+                    warn!("No container_id found in deploy_container output either");
+                    None
+                }
+                Err(e) => {
+                    warn!("Failed to deserialize container_id from deploy_container: {}", e);
+                    None
+                }
+            }
+        });
 
         let host_ports = context
             .get_output::<Vec<u16>>("deploy_container", "host_ports")
@@ -278,6 +297,17 @@ impl MarkDeploymentCompleteJob {
                     .flatten()
                     .map(|port| vec![port])
             });
+
+        if container_ids.is_none() {
+            warn!(
+                "No container_ids found in workflow context from deploy_container job. \
+                 Container registration will be skipped. This means the Environments page \
+                 will show 'No containers'. Check that deploy_container job set its outputs."
+            );
+            self.log("WARNING: No container IDs found from deploy job — containers won't appear in UI".to_string())
+                .await
+                .ok();
+        }
 
         if let Some(container_ids) = container_ids {
             let now = chrono::Utc::now();
