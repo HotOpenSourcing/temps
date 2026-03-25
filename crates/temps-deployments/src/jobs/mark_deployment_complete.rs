@@ -1080,6 +1080,30 @@ impl MarkDeploymentCompleteJob {
                 }
             };
 
+            if containers.is_empty() {
+                // Fallback: no deployment_containers records (pre-migration deployments).
+                // Try to stop the container by its slug name convention: {slug}
+                let slug = &deployment.slug;
+                self.log(format!(
+                    "No container records for deployment {} — trying slug-based cleanup: {}",
+                    deployment_id, slug
+                ))
+                .await
+                .ok();
+
+                // Try stop + remove by container name (slug)
+                if let Err(e) = self.container_deployer.stop_container(slug).await {
+                    debug!("Could not stop container by slug {}: {}", slug, e);
+                }
+                if let Err(e) = self.container_deployer.remove_container(slug).await {
+                    debug!("Could not remove container by slug {}: {}", slug, e);
+                } else {
+                    self.log(format!("Removed orphaned container {}", slug))
+                        .await
+                        .ok();
+                }
+            }
+
             for container in containers {
                 let container_id = container.container_id.clone();
 
