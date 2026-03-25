@@ -2,13 +2,14 @@
 
 ## 1. Commit pending changes
 
-- [ ] Commit all 27 modified files with proper conventional commit message
-- [ ] Files span: `temps-deployer`, `temps-deployments`, `temps-entities`, `temps-projects`, `temps-routes`, `temps-git`, `temps-presets`, and `web/`
+- [x] Commit all modified files with proper conventional commit messages
+- [x] Files span: `temps-deployer`, `temps-deployments`, `temps-entities`, `temps-projects`, `temps-routes`, `temps-git`, `temps-presets`, and `web/`
+- [x] Pushed to `feat/compose-stacks` branch
 
 ## 2. Backend verification
 
-- [ ] `cargo check --lib` — no errors
-- [ ] `cargo test --lib` — all tests pass
+- [x] `cargo check --lib` — no errors (verified Mar 25)
+- [ ] `cargo test --lib` — 2 tests failing in `temps-deployments` (job count assertions need update for `persist_static_assets` job)
 - [ ] `cargo build --bin temps` — debug binary builds
 - [ ] `cargo build --release --bin temps` — release binary builds
 
@@ -22,12 +23,12 @@
 ## 4. Frontend verification
 
 - [ ] `cd web && bun run build` — builds without errors
-- [ ] No leftover `console.log` debug statements
+- [x] No leftover `console.log` debug statements (only in SDK docs code examples — BlobService, KvService, SdkDocumentation, AiGateway — these are intentional sample code)
 
 ## 5. Docker Compose features
 
 - [ ] Create project from public repo with docker-compose preset
-- [ ] Deploy succeeds (DownloadRepo → DeployCompose → MarkComplete)
+- [ ] Deploy succeeds (DownloadRepo → DeployCompose → MarkComplete → TakeScreenshot)
 - [ ] Containers page shows all compose services (clickhouse, keeper, etc.)
 - [ ] Container detail loads (no "Container not found" error)
 - [ ] Container logs stream correctly
@@ -51,6 +52,7 @@
 - [ ] Compose override persists after save and reload
 - [ ] Public repo preset detection works (detectPublicPresets API)
 - [ ] Branch listing works for repos with >30 branches (pagination)
+- [x] Compose file picker filters by root directory (only shows files in selected subfolder)
 
 ## 8. Container management
 
@@ -61,6 +63,10 @@
 
 ## 9. Sidebar / Navigation
 
+- [x] Infrastructure pages (Domains, Storage, Email, AI Gateway, Git/DNS Providers) moved under Settings layout
+- [x] Settings sidebar visible on all infrastructure pages
+- [x] Command palette (Cmd+K) synchronized with actual routes
+- [x] Backwards-compatible redirects from old top-level URLs
 - [ ] Request Logs appears under Observability submenu
 - [ ] Request Logs link (`/request-logs`) renders the page (not empty)
 - [ ] All other sidebar links still work
@@ -104,6 +110,9 @@
 - Public ports configuration UI with autocomplete from compose file
 - Request Logs in project sidebar under Observability
 - Project slug truncation (40 char max) for DNS-safe subdomains
+- Screenshot capture for Docker Compose deployments
+- Infrastructure pages consolidated under Settings layout with sidebar navigation
+- Command palette (Cmd+K) synchronized with settings/routes structure
 
 ### Fixed
 - Docker Compose port override conflict — ports now stripped from base file when override defines them
@@ -115,3 +124,6 @@
 - Branch listing pagination — public repos with >30 branches now list all
 - Compose fields visibility — handles both `docker-compose` and `dockercompose` slug variants
 - Preset pre-selection — injects current preset+path into detected list if not found
+- Compose file picker now filters by root directory (only shows files in selected subfolder)
+- TimescaleDB-HA Docker volume path fixed (`/home/postgres/pgdata/data` instead of `/var/lib/postgresql/data`)
+- Docker Registry icon fixed (was using Globe, now uses Boxes)
