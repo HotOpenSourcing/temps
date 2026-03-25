@@ -1127,4 +1127,28 @@ mod tests {
             _ => panic!("Expected NextJs config"),
         }
     }
+
+    #[test]
+    fn test_parse_for_preset_docker_compose_with_override() {
+        let value = serde_json::json!({
+            "preset": "docker-compose",
+            "composePath": "docker-compose.yaml",
+            "composeOverride": "services:\n  plausible:\n    ports:\n      - 48080:80",
+            "publicPorts": [{"service": "plausible", "port": 80}]
+        });
+        let config = PresetConfig::parse_for_preset(&Preset::DockerCompose, &value).unwrap();
+        match config {
+            PresetConfig::DockerCompose(cfg) => {
+                assert_eq!(cfg.compose_path, Some("docker-compose.yaml".to_string()));
+                assert_eq!(
+                    cfg.compose_override,
+                    Some("services:\n  plausible:\n    ports:\n      - 48080:80".to_string())
+                );
+                assert_eq!(cfg.public_ports.len(), 1);
+                assert_eq!(cfg.public_ports[0].service, "plausible");
+                assert_eq!(cfg.public_ports[0].port, 80);
+            }
+            _ => panic!("Expected DockerCompose config"),
+        }
+    }
 }

@@ -202,8 +202,8 @@ function PublicPortsField({
             }
           }
         }
-        // Parse port entries
-        if (currentService && (trimmed.startsWith("- '") || trimmed.startsWith('- "'))) {
+        // Parse port entries: handles - 48080:80, - "48080:80", - '48080:80'
+        if (currentService && trimmed.startsWith('-')) {
           const portMatch = trimmed.match(/(\d+):(\d+)/)
           if (portMatch) {
             result.push({
@@ -562,10 +562,11 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
       const [presetName] = values.preset?.split('::') || ['']
 
       // Build preset_config for presets that support it
+      const isComposePreset = presetName === 'docker-compose' || presetName === 'dockercompose'
       const presetConfig =
         presetName === 'dockerfile' && values.dockerfilePath
           ? { preset: 'dockerfile', dockerfilePath: values.dockerfilePath }
-          : presetName === 'docker-compose'
+          : isComposePreset
             ? {
                 preset: 'docker-compose',
                 composePath: values.composePath || 'docker-compose.yml',
@@ -574,9 +575,12 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
               }
             : undefined
 
+      // Backend normalizes "dockercompose" -> "docker-compose" via FromStr
+      const backendPreset = isComposePreset ? 'docker-compose' : presetName
+
       const updateBody: Record<string, unknown> = {
         main_branch: values.branch,
-        preset: presetName,
+        preset: backendPreset,
         directory: values.directory!,
         repo_owner: project.repo_owner!,
         repo_name: project.repo_name!,
@@ -739,14 +743,14 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                             <Input
                               id="public-repo-url"
                               placeholder="https://github.com/owner/repo"
-                              value={publicRepoUrl || project.git_url || `https://github.com/${project.repo_owner}/${project.repo_name}`}
+                              value={publicRepoUrl || `https://github.com/${project.repo_owner}/${project.repo_name}`}
                               onChange={(e) => {
                                 const url = e.target.value
                                 setPublicRepoUrl(url)
                                 // Parse GitHub/GitLab URL to extract owner/repo
                                 // Handles: https://github.com/owner/repo, https://github.com/owner/repo.git,
-                                // https://github.com/owner/repo/tree/branch, etc.
-                                const match = url.trim().match(/(?:github\.com|gitlab\.com)[/:]([^/]+)\/([^/.\s]+)/)
+                                // https://github.com/owner/repo/tree/branch/path, etc.
+                                const match = url.trim().match(/(?:github\.com|gitlab\.com)[/:]([^/\s]+)\/([^/\s.]+)/)
                                 if (match) {
                                   const [, owner, repo] = match
                                   setParsedPublicRepo({ owner, name: repo.replace(/\.git$/, '') })
