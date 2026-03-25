@@ -852,16 +852,97 @@ impl CachedPeerTable {
                             path: static_dir.clone(),
                         }
                     } else if !containers.is_empty() {
-                        // Container deployment - proxy to containers
-                        let mut backend_entries = Vec::with_capacity(containers.len());
-                        for c in &containers {
+                        // For compose deployments, the main route uses:
+                        // 1. The first public port's service (if public_ports configured)
+                        // 2. The first service (fallback for non-compose or no public_ports)
+                        let is_compose = containers.iter().any(|c| c.service_name.is_some());
+                        let (route_containers, override_port): (
+                            Vec<&deployment_containers::Model>,
+                            Option<u16>,
+                        ) = if is_compose {
+                            // Check for public_ports config
+                            let first_public = project
+                                .and_then(|p| p.preset_config.as_ref())
+                                .and_then(|pc| {
+                                    if let temps_entities::preset::PresetConfig::DockerCompose(
+                                        cfg,
+                                    ) = pc
+                                    {
+                                        cfg.public_ports.first().cloned()
+                                    } else {
+                                        None
+                                    }
+                                });
+
+                            match first_public {
+                                Some(pp) => {
+                                    let cs: Vec<_> = containers
+                                        .iter()
+                                        .filter(|c| c.service_name.as_deref() == Some(&pp.service))
+                                        .collect();
+                                    if cs.is_empty() {
+                                        // Fallback to first service
+                                        let first_svc = containers
+                                            .iter()
+                                            .filter_map(|c| c.service_name.as_ref())
+                                            .next()
+                                            .cloned();
+                                        (
+                                            match first_svc {
+                                                Some(ref svc) => containers
+                                                    .iter()
+                                                    .filter(|c| {
+                                                        c.service_name.as_ref() == Some(svc)
+                                                    })
+                                                    .collect(),
+                                                None => containers.iter().collect(),
+                                            },
+                                            None,
+                                        )
+                                    } else {
+                                        (cs, Some(pp.port))
+                                    }
+                                }
+                                None => {
+                                    // No public ports configured — use first service
+                                    let first_svc = containers
+                                        .iter()
+                                        .filter_map(|c| c.service_name.as_ref())
+                                        .next()
+                                        .cloned();
+                                    (
+                                        match first_svc {
+                                            Some(ref svc) => containers
+                                                .iter()
+                                                .filter(|c| c.service_name.as_ref() == Some(svc))
+                                                .collect(),
+                                            None => containers.iter().collect(),
+                                        },
+                                        None,
+                                    )
+                                }
+                            }
+                        } else {
+                            (containers.iter().collect(), None)
+                        };
+
+                        let mut backend_entries = Vec::with_capacity(route_containers.len());
+                        for c in &route_containers {
                             let node_addr = resolve_node_private_address(
                                 c.node_id,
                                 &mut nodes_cache,
                                 self.db.as_ref(),
                             )
                             .await;
-                            backend_entries.push(build_backend_entry(c, node_addr.as_deref()));
+                            let mut entry = build_backend_entry(c, node_addr.as_deref());
+                            // Override port if a public port is configured
+                            if let Some(port) = override_port {
+                                if let Some(colon_pos) = entry.address.rfind(':') {
+                                    entry.address =
+                                        format!("{}{}", &entry.address[..=colon_pos], port);
+                                }
+                            }
+                            backend_entries.push(entry);
                         }
                         BackendType::Upstream {
                             backends: backend_entries,
@@ -935,64 +1016,97 @@ impl CachedPeerTable {
                         }
                     }
 
-                    // Docker Compose: create per-service routes
-                    // Containers with service_name get routed as {service}-{env_subdomain}.{preview_domain}
+                    // Docker Compose: create per-service routes ONLY for explicitly public ports.
+                    // All ports are private by default — users must mark ports as public
+                    // in the project's preset_config.public_ports.
                     let has_compose_services = containers.iter().any(|c| c.service_name.is_some());
                     if has_compose_services {
-                        // Group containers by service_name
-                        let mut services: HashMap<String, Vec<&deployment_containers::Model>> =
-                            HashMap::new();
-                        for c in &containers {
-                            if let Some(ref svc) = c.service_name {
-                                services.entry(svc.clone()).or_default().push(c);
+                        // Read public_ports from project's preset_config
+                        let public_ports: Vec<(String, u16)> = project
+                            .and_then(|p| p.preset_config.as_ref())
+                            .and_then(|pc| {
+                                if let temps_entities::preset::PresetConfig::DockerCompose(cfg) = pc
+                                {
+                                    Some(
+                                        cfg.public_ports
+                                            .iter()
+                                            .map(|pp| (pp.service.clone(), pp.port))
+                                            .collect(),
+                                    )
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or_default();
+
+                        if !public_ports.is_empty() {
+                            // Group containers by service_name
+                            let mut services: HashMap<String, Vec<&deployment_containers::Model>> =
+                                HashMap::new();
+                            for c in &containers {
+                                if let Some(ref svc) = c.service_name {
+                                    services.entry(svc.clone()).or_default().push(c);
+                                }
                             }
-                        }
 
-                        for (service_name, svc_containers) in &services {
-                            // Only create routes for services with exposed ports
-                            let has_ports = svc_containers.iter().any(|c| c.container_port > 0);
-                            if !has_ports {
-                                continue;
-                            }
+                            for (pub_service, pub_port) in &public_ports {
+                                let svc_containers = match services.get(pub_service) {
+                                    Some(c) => c,
+                                    None => continue,
+                                };
 
-                            let mut svc_backends = Vec::with_capacity(svc_containers.len());
-                            for c in svc_containers {
-                                let node_addr = resolve_node_private_address(
-                                    c.node_id,
-                                    &mut nodes_cache,
-                                    self.db.as_ref(),
-                                )
-                                .await;
-                                svc_backends.push(build_backend_entry(c, node_addr.as_deref()));
-                            }
+                                let mut svc_backends = Vec::with_capacity(svc_containers.len());
+                                for c in svc_containers {
+                                    // Override container_port with the public port for routing
+                                    let node_addr = resolve_node_private_address(
+                                        c.node_id,
+                                        &mut nodes_cache,
+                                        self.db.as_ref(),
+                                    )
+                                    .await;
+                                    let mut entry = build_backend_entry(c, node_addr.as_deref());
+                                    // Replace port in address with the public port
+                                    if let Some(colon_pos) = entry.address.rfind(':') {
+                                        entry.address =
+                                            format!("{}{}", &entry.address[..=colon_pos], pub_port);
+                                    }
+                                    svc_backends.push(entry);
+                                }
 
-                            let svc_backend = BackendType::Upstream {
-                                backends: svc_backends.clone(),
-                                round_robin_counter: Arc::new(AtomicUsize::new(0)),
-                            };
+                                let svc_backend = BackendType::Upstream {
+                                    backends: svc_backends.clone(),
+                                    round_robin_counter: Arc::new(AtomicUsize::new(0)),
+                                };
 
-                            let svc_route_info = RouteInfo {
-                                backend: svc_backend,
-                                redirect_to: None,
-                                status_code: None,
-                                project: project.cloned(),
-                                environment: environment.cloned(),
-                                deployment: Some(Arc::clone(deployment)),
-                            };
+                                let svc_route_info = RouteInfo {
+                                    backend: svc_backend,
+                                    redirect_to: None,
+                                    status_code: None,
+                                    project: project.cloned(),
+                                    environment: environment.cloned(),
+                                    deployment: Some(Arc::clone(deployment)),
+                                };
 
-                            // Route: {service}-{env_subdomain}.{preview_domain}
-                            let svc_domain =
-                                format!("{}-{}.{}", service_name, main_url, preview_domain);
-                            if let std::collections::hash_map::Entry::Vacant(e) =
-                                routes.entry(svc_domain.clone())
-                            {
-                                let addresses: Vec<&str> =
-                                    svc_backends.iter().map(|b| b.address.as_str()).collect();
-                                debug!(
-                                    "Loaded compose service route: {} -> {:?} (service={}, project={}, env={})",
-                                    svc_domain, addresses, service_name, env.project_id, env.id
-                                );
-                                e.insert(svc_route_info);
+                                // Route: {service}-{env_subdomain}.{preview_domain}
+                                // DNS labels must be ≤63 chars, truncate if needed
+                                let svc_label = format!("{}-{}", pub_service, main_url);
+                                let svc_label = if svc_label.len() > 63 {
+                                    svc_label[..63].trim_end_matches('-').to_string()
+                                } else {
+                                    svc_label
+                                };
+                                let svc_domain = format!("{}.{}", svc_label, preview_domain);
+                                if let std::collections::hash_map::Entry::Vacant(e) =
+                                    routes.entry(svc_domain.clone())
+                                {
+                                    let addresses: Vec<&str> =
+                                        svc_backends.iter().map(|b| b.address.as_str()).collect();
+                                    debug!(
+                                        "Loaded compose public port route: {} -> {:?} (service={}, port={}, project={}, env={})",
+                                        svc_domain, addresses, pub_service, pub_port, env.project_id, env.id
+                                    );
+                                    e.insert(svc_route_info);
+                                }
                             }
                         }
                     }

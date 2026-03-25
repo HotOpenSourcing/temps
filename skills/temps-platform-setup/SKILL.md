@@ -127,12 +127,12 @@ docker volume create temps-postgres
 # Start PostgreSQL + TimescaleDB
 docker run -d \
   --name temps-postgres \
-  -v temps-postgres:/var/lib/postgresql/data \
+  -v temps-postgres:/home/postgres/pgdata/data \
   -e POSTGRES_USER=postgres \
   -e POSTGRES_PASSWORD=temps \
   -e POSTGRES_DB=temps \
   -p 16432:5432 \
-  timescale/timescaledb:latest-pg18
+  timescale/timescaledb-ha:pg18
 ```
 
 **Connection string:**

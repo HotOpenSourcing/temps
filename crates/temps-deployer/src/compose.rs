@@ -292,7 +292,25 @@ impl ComposeExecutor {
                 })?;
         }
 
-        tokio::fs::write(&compose_path, &request.compose_content)
+        // If the user override defines ports for specific services, strip those
+        // ports from the base compose file. Docker Compose merges (appends) port
+        // arrays from override files, so without stripping, the original ports
+        // remain alongside the override ports, causing conflicts.
+        let compose_to_write = if let Some(ref user_override) = request.compose_override {
+            let services_with_port_overrides = self.services_with_ports_in_override(user_override);
+            if services_with_port_overrides.is_empty() {
+                request.compose_content.clone()
+            } else {
+                self.strip_ports_for_services(
+                    &request.compose_content,
+                    &services_with_port_overrides,
+                )
+            }
+        } else {
+            request.compose_content.clone()
+        };
+
+        tokio::fs::write(&compose_path, &compose_to_write)
             .await
             .map_err(|e| ComposeError::FileWriteFailed {
                 path: compose_path.display().to_string(),
@@ -561,8 +579,14 @@ impl ComposeExecutor {
             // Parse published ports
             let ports = self.parse_publishers(&ps_entry.publishers);
 
+            // Resolve full container ID via Docker inspect (compose ps returns short IDs)
+            let full_id = match self.docker.inspect_container(&ps_entry.id, None).await {
+                Ok(info) => info.id.unwrap_or(ps_entry.id.clone()),
+                Err(_) => ps_entry.id.clone(),
+            };
+
             results.push(ComposeServiceResult {
-                container_id: ps_entry.id,
+                container_id: full_id,
                 container_name: ps_entry.name,
                 service_name: ps_entry.service,
                 image_name: ps_entry.image,
@@ -702,6 +726,156 @@ impl ComposeExecutor {
         }
 
         override_yaml
+    }
+
+    /// Parse a user override YAML and return the names of services that define `ports:`.
+    fn services_with_ports_in_override(&self, override_content: &str) -> Vec<String> {
+        let mut result = Vec::new();
+        let mut in_services = false;
+        let mut services_indent: usize = 0;
+        let mut current_service: Option<(String, usize)> = None; // (name, indent)
+
+        for line in override_content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+
+            let indent = line.len() - line.trim_start().len();
+
+            if trimmed == "services:" || trimmed.starts_with("services:") {
+                in_services = true;
+                services_indent = indent;
+                current_service = None;
+                continue;
+            }
+
+            if !in_services {
+                continue;
+            }
+
+            // Left of services block
+            if indent <= services_indent && !trimmed.is_empty() {
+                in_services = false;
+                continue;
+            }
+
+            // Inside a service — check for ports: before checking service names
+            if let Some((ref svc_name, svc_indent)) = current_service {
+                if indent > svc_indent && (trimmed == "ports:" || trimmed.starts_with("ports:")) {
+                    if !result.contains(svc_name) {
+                        result.push(svc_name.clone());
+                    }
+                    continue;
+                }
+            }
+
+            // Service-level key (direct child of services:)
+            if trimmed.ends_with(':') && !trimmed.contains(' ') && !trimmed.starts_with('-') {
+                let svc_name = trimmed.trim_end_matches(':').to_string();
+                match &current_service {
+                    None => {
+                        current_service = Some((svc_name, indent));
+                    }
+                    Some((_, si)) if indent == *si => {
+                        current_service = Some((svc_name, indent));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Strip `ports:` sections from the base compose content for the given services only.
+    /// Other services keep their ports untouched.
+    fn strip_ports_for_services(&self, compose_content: &str, services: &[String]) -> String {
+        let mut output = String::new();
+        let mut in_services_block = false;
+        let mut services_indent: usize = 0;
+        let mut current_service: Option<(String, usize)> = None;
+        let mut service_indent: Option<usize> = None;
+        let mut skipping_ports = false;
+        let mut ports_indent: usize = 0;
+
+        for line in compose_content.lines() {
+            let trimmed = line.trim();
+            let indent = line.len() - line.trim_start().len();
+
+            // Track services: block
+            if trimmed == "services:" || trimmed.starts_with("services:") {
+                in_services_block = true;
+                services_indent = indent;
+                service_indent = None;
+                current_service = None;
+                skipping_ports = false;
+                output.push_str(line);
+                output.push('\n');
+                continue;
+            }
+
+            // If currently skipping a ports block, check if we've exited it
+            if skipping_ports {
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    // Skip blank lines and comments inside ports block
+                    continue;
+                }
+                if indent > ports_indent {
+                    // Still inside ports block (port entries are indented further)
+                    continue;
+                }
+                // We've exited the ports block
+                skipping_ports = false;
+            }
+
+            if in_services_block && !trimmed.is_empty() && indent <= services_indent {
+                in_services_block = false;
+                current_service = None;
+                service_indent = None;
+            }
+
+            if in_services_block && !trimmed.is_empty() && !trimmed.starts_with('#') {
+                // Detect service names
+                if trimmed.ends_with(':') && !trimmed.contains(' ') && !trimmed.starts_with('-') {
+                    match service_indent {
+                        None => {
+                            service_indent = Some(indent);
+                            let name = trimmed.trim_end_matches(':').to_string();
+                            current_service = Some((name, indent));
+                        }
+                        Some(si) if indent == si => {
+                            let name = trimmed.trim_end_matches(':').to_string();
+                            current_service = Some((name, indent));
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Check if this line is `ports:` inside a service we need to strip
+                if let Some((ref svc_name, svc_indent)) = current_service {
+                    if indent > svc_indent
+                        && (trimmed == "ports:" || trimmed.starts_with("ports:"))
+                        && services.contains(svc_name)
+                    {
+                        // If it's `ports:` with inline value like `ports: ["80:80"]`
+                        if trimmed.starts_with("ports:") && trimmed != "ports:" {
+                            // Single-line ports — just skip this line
+                            continue;
+                        }
+                        // Block-style ports: — skip this line and subsequent indented lines
+                        skipping_ports = true;
+                        ports_indent = indent;
+                        continue;
+                    }
+                }
+            }
+
+            output.push_str(line);
+            output.push('\n');
+        }
+
+        output
     }
 
     fn find_compose_file(&self, project_dir: &Path) -> String {
@@ -859,5 +1033,106 @@ services:
         let compose = "version: '3'\n";
         let override_yaml = executor.generate_env_override(compose, ".env.temps");
         assert!(override_yaml.is_empty());
+    }
+
+    #[test]
+    fn test_services_with_ports_in_override() {
+        let docker = Docker::connect_with_defaults();
+        if docker.is_err() {
+            return;
+        }
+        let executor = ComposeExecutor::new(Arc::new(docker.unwrap()), PathBuf::from("/tmp/test"));
+
+        let override_content = r#"
+services:
+  clickhouse:
+    ports:
+      - '127.0.0.1:28123:8123'
+      - '127.0.0.1:29001:9000'
+"#;
+        let result = executor.services_with_ports_in_override(override_content);
+        assert_eq!(result, vec!["clickhouse"]);
+
+        // No ports override
+        let override_no_ports = r#"
+services:
+  clickhouse:
+    environment:
+      - FOO=bar
+"#;
+        let result = executor.services_with_ports_in_override(override_no_ports);
+        assert!(result.is_empty());
+
+        // Multiple services, only one with ports
+        let override_mixed = r#"
+services:
+  web:
+    ports:
+      - '8080:80'
+  redis:
+    environment:
+      - REDIS_PASSWORD=secret
+"#;
+        let result = executor.services_with_ports_in_override(override_mixed);
+        assert_eq!(result, vec!["web"]);
+    }
+
+    #[test]
+    fn test_strip_ports_for_services() {
+        let docker = Docker::connect_with_defaults();
+        if docker.is_err() {
+            return;
+        }
+        let executor = ComposeExecutor::new(Arc::new(docker.unwrap()), PathBuf::from("/tmp/test"));
+
+        let compose = r#"version: '3.8'
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:23.4
+    ports:
+      - '8123:8123'
+      - '9000:9000'
+    volumes:
+      - ./data:/var/lib/clickhouse
+  keeper:
+    image: clickhouse/clickhouse-keeper:23.4-alpine
+    ports:
+      - '9181:9181'
+"#;
+
+        // Strip ports only for clickhouse, keep keeper's ports
+        let result = executor.strip_ports_for_services(compose, &["clickhouse".to_string()]);
+        assert!(!result.contains("8123:8123"));
+        assert!(!result.contains("9000:9000"));
+        assert!(result.contains("9181:9181")); // keeper untouched
+        assert!(result.contains("volumes:")); // other sections preserved
+        assert!(result.contains("./data:/var/lib/clickhouse"));
+
+        // Strip ports for both
+        let result = executor
+            .strip_ports_for_services(compose, &["clickhouse".to_string(), "keeper".to_string()]);
+        assert!(!result.contains("8123:8123"));
+        assert!(!result.contains("9000:9000"));
+        assert!(!result.contains("9181:9181"));
+    }
+
+    #[test]
+    fn test_strip_ports_no_services_matched() {
+        let docker = Docker::connect_with_defaults();
+        if docker.is_err() {
+            return;
+        }
+        let executor = ComposeExecutor::new(Arc::new(docker.unwrap()), PathBuf::from("/tmp/test"));
+
+        let compose = r#"services:
+  web:
+    image: nginx
+    ports:
+      - '80:80'
+"#;
+
+        // No services to strip — output should be identical
+        let result = executor.strip_ports_for_services(compose, &[]);
+        assert!(result.contains("80:80"));
     }
 }

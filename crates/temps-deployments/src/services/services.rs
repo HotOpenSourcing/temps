@@ -2526,13 +2526,32 @@ impl DeploymentService {
             .await?
             .ok_or_else(|| DeploymentError::NotFound("Environment not found".to_string()))?;
 
-        // Find the container
+        // Find the container — supports both short (12-char) and full (64-char) IDs.
+        // Compose deployments store short IDs from `docker compose ps`, but
+        // `docker inspect` returns full IDs which the frontend may pass back.
+        // Try exact match first, then prefix match in both directions.
         let container = deployment_containers::Entity::find()
             .filter(deployment_containers::Column::ContainerId.eq(&container_id))
             .filter(deployment_containers::Column::DeletedAt.is_null())
             .one(self.db.as_ref())
-            .await?
-            .ok_or_else(|| DeploymentError::NotFound("Container not found".to_string()))?;
+            .await?;
+
+        let container = match container {
+            Some(c) => c,
+            None => {
+                // Full ID passed but DB has short ID: query starts with DB value
+                // Short ID passed but DB has full ID: DB value starts with query
+                let short_id = &container_id[..container_id.len().min(12)];
+                deployment_containers::Entity::find()
+                    .filter(deployment_containers::Column::ContainerId.starts_with(short_id))
+                    .filter(deployment_containers::Column::DeletedAt.is_null())
+                    .one(self.db.as_ref())
+                    .await?
+                    .ok_or_else(|| {
+                        DeploymentError::NotFound(format!("Container {} not found", container_id))
+                    })?
+            }
+        };
 
         // Verify container belongs to a deployment in this environment
         let _deployment = deployments::Entity::find_by_id(container.deployment_id)
