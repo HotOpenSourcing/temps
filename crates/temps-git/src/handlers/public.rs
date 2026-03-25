@@ -436,20 +436,7 @@ pub struct PublicRepositoriesApiDoc;
 /// Try to get a GitHub access token from any configured GitHub connection.
 /// This avoids the 60 req/hr unauthenticated rate limit by using an existing token (5000 req/hr).
 async fn get_github_token_from_connections(state: &AppState) -> Option<String> {
-    let connections = state.git_provider_manager.get_user_connections().await.ok()?;
-
-    for conn in connections {
-        if conn.is_active {
-            if let Ok(token) = state
-                .git_provider_manager
-                .get_connection_token(conn.id)
-                .await
-            {
-                return Some(token);
-            }
-        }
-    }
-    None
+    state.git_provider_manager.get_any_github_token().await
 }
 
 #[cfg(test)]

@@ -119,6 +119,72 @@ impl GitProviderManager {
         }
     }
 
+    /// Get an access token from any active GitHub connection.
+    /// Used for public repo API calls to avoid unauthenticated rate limits (60 → 5000 req/hr).
+    /// Validates the token against GitHub's API before returning it.
+    pub async fn get_any_github_token(&self) -> Option<String> {
+        use temps_entities::git_providers;
+
+        let connections = self.get_user_connections().await.ok()?;
+
+        for conn in connections {
+            if !conn.is_active {
+                continue;
+            }
+
+            // Check provider type is GitHub
+            let provider = git_providers::Entity::find_by_id(conn.provider_id)
+                .one(self.db.as_ref())
+                .await
+                .ok()
+                .flatten();
+
+            let is_github = provider
+                .as_ref()
+                .map(|p| p.provider_type == "github" || p.provider_type == "github_app")
+                .unwrap_or(false);
+
+            if !is_github {
+                continue;
+            }
+
+            // get_connection_token validates expiry and refreshes OAuth/App tokens
+            let token = match self.get_connection_token(conn.id).await {
+                Ok(t) if !t.is_empty() => t,
+                _ => continue,
+            };
+
+            // Verify the token actually works with a lightweight API call
+            let client = reqwest::Client::builder()
+                .user_agent("Temps-Engine/1.0")
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .ok()?;
+
+            let resp = client
+                .get("https://api.github.com/rate_limit")
+                .header("Authorization", format!("token {}", token))
+                .send()
+                .await
+                .ok()?;
+
+            if resp.status().is_success() {
+                tracing::debug!(
+                    "Using GitHub token from connection {} for public repo API calls",
+                    conn.id
+                );
+                return Some(token);
+            }
+
+            tracing::warn!(
+                "GitHub token from connection {} failed validation (status {}), trying next",
+                conn.id,
+                resp.status()
+            );
+        }
+        None
+    }
+
     /// Get provider service by ID
     pub async fn get_provider_service(
         &self,
