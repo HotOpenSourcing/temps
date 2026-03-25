@@ -572,19 +572,28 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
               }
             : undefined
 
+      const updateBody: Record<string, unknown> = {
+        main_branch: values.branch,
+        preset: presetName,
+        directory: values.directory!,
+        repo_owner: project.repo_owner!,
+        repo_name: project.repo_name!,
+        preset_config: presetConfig,
+      }
+
+      if (isPublicRepo) {
+        updateBody.git_url = project.git_url || `https://github.com/${project.repo_owner}/${project.repo_name}`
+        updateBody.is_public_repo = true
+        updateBody.git_provider_connection_id = null
+      } else {
+        updateBody.git_provider_connection_id =
+          selectedConnectionId ??
+          project.git_provider_connection_id ??
+          null
+      }
+
       await updateGithubRepo.mutateAsync({
-        body: {
-          main_branch: values.branch,
-          preset: presetName,
-          directory: values.directory!,
-          repo_owner: project.repo_owner!,
-          repo_name: project.repo_name!,
-          git_provider_connection_id:
-            selectedConnectionId ??
-            project.git_provider_connection_id ??
-            null,
-          preset_config: presetConfig,
-        },
+        body: updateBody as any,
         path: { project_id: project.id },
       })
       toast.success('Git settings updated successfully')
@@ -610,20 +619,29 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
       const formPreset = form.getValues('preset')
       const [presetName] = formPreset?.split('::') || ['']
 
-      // Update repository information including the git provider connection
+      // Build the update body — public repos use git_url, private repos use connection_id
+      const body: Record<string, unknown> = {
+        repo_owner: repo.owner,
+        repo_name: repo.name,
+        directory: form.getValues('directory') || './',
+        preset: presetName,
+        main_branch:
+          form.getValues('branch') || repo.default_branch || 'main',
+      }
+
+      if (isPublicRepo) {
+        body.git_url = `https://github.com/${repo.owner}/${repo.name}`
+        body.is_public_repo = true
+        body.git_provider_connection_id = null
+      } else {
+        body.git_provider_connection_id =
+          selectedConnectionId ??
+          project.git_provider_connection_id ??
+          null
+      }
+
       await updateGithubRepo.mutateAsync({
-        body: {
-          repo_owner: repo.owner,
-          repo_name: repo.name,
-          directory: form.getValues('directory') || './',
-          preset: presetName,
-          main_branch:
-            form.getValues('branch') || repo.default_branch || 'main',
-          git_provider_connection_id:
-            selectedConnectionId ??
-            project.git_provider_connection_id ??
-            null,
-        },
+        body: body as any,
         path: { project_id: project.id },
       })
 
@@ -710,78 +728,122 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                     </div>
                     {isSelectingRepository && isEditingSettings ? (
                       <div className="space-y-4">
-                        {/* Git Provider Connection Selection */}
-                        <div className="space-y-2">
-                          <Label htmlFor="change-connection">
-                            Git Provider Connection
-                          </Label>
-                          <Select
-                            value={
-                              selectedConnectionId?.toString() ||
-                              project.git_provider_connection_id?.toString()
-                            }
-                            onValueChange={(value) => {
-                              setSelectedConnectionId(Number(value))
-                              setSelectedRepository(null)
-                            }}
-                          >
-                            <SelectTrigger id="change-connection">
-                              <SelectValue placeholder="Select a git connection" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {(
-                                connectionsData?.connections ?? []
-                              ).map((conn) => {
-                                const provider = providers.find(
-                                  (p) => p.id === conn.provider_id
-                                )
-                                return (
-                                  <SelectItem
-                                    key={conn.id}
-                                    value={conn.id.toString()}
-                                  >
-                                    <div className="flex items-center gap-2">
-                                      {provider?.provider_type === 'github' ||
-                                      provider?.provider_type ===
-                                        'github_app' ? (
-                                        <GithubIcon className="h-4 w-4" />
-                                      ) : (
-                                        <GitBranchIcon className="h-4 w-4" />
-                                      )}
-                                      {conn.account_name}
-                                      {provider && (
-                                        <Badge
-                                          variant="secondary"
-                                          className="ml-1 text-xs"
-                                        >
-                                          {provider.name}
-                                        </Badge>
-                                      )}
-                                    </div>
-                                  </SelectItem>
-                                )
-                              })}
-                            </SelectContent>
-                          </Select>
-                        </div>
+                        {isPublicRepo ? (
+                          /* Public repo: show URL input */
+                          <div className="space-y-2">
+                            <Label htmlFor="public-repo-url">
+                              Public Repository URL
+                            </Label>
+                            <Input
+                              id="public-repo-url"
+                              placeholder="https://github.com/owner/repo"
+                              defaultValue={project.git_url || `https://github.com/${project.repo_owner}/${project.repo_name}`}
+                              onChange={(e) => {
+                                const url = e.target.value.trim()
+                                // Parse GitHub/GitLab URL to extract owner/repo
+                                const match = url.match(/(?:github\.com|gitlab\.com)[/:]([^/]+)\/([^/.]+)/)
+                                if (match) {
+                                  const [, owner, repo] = match
+                                  setSelectedRepository({ owner, name: repo.replace(/\.git$/, '') } as RepositoryResponse)
+                                }
+                              }}
+                            />
+                            <p className="text-xs text-muted-foreground">
+                              Enter the full URL of a public GitHub or GitLab repository.
+                            </p>
+                            {selectedRepository && (
+                              <div className="flex items-center gap-2">
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  onClick={() => {
+                                    if (selectedRepository) {
+                                      handleRepositorySelect(selectedRepository)
+                                      setIsSelectingRepository(false)
+                                    }
+                                  }}
+                                >
+                                  Update Repository
+                                </Button>
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          /* Private repo: show git provider connection selector */
+                          <>
+                            <div className="space-y-2">
+                              <Label htmlFor="change-connection">
+                                Git Provider Connection
+                              </Label>
+                              <Select
+                                value={
+                                  selectedConnectionId?.toString() ||
+                                  project.git_provider_connection_id?.toString()
+                                }
+                                onValueChange={(value) => {
+                                  setSelectedConnectionId(Number(value))
+                                  setSelectedRepository(null)
+                                }}
+                              >
+                                <SelectTrigger id="change-connection">
+                                  <SelectValue placeholder="Select a git connection" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {(
+                                    connectionsData?.connections ?? []
+                                  ).map((conn) => {
+                                    const provider = providers.find(
+                                      (p) => p.id === conn.provider_id
+                                    )
+                                    return (
+                                      <SelectItem
+                                        key={conn.id}
+                                        value={conn.id.toString()}
+                                      >
+                                        <div className="flex items-center gap-2">
+                                          {provider?.provider_type === 'github' ||
+                                          provider?.provider_type ===
+                                            'github_app' ? (
+                                            <GithubIcon className="h-4 w-4" />
+                                          ) : (
+                                            <GitBranchIcon className="h-4 w-4" />
+                                          )}
+                                          {conn.account_name}
+                                          {provider && (
+                                            <Badge
+                                              variant="secondary"
+                                              className="ml-1 text-xs"
+                                            >
+                                              {provider.name}
+                                            </Badge>
+                                          )}
+                                        </div>
+                                      </SelectItem>
+                                    )
+                                  })}
+                                </SelectContent>
+                              </Select>
+                            </div>
 
-                        {/* Repository Selection */}
-                        {(selectedConnectionId ||
-                          project.git_provider_connection_id) && (
-                          <RepositorySelector
-                            connectionId={
-                              selectedConnectionId ||
-                              project.git_provider_connection_id!
-                            }
-                            onSelect={(repo) => {
-                              handleRepositorySelect(repo)
-                              setIsSelectingRepository(false)
-                            }}
-                            selectedRepository={selectedRepository}
-                            title="Select New Repository"
-                            description="Choose a repository from your connected git provider"
-                            showAsCard={false}
-                          />
+                            {/* Repository Selection */}
+                            {(selectedConnectionId ||
+                              project.git_provider_connection_id) && (
+                              <RepositorySelector
+                                connectionId={
+                                  selectedConnectionId ||
+                                  project.git_provider_connection_id!
+                                }
+                                onSelect={(repo) => {
+                                  handleRepositorySelect(repo)
+                                  setIsSelectingRepository(false)
+                                }}
+                                selectedRepository={selectedRepository}
+                                title="Select New Repository"
+                                description="Choose a repository from your connected git provider"
+                                showAsCard={false}
+                              />
+                            )}
+                          </>
                         )}
 
                         <Button
