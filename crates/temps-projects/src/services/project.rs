@@ -1466,12 +1466,22 @@ impl ProjectService {
                 "github"
             };
 
-            let provider = PublicRepoProviderFactory::create(provider_name).map_err(|e| {
-                ProjectError::Other(format!(
-                    "Failed to create public repo provider for {}: {}",
-                    provider_name, e
-                ))
-            })?;
+            // Use authenticated token if available (avoids 60 req/hr rate limit)
+            let token = if provider_name == "github" {
+                self.git_provider_manager.get_any_github_token().await
+            } else {
+                None
+            };
+
+            let provider =
+                PublicRepoProviderFactory::create_with_token(provider_name, token).map_err(
+                    |e| {
+                        ProjectError::Other(format!(
+                            "Failed to create public repo provider for {}: {}",
+                            provider_name, e
+                        ))
+                    },
+                )?;
 
             let branches = provider
                 .list_branches(&project.repo_owner, &project.repo_name)
