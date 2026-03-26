@@ -144,6 +144,15 @@ pub fn configure_routes() -> Router<Arc<super::types::AppState>> {
             "/projects/{project_id}/environments/{env_id}/teardown",
             delete(teardown_environment),
         )
+        // Asset cache
+        .route(
+            "/projects/{project_id}/asset-cache",
+            delete(purge_asset_cache),
+        )
+        .route(
+            "/projects/{project_id}/environments/{environment_id}/asset-cache",
+            delete(purge_environment_asset_cache),
+        )
         // Analytics
         .route("/deployments/activity-graph", get(get_activity_graph))
         // Container management
@@ -1818,6 +1827,70 @@ pub async fn get_activity_graph(
                 .with_detail(e.to_string()))
         }
     }
+}
+
+/// Purge all cached static assets for a project.
+/// Orphaned CAS blobs are cleaned up by the nightly garbage collector.
+#[utoipa::path(
+    delete,
+    path = "/projects/{project_id}/asset-cache",
+    tag = "Deployments",
+    responses(
+        (status = 200, description = "Asset cache purged"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+    ),
+    params(
+        ("project_id" = i32, Path, description = "Project ID")
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn purge_asset_cache(
+    State(state): State<Arc<super::types::AppState>>,
+    Path(project_id): Path<i32>,
+    RequireAuth(auth): RequireAuth,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, DeploymentsWrite);
+
+    let deleted = state
+        .deployment_service
+        .purge_asset_cache(project_id, None)
+        .await
+        .map_err(|e| Problem::from(e))?;
+
+    Ok(Json(serde_json::json!({ "deleted": deleted })))
+}
+
+/// Purge cached static assets for a specific environment.
+#[utoipa::path(
+    delete,
+    path = "/projects/{project_id}/environments/{environment_id}/asset-cache",
+    tag = "Deployments",
+    responses(
+        (status = 200, description = "Environment asset cache purged"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+    ),
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("environment_id" = i32, Path, description = "Environment ID")
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn purge_environment_asset_cache(
+    State(state): State<Arc<super::types::AppState>>,
+    Path((project_id, environment_id)): Path<(i32, i32)>,
+    RequireAuth(auth): RequireAuth,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, DeploymentsWrite);
+
+    let deleted = state
+        .deployment_service
+        .purge_asset_cache(project_id, Some(environment_id))
+        .await
+        .map_err(|e| Problem::from(e))?;
+
+    Ok(Json(serde_json::json!({ "deleted": deleted })))
 }
 
 #[cfg(test)]

@@ -321,6 +321,43 @@ impl DeploymentService {
         Ok(container_infos)
     }
 
+    /// Purge all cached static assets for a project or a specific environment.
+    /// Deletes static_asset_cache DB rows. Orphaned CAS blobs are cleaned up
+    /// by the nightly garbage collector.
+    /// Returns the number of cache entries deleted.
+    pub async fn purge_asset_cache(
+        &self,
+        project_id: i32,
+        environment_id: Option<i32>,
+    ) -> Result<u64, DeploymentError> {
+        use sea_orm::ConnectionTrait;
+
+        let mut sql = format!(
+            "DELETE FROM static_asset_cache WHERE project_id = {}",
+            project_id
+        );
+        if let Some(env_id) = environment_id {
+            sql.push_str(&format!(" AND environment_id = {}", env_id));
+        }
+
+        let result = self
+            .db
+            .as_ref()
+            .execute(sea_orm::Statement::from_string(
+                sea_orm::DatabaseBackend::Postgres,
+                sql,
+            ))
+            .await?;
+
+        let deleted = result.rows_affected();
+        info!(
+            "Purged {} asset cache entries for project {} (env: {:?})",
+            deleted, project_id, environment_id
+        );
+
+        Ok(deleted)
+    }
+
     pub async fn update_deployment_settings(
         &self,
         project_id: i32,
