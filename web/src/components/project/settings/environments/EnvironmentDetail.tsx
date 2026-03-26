@@ -46,6 +46,7 @@ import {
   MoreVertical,
   Plus,
   Trash2,
+  RefreshCw,
 } from 'lucide-react'
 import { useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
@@ -212,6 +213,74 @@ function CurrentDeployment({
         </Button>
       </div>
     </div>
+  )
+}
+
+function PurgeAssetCacheCard({
+  projectId,
+  environmentId,
+}: {
+  projectId: number
+  environmentId: number
+}) {
+  const [isPurging, setIsPurging] = useState(false)
+  const [showConfirm, setShowConfirm] = useState(false)
+
+  const handlePurge = async () => {
+    setIsPurging(true)
+    try {
+      const response = await fetch(
+        `/api/projects/${projectId}/environments/${environmentId}/asset-cache`,
+        { method: 'DELETE' }
+      )
+      const data = await response.json()
+      const deleted = data?.deleted ?? 0
+      toast.success(`Purged ${deleted} cached asset${deleted !== 1 ? 's' : ''}`)
+    } catch {
+      toast.error('Failed to purge asset cache')
+    } finally {
+      setIsPurging(false)
+      setShowConfirm(false)
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-sm font-medium">Asset Cache</CardTitle>
+        <CardDescription>
+          Static assets (JS chunks, CSS, fonts) are cached for stale-chunk fallback.
+          Purge if you need to force-clear cached assets for this environment.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <AlertDialog open={showConfirm} onOpenChange={setShowConfirm}>
+          <AlertDialogTrigger asChild>
+            <Button variant="outline" size="sm">
+              <RefreshCw className="h-4 w-4 mr-2" />
+              Purge Asset Cache
+            </Button>
+          </AlertDialogTrigger>
+          <AlertDialogContent>
+            <AlertDialogTitle>Purge Asset Cache</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will delete all cached static assets for this environment.
+              In-flight users with old HTML may see broken pages until they refresh.
+              Orphaned blobs are cleaned up automatically overnight.
+            </AlertDialogDescription>
+            <div className="flex justify-end gap-3 mt-4">
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={handlePurge}
+                disabled={isPurging}
+              >
+                {isPurging ? 'Purging...' : 'Purge Cache'}
+              </AlertDialogAction>
+            </div>
+          </AlertDialogContent>
+        </AlertDialog>
+      </CardContent>
+    </Card>
   )
 }
 
@@ -532,6 +601,8 @@ export function EnvironmentDetail({
           queryClient.invalidateQueries({ queryKey: ['environment'] })
         }}
       />
+
+      <PurgeAssetCacheCard projectId={project.id} environmentId={environmentId} />
 
       <Card className="border-destructive/50 bg-destructive/5">
         <CardHeader>
