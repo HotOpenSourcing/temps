@@ -175,6 +175,11 @@ const NodesPage = lazy(() =>
     default: m.NodesPage,
   }))
 )
+const NodeDetailPage = lazy(() =>
+  import('./pages/settings/NodesPage').then((m) => ({
+    default: m.NodeDetailPage,
+  }))
+)
 const AiGateway = lazy(() =>
   import('./pages/AiGateway').then((m) => ({
     default: m.AiGatewayPage,
@@ -331,6 +336,7 @@ const FullAppRoutes = () => {
                   <Route path="rate-limiting" element={<RateLimitingPage />} />
                   <Route path="disk-monitoring" element={<DiskMonitoringPage />} />
                   <Route path="nodes" element={<NodesPage />} />
+                  <Route path="nodes/:nodeId" element={<NodeDetailPage />} />
                   <Route path="plugins" element={<PluginsPage />} />
                 </Route>
                 {/* Redirects from old top-level routes to settings */}

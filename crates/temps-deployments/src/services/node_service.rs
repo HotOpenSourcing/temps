@@ -40,6 +40,8 @@ pub struct RegisterNodeRequest {
     pub wg_public_key: Option<String>,
     pub role: String,
     pub labels: serde_json::Value,
+    /// X25519 public key for ECIES certificate encryption (edge nodes only)
+    pub edge_public_key: Option<String>,
 }
 
 /// Request to update a node's heartbeat.
@@ -89,6 +91,7 @@ impl NodeService {
             active.public_endpoint = Set(request.public_endpoint);
             active.wg_public_key = Set(request.wg_public_key);
             active.labels = Set(request.labels);
+            active.edge_public_key = Set(request.edge_public_key);
             active.status = Set("active".to_string());
             active.last_heartbeat = Set(Some(chrono::Utc::now()));
 
@@ -117,6 +120,7 @@ impl NodeService {
             labels: Set(request.labels),
             capacity: Set(serde_json::json!({})),
             last_heartbeat: Set(Some(chrono::Utc::now())),
+            edge_public_key: Set(request.edge_public_key),
             ..Default::default()
         };
 
@@ -582,6 +586,7 @@ mod tests {
             labels: serde_json::json!({}),
             capacity: serde_json::json!({}),
             last_heartbeat: Some(chrono::Utc::now()),
+            edge_public_key: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }
@@ -603,6 +608,7 @@ mod tests {
                 wg_public_key: None,
                 role: "worker".to_string(),
                 labels: serde_json::json!({}),
+                edge_public_key: None,
             })
             .await;
 
@@ -652,6 +658,7 @@ mod tests {
                 wg_public_key: None,
                 role: "worker".to_string(),
                 labels: serde_json::json!({}),
+                edge_public_key: None,
             })
             .await;
 

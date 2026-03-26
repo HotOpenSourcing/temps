@@ -39,6 +39,7 @@ import {
   Copy,
   Cpu,
   ExternalLink,
+  Globe,
   HardDrive,
   Key,
   Loader2,
@@ -52,6 +53,7 @@ import {
   Trash2,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
+import { useNavigate, useParams } from 'react-router-dom'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import {
@@ -492,11 +494,10 @@ function JoinInstructions({ joinCommand }: { joinCommand: string }) {
 
 function NodeTable({
   nodes,
-  onSelectNode,
 }: {
   nodes: NodeInfoResponse[]
-  onSelectNode: (id: number) => void
 }) {
+  const navigate = useNavigate()
   return (
     <div className="overflow-x-auto">
       <Table>
@@ -515,7 +516,7 @@ function NodeTable({
             <TableRow
               key={node.id}
               className="cursor-pointer hover:bg-accent/50"
-              onClick={() => onSelectNode(node.id)}
+              onClick={() => navigate(`/settings/nodes/${node.id}`)}
             >
               <TableCell>
                 <div className="flex items-center gap-2">
@@ -622,7 +623,176 @@ function NodeDetailLabels({ labels }: { labels: unknown }) {
   )
 }
 
-// ── Node Detail Panel ──
+// ── Edge Analytics Section ──
+
+interface EdgeOverview {
+  total_requests: number
+  cache_hits: number
+  cache_misses: number
+  cache_bypasses: number
+  cache_hit_rate: number
+  bytes_from_cache: number
+  bytes_from_origin: number
+  bandwidth_savings_rate: number
+  avg_origin_latency_ms: number
+  unique_domains: number
+}
+
+function EdgeAnalyticsSection({ nodeId }: { nodeId: number }) {
+  interface EdgeProxyResponse {
+    node_id: number
+    node_name: string
+    region: string
+    data: EdgeOverview
+  }
+
+  const { data, isLoading } = useQuery<EdgeProxyResponse[]>({
+    queryKey: ['edge-analytics-overview', nodeId],
+    queryFn: async () => {
+      const resp = await client.get({
+        url: '/internal/edge/analytics/overview' as never,
+        query: { node_id: nodeId },
+      })
+      return resp.data as EdgeProxyResponse[]
+    },
+    refetchInterval: 15_000,
+  })
+
+  const overview = data?.[0]?.data
+
+  return (
+    <Card>
+      <CardHeader className="py-3 px-4">
+        <CardTitle className="text-sm flex items-center gap-2">
+          <Globe className="h-4 w-4" />
+          Edge Analytics
+        </CardTitle>
+        <CardDescription>Cache performance and traffic overview</CardDescription>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <div className="flex items-center justify-center py-6">
+            <Loader2 className="h-5 w-5 animate-spin" />
+          </div>
+        ) : !overview ? (
+          <p className="text-sm text-muted-foreground text-center py-6">
+            No analytics data available. The edge node may be offline or hasn't received traffic yet.
+          </p>
+        ) : (
+          <div className="space-y-4">
+            {/* Cache metrics */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <MiniStat label="Total Requests" value={overview.total_requests.toLocaleString()} />
+              <MiniStat label="Cache Hits" value={overview.cache_hits.toLocaleString()} accent="green" />
+              <MiniStat label="Cache Misses" value={overview.cache_misses.toLocaleString()} accent="yellow" />
+              <MiniStat label="Bypassed" value={overview.cache_bypasses.toLocaleString()} />
+            </div>
+
+            {/* Hit rate bar */}
+            <div className="space-y-1.5">
+              <div className="flex justify-between text-xs">
+                <span className="text-muted-foreground">Cache Hit Rate</span>
+                <span className="font-medium">{formatPercent(overview.cache_hit_rate * 100)}</span>
+              </div>
+              <div className="h-2 rounded-full bg-muted overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-green-500 transition-all duration-500"
+                  style={{ width: `${Math.min(overview.cache_hit_rate * 100, 100)}%` }}
+                />
+              </div>
+            </div>
+
+            {/* Bandwidth */}
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+              <MiniStat label="Served from Cache" value={formatBytes(overview.bytes_from_cache)} accent="green" />
+              <MiniStat label="From Origin" value={formatBytes(overview.bytes_from_origin)} />
+              <MiniStat label="Avg Origin Latency" value={`${overview.avg_origin_latency_ms.toFixed(1)}ms`} />
+            </div>
+
+            {/* Bandwidth savings */}
+            <div className="space-y-1.5">
+              <div className="flex justify-between text-xs">
+                <span className="text-muted-foreground">Bandwidth Savings</span>
+                <span className="font-medium">{formatPercent(overview.bandwidth_savings_rate * 100)}</span>
+              </div>
+              <div className="h-2 rounded-full bg-muted overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-blue-500 transition-all duration-500"
+                  style={{ width: `${Math.min(overview.bandwidth_savings_rate * 100, 100)}%` }}
+                />
+              </div>
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function MiniStat({
+  label,
+  value,
+  accent,
+}: {
+  label: string
+  value: string
+  accent?: 'green' | 'yellow' | 'blue'
+}) {
+  const accentClass = accent === 'green'
+    ? 'text-green-600 dark:text-green-400'
+    : accent === 'yellow'
+      ? 'text-yellow-600 dark:text-yellow-400'
+      : accent === 'blue'
+        ? 'text-blue-600 dark:text-blue-400'
+        : ''
+
+  return (
+    <div className="rounded-lg border p-3">
+      <p className="text-xs text-muted-foreground">{label}</p>
+      <p className={`text-lg font-semibold tabular-nums ${accentClass}`}>{value}</p>
+    </div>
+  )
+}
+
+// ── Node Detail Page (URL-routed) ──
+
+export function NodeDetailPage() {
+  const { nodeId } = useParams<{ nodeId: string }>()
+  const navigate = useNavigate()
+  const { setBreadcrumbs } = useBreadcrumbs()
+  const id = Number(nodeId)
+
+  const { data: nodeData } = useQuery({
+    ...adminGetNodeOptions({ path: { node_id: id } }),
+    enabled: !isNaN(id),
+  })
+
+  useEffect(() => {
+    setBreadcrumbs([
+      { label: 'Settings', href: '/settings' },
+      { label: 'Worker Nodes', href: '/settings/nodes' },
+      { label: nodeData?.name ?? `Node ${nodeId}` },
+    ])
+  }, [setBreadcrumbs, nodeData?.name, nodeId])
+
+  usePageTitle(nodeData?.name ?? 'Node Detail')
+
+  if (isNaN(id)) {
+    return (
+      <Alert variant="destructive">
+        <AlertCircle className="h-4 w-4" />
+        <AlertTitle>Error</AlertTitle>
+        <AlertDescription>Invalid node ID.</AlertDescription>
+      </Alert>
+    )
+  }
+
+  return (
+    <div className="space-y-6">
+      <NodeDetail nodeId={id} onBack={() => navigate('/settings/nodes')} />
+    </div>
+  )
+}
 
 function NodeDetail({
   nodeId,
@@ -952,6 +1122,9 @@ function NodeDetail({
         </div>
       )}
 
+      {/* Edge Analytics (only for edge nodes) */}
+      {node.role === 'edge' && <EdgeAnalyticsSection nodeId={nodeId} />}
+
       {/* Containers */}
       <Card>
         <CardHeader className="py-3 px-4">
@@ -1046,7 +1219,6 @@ function NodeDetail({
 
 export function NodesPage() {
   const { setBreadcrumbs } = useBreadcrumbs()
-  const [selectedNodeId, setSelectedNodeId] = useState<number | null>(null)
   const { data, isLoading, error } = useQuery({
     ...adminListNodesOptions(),
     refetchInterval: 30_000,
@@ -1054,26 +1226,13 @@ export function NodesPage() {
   const nodes = data?.nodes ?? []
 
   useEffect(() => {
-    if (selectedNodeId) {
-      const node = nodes.find((n) => n.id === selectedNodeId)
-      setBreadcrumbs([
-        { label: 'Settings', href: '/settings' },
-        { label: 'Worker Nodes', href: '/settings/nodes' },
-        { label: node?.name ?? `Node ${selectedNodeId}` },
-      ])
-    } else {
-      setBreadcrumbs([
-        { label: 'Settings', href: '/settings' },
-        { label: 'Worker Nodes' },
-      ])
-    }
-  }, [setBreadcrumbs, selectedNodeId, nodes])
+    setBreadcrumbs([
+      { label: 'Settings', href: '/settings' },
+      { label: 'Worker Nodes' },
+    ])
+  }, [setBreadcrumbs])
 
-  usePageTitle(
-    selectedNodeId
-      ? nodes.find((n) => n.id === selectedNodeId)?.name ?? 'Node Detail'
-      : 'Worker Nodes'
-  )
+  usePageTitle('Worker Nodes')
 
   if (isLoading) {
     return (
@@ -1090,17 +1249,6 @@ export function NodesPage() {
         <AlertTitle>Error</AlertTitle>
         <AlertDescription>Failed to load worker nodes.</AlertDescription>
       </Alert>
-    )
-  }
-
-  if (selectedNodeId) {
-    return (
-      <div className="space-y-6">
-        <NodeDetail
-          nodeId={selectedNodeId}
-          onBack={() => setSelectedNodeId(null)}
-        />
-      </div>
     )
   }
 
@@ -1128,7 +1276,7 @@ export function NodesPage() {
               </p>
             </div>
           ) : (
-            <NodeTable nodes={nodes} onSelectNode={setSelectedNodeId} />
+            <NodeTable nodes={nodes} />
           )}
         </CardContent>
       </Card>

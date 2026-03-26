@@ -2317,6 +2317,7 @@ mod tests {
                 labels: serde_json::json!({}),
                 capacity: serde_json::json!({}),
                 last_heartbeat: Some(chrono::Utc::now()),
+                edge_public_key: None,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             }
@@ -2377,6 +2378,7 @@ mod tests {
                 labels: serde_json::json!({}),
                 capacity: serde_json::json!({}),
                 last_heartbeat: Some(chrono::Utc::now()),
+                edge_public_key: None,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             }
@@ -2438,6 +2440,7 @@ mod tests {
             labels: serde_json::json!({}),
             capacity: serde_json::json!({}),
             last_heartbeat: Some(chrono::Utc::now()),
+            edge_public_key: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -2599,6 +2602,7 @@ mod tests {
             labels: serde_json::json!({}),
             capacity: serde_json::json!({}),
             last_heartbeat: Some(chrono::Utc::now()),
+            edge_public_key: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -2657,6 +2661,7 @@ mod tests {
             labels: serde_json::json!({}),
             capacity: serde_json::json!({}),
             last_heartbeat: Some(chrono::Utc::now()),
+            edge_public_key: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

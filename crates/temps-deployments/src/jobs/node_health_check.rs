@@ -208,6 +208,7 @@ mod tests {
             last_heartbeat: Some(
                 chrono::Utc::now() - chrono::Duration::seconds(heartbeat_age_secs),
             ),
+            edge_public_key: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }
