@@ -389,6 +389,7 @@ pub struct LoadBalancer {
     challenge_service: Arc<ChallengeService>,
     disable_https_redirect: bool,
     on_demand_manager: Option<Arc<OnDemandManager>>,
+    file_store: Option<Arc<dyn temps_file_store::FileStore>>,
 }
 
 impl LoadBalancer {
@@ -419,7 +420,14 @@ impl LoadBalancer {
             challenge_service,
             disable_https_redirect,
             on_demand_manager: None,
+            file_store: None,
         }
+    }
+
+    /// Set the file store for path-keyed static asset serving.
+    pub fn with_file_store(mut self, store: Arc<dyn temps_file_store::FileStore>) -> Self {
+        self.file_store = Some(store);
+        self
     }
 
     /// Set the on-demand manager for scale-to-zero wake-on-request.
@@ -1610,6 +1618,114 @@ impl LoadBalancer {
         }
     }
 
+    /// Serve a static asset from CAS via database lookup.
+    /// Queries static_asset_cache for URL→hash, then reads blob from CAS.
+    /// Returns Ok(true) if served, Ok(false) if not found.
+    async fn serve_asset_from_store(
+        &self,
+        session: &mut PingoraSession,
+        ctx: &mut ProxyContext,
+        url_path: &str,
+    ) -> Result<bool> {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
+        use temps_entities::static_asset_cache;
+
+        let file_store = match &self.file_store {
+            Some(fs) => fs,
+            None => return Ok(false),
+        };
+
+        // Look up content hash from database (most recent deployment first)
+        let project_id = ctx.project.as_ref().map(|p| p.id);
+        let cache_entry = if let Some(pid) = project_id {
+            static_asset_cache::Entity::find()
+                .filter(static_asset_cache::Column::ProjectId.eq(pid))
+                .filter(static_asset_cache::Column::UrlPath.eq(url_path))
+                .order_by_desc(static_asset_cache::Column::DeploymentId)
+                .one(self.db.as_ref())
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+
+        let content_hash = match cache_entry {
+            Some(entry) => entry.content_hash,
+            None => return Ok(false),
+        };
+
+        // Read blob from CAS by content hash
+        let data = match file_store.get_blob(&content_hash).await {
+            Ok(d) => d,
+            Err(temps_file_store::FileStoreError::NotFound { .. }) => {
+                warn!("CAS blob missing for hash {} (path: {})", &content_hash[..8], url_path);
+                return Ok(false);
+            }
+            Err(e) => {
+                debug!("CAS blob read failed for {}: {}", &content_hash[..8], e);
+                return Ok(false);
+            }
+        };
+
+        let content_type = Self::infer_content_type(url_path);
+
+        // ETag from content hash (fast, stable for immutable assets)
+        let etag = Self::generate_etag(&data);
+        if let Some(if_none_match) = session
+            .req_header()
+            .headers
+            .get("if-none-match")
+            .and_then(|v| v.to_str().ok())
+        {
+            if if_none_match == etag {
+                let mut resp = ResponseHeader::build(StatusCode::NOT_MODIFIED, None)?;
+                resp.insert_header("ETag", &etag)?;
+                resp.insert_header(
+                    header::CACHE_CONTROL,
+                    "public, max-age=31536000, immutable",
+                )?;
+                self.set_tracking_cookies(session, &mut resp, ctx).await?;
+                session.write_response_header(Box::new(resp), false).await?;
+                session.write_response_body(None, true).await?;
+                return Ok(true);
+            }
+        }
+
+        // Check if we should compress
+        let client_accepts_gzip = Self::accepts_gzip(session);
+        let should_compress =
+            client_accepts_gzip && Self::should_compress_content(content_type, data.len());
+
+        let (final_content, is_compressed) = if should_compress {
+            match Self::compress_gzip(&data) {
+                Ok(compressed) if compressed.len() < data.len() => (compressed, true),
+                _ => (data.to_vec(), false),
+            }
+        } else {
+            (data.to_vec(), false)
+        };
+
+        let mut resp = ResponseHeader::build(200, None)?;
+        resp.insert_header(header::CONTENT_TYPE, content_type)?;
+        resp.insert_header(header::CONTENT_LENGTH, final_content.len().to_string())?;
+        resp.insert_header("ETag", &etag)?;
+        resp.insert_header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")?;
+        resp.insert_header("X-Request-ID", &ctx.request_id)?;
+        if is_compressed {
+            resp.insert_header("Content-Encoding", "gzip")?;
+            resp.insert_header("Vary", "Accept-Encoding")?;
+        }
+        self.set_tracking_cookies(session, &mut resp, ctx).await?;
+
+        session.write_response_header(Box::new(resp), false).await?;
+        session
+            .write_response_body(Some(Bytes::from(final_content)), true)
+            .await?;
+
+        Ok(true)
+    }
+
     /// Check if a file should have long-term caching headers
     pub fn is_cacheable_static_asset(path: &str) -> bool {
         let cacheable_patterns = [
@@ -2619,7 +2735,20 @@ impl ProxyHttp for LoadBalancer {
 
                             return Ok(true); // Request handled
                         } else {
-                            // Static file not found - return 404 instead of falling through
+                            // Static file not found in current deployment.
+                            // Try path-keyed file store (stale-chunk fallback, no DB).
+                            if Self::is_cacheable_static_asset(&ctx.path) {
+                                let url_path = ctx.path.trim_start_matches('/').to_string();
+                                if let Ok(true) = self
+                                    .serve_asset_from_store(session, ctx, &url_path)
+                                    .await
+                                {
+                                    ctx.routing_status = "stale_chunk_fallback".to_string();
+                                    return Ok(true);
+                                }
+                            }
+
+                            // Static file not found - return 404
                             error!(
                                 "Static file not found: {} (static dir: {})",
                                 ctx.path, static_dir
@@ -2701,6 +2830,40 @@ impl ProxyHttp for LoadBalancer {
             }
             // If we reach here and path starts with /api/_temps/,
             // fall through to normal proxying logic (will be proxied to console)
+        }
+
+        // Serve persisted static assets via deployment-prefixed URLs.
+        // /_temps/assets/{deployment_slug}/path → DB lookup → CAS blob
+        if ctx.path.starts_with("/_temps/assets/") {
+            let after_prefix = &ctx.path["/_temps/assets/".len()..];
+            if let Some(slash_pos) = after_prefix.find('/') {
+                let asset_path = after_prefix[slash_pos + 1..].to_string();
+                if Self::is_cacheable_static_asset(&asset_path) {
+                    if let Ok(true) = self
+                        .serve_asset_from_store(session, ctx, &asset_path)
+                        .await
+                    {
+                        ctx.routing_status = "prefixed_asset".to_string();
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+
+        // Fallback: serve immutable static assets from file store.
+        // For container deployments where the upstream didn't have the asset,
+        // check the path-keyed file store (stale-chunk fallback).
+        if Self::is_cacheable_static_asset(&ctx.path)
+            && !self
+                .project_context_resolver
+                .is_static_deployment(&ctx.host)
+                .await
+        {
+            let url_path = ctx.path.trim_start_matches('/').to_string();
+            if let Ok(true) = self.serve_asset_from_store(session, ctx, &url_path).await {
+                ctx.routing_status = "stale_chunk_fallback".to_string();
+                return Ok(true);
+            }
         }
 
         Ok(false)
