@@ -23,11 +23,7 @@ impl MigrationTrait for Migration {
                             .auto_increment()
                             .primary_key(),
                     )
-                    .col(
-                        ColumnDef::new(Alias::new("url_path"))
-                            .string()
-                            .not_null(),
-                    )
+                    .col(ColumnDef::new(Alias::new("url_path")).string().not_null())
                     .col(
                         ColumnDef::new(Alias::new("content_hash"))
                             .string_len(64)
