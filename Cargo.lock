@@ -10746,7 +10746,6 @@ dependencies = [
  "temps-auth",
  "temps-backup",
  "temps-blob",
- "temps-compose",
  "temps-config",
  "temps-core",
  "temps-database",
@@ -10792,32 +10791,6 @@ dependencies = [
  "utoipa-swagger-ui",
  "uuid",
  "x509-parser 0.16.0",
-]
-
-[[package]]
-name = "temps-compose"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum 0.8.6",
- "bollard",
- "chrono",
- "futures-util",
- "git2",
- "sea-orm",
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "temps-auth",
- "temps-config",
- "temps-core",
- "temps-entities",
- "thiserror 2.0.17",
- "tokio",
- "tracing",
- "utoipa",
 ]
 
 [[package]]

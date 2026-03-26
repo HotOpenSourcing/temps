@@ -9,8 +9,6 @@ pub mod audit_logs;
 pub mod backup_schedules;
 pub mod backups;
 pub mod challenge_sessions;
-pub mod compose_stack_routes;
-pub mod compose_stacks;
 pub mod cron_executions;
 pub mod crons;
 pub mod custom_routes;

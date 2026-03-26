@@ -62,7 +62,6 @@ members = [
     "crates/temps-ai-gateway",
     "crates/temps-agent",
     "crates/temps-edge",
-    "crates/temps-compose",
     "crates/temps-external-plugins",
     "examples/example-plugin",
     "examples/lighthouse-plugin",
