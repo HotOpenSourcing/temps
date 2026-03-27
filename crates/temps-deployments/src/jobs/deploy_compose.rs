@@ -211,11 +211,11 @@ impl WorkflowTask for DeployComposeJob {
             self.project_id.to_string(),
         );
         labels.insert(
-            "sh.temps.environment_id".to_string(),
+            "sh.temps.environment".to_string(),
             self.environment_id.to_string(),
         );
         labels.insert(
-            "sh.temps.deployment_id".to_string(),
+            "sh.temps.deploy_id".to_string(),
             self.deployment_id.to_string(),
         );
         labels.insert("sh.temps.managed".to_string(), "true".to_string());
