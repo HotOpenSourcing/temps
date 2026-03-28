@@ -1141,46 +1141,50 @@ impl WorkflowPlanner {
                 required_for_completion: true,
             });
 
-            // Persist static assets to CAS for stale-chunk fallback
-            let search_paths_for_chunks: Vec<String> = match project.preset {
-                temps_entities::preset::Preset::NextJs => {
-                    vec![".next/static".to_string()]
-                }
-                temps_entities::preset::Preset::Vite => vec!["dist/assets".to_string()],
-                _ => vec!["dist".to_string(), "build/static".to_string()],
+            // Persist static assets to CAS for stale-chunk fallback.
+            // Only for frontend presets that produce hashed static assets.
+            let static_asset_config: Option<(Vec<String>, Vec<(String, String)>)> = match project.preset {
+                temps_entities::preset::Preset::NextJs => Some((
+                    vec![".next/static".to_string()],
+                    vec![(".next".to_string(), "_next".to_string())],
+                )),
+                temps_entities::preset::Preset::Vite | temps_entities::preset::Preset::Rsbuild => Some((
+                    vec!["dist/assets".to_string()],
+                    vec![("dist/".to_string(), String::new())],
+                )),
+                temps_entities::preset::Preset::Nuxt => Some((
+                    vec![".output/public/_nuxt".to_string()],
+                    vec![(".output/public/".to_string(), String::new())],
+                )),
+                temps_entities::preset::Preset::Remix | temps_entities::preset::Preset::Astro
+                | temps_entities::preset::Preset::SvelteKit | temps_entities::preset::Preset::SolidStart => Some((
+                    vec!["build/static".to_string(), "dist/assets".to_string()],
+                    vec![("build/".to_string(), String::new()), ("dist/".to_string(), String::new())],
+                )),
+                // Backend presets (Rust, Go, Python, Java, etc.) don't produce static assets
+                _ => None,
             };
 
-            let path_rewrites_for_chunks: Vec<(String, String)> = match project.preset {
-                temps_entities::preset::Preset::NextJs => {
-                    vec![(".next".to_string(), "_next".to_string())]
-                }
-                temps_entities::preset::Preset::Vite => {
-                    vec![("dist/".to_string(), String::new())]
-                }
-                _ => vec![
-                    ("dist/".to_string(), String::new()),
-                    ("build/".to_string(), String::new()),
-                ],
-            };
-
-            jobs.push(JobDefinition {
-                job_id: "persist_static_assets".to_string(),
-                job_type: "PersistStaticAssetsJob".to_string(),
-                name: "Persist Static Assets".to_string(),
-                description: Some(
-                    "Extract and deduplicate static assets for stale-chunk fallback".to_string(),
-                ),
-                dependencies: vec!["build_image".to_string()],
-                job_config: Some(serde_json::json!({
-                    "deployment_id": deployment.id,
-                    "deployment_slug": deployment.slug,
-                    "project_id": project.id,
-                    "environment_id": deployment.environment_id,
-                    "search_paths": search_paths_for_chunks,
-                    "path_rewrites": path_rewrites_for_chunks,
-                })),
-                required_for_completion: false,
-            });
+            if let Some((search_paths, path_rewrites)) = static_asset_config {
+                jobs.push(JobDefinition {
+                    job_id: "persist_static_assets".to_string(),
+                    job_type: "PersistStaticAssetsJob".to_string(),
+                    name: "Persist Static Assets".to_string(),
+                    description: Some(
+                        "Extract and deduplicate static assets for stale-chunk fallback".to_string(),
+                    ),
+                    dependencies: vec!["build_image".to_string()],
+                    job_config: Some(serde_json::json!({
+                        "deployment_id": deployment.id,
+                        "deployment_slug": deployment.slug,
+                        "project_id": project.id,
+                        "environment_id": deployment.environment_id,
+                        "search_paths": search_paths,
+                        "path_rewrites": path_rewrites,
+                    })),
+                    required_for_completion: false,
+                });
+            }
 
             "deploy_container".to_string()
         };

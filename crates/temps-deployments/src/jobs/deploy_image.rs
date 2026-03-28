@@ -1382,8 +1382,15 @@ impl DeployImageJob {
                     Ok(response) => {
                         let status = response.status();
 
-                        // Only 2xx and 3xx are considered healthy
-                        if status.is_success() || status.is_redirection() {
+                        // Any HTTP response means the server is running.
+                        // 2xx, 3xx, 404, and 405 are all valid — the health check
+                        // path may not exist but the server is up and responding.
+                        // Only 5xx indicates a real problem.
+                        let is_healthy = status.is_success()
+                            || status.is_redirection()
+                            || status.as_u16() == 404
+                            || status.as_u16() == 405;
+                        if is_healthy {
                             consecutive_successes += 1;
                             first_error_time = None; // Reset error timer on success
 
