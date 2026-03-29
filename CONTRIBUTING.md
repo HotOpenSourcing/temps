@@ -71,9 +71,12 @@ The frontend dev server proxies API requests to the Rust backend.
 Start a TimescaleDB instance with Docker:
 
 ```bash
+docker volume create temps-db-data
+
 docker run -d \
   --name temps-db \
   -p 5432:5432 \
+  -v temps-db-data:/home/postgres/pgdata/data \
   -e POSTGRES_USER=temps \
   -e POSTGRES_PASSWORD=temps \
   -e POSTGRES_DB=temps \

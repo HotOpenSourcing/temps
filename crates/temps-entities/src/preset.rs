@@ -115,6 +115,11 @@ pub enum Preset {
     #[sea_orm(string_value = "static")]
     Static,
 
+    // Docker Compose
+    #[serde(rename = "docker-compose")]
+    #[sea_orm(string_value = "docker-compose")]
+    DockerCompose,
+
     // Node.js runtime (for custom node apps)
     #[serde(rename = "nodejs")]
     #[sea_orm(string_value = "nodejs")]
@@ -147,6 +152,7 @@ impl Preset {
             Preset::Java => "java",
             Preset::Laravel => "laravel",
             Preset::Dockerfile => "dockerfile",
+            Preset::DockerCompose => "docker-compose",
             Preset::Nixpacks => "nixpacks",
             Preset::Static => "static",
             Preset::NodeJs => "nodejs",
@@ -178,6 +184,7 @@ impl Preset {
             Preset::Java => "Java",
             Preset::Laravel => "Laravel",
             Preset::Dockerfile => "Dockerfile",
+            Preset::DockerCompose => "Docker Compose",
             Preset::Nixpacks => "Nixpacks",
             Preset::Static => "Static Site",
             Preset::NodeJs => "Node.js",
@@ -206,7 +213,9 @@ impl Preset {
             Preset::Rust => "rust",
             Preset::Java => "java",
             Preset::Laravel => "php",
-            Preset::Dockerfile | Preset::Nixpacks | Preset::Static => "generic",
+            Preset::Dockerfile | Preset::DockerCompose | Preset::Nixpacks | Preset::Static => {
+                "generic"
+            }
         }
     }
 
@@ -276,9 +285,10 @@ impl Preset {
             Preset::Laravel => Some(8000), // Laravel artisan serve default
 
             // Generic/static presets - no default port
-            Preset::Dockerfile => None, // User-defined
-            Preset::Nixpacks => None,   // Auto-detected
-            Preset::Static => None,     // No server
+            Preset::Dockerfile => None,    // User-defined
+            Preset::DockerCompose => None, // Multiple services, user-configured
+            Preset::Nixpacks => None,      // Auto-detected
+            Preset::Static => None,        // No server
         }
     }
 
@@ -323,6 +333,7 @@ impl Preset {
 
             // Generic presets
             Preset::Dockerfile => Some("https://cdn.simpleicons.org/docker/2496ED"),
+            Preset::DockerCompose => Some("https://cdn.simpleicons.org/docker/2496ED"),
             Preset::Nixpacks => None, // No specific icon
             Preset::Static => Some("https://cdn.simpleicons.org/html5/E34F26"),
         }
@@ -351,7 +362,7 @@ impl Preset {
             Preset::Python | Preset::Go | Preset::Rust | Preset::Java | Preset::NodeJs => "runtime",
 
             // Generic presets
-            Preset::Dockerfile | Preset::Nixpacks => "container",
+            Preset::Dockerfile | Preset::DockerCompose | Preset::Nixpacks => "container",
             Preset::Static => "static",
         }
     }
@@ -381,6 +392,7 @@ impl Preset {
             Preset::Java,
             Preset::Laravel,
             Preset::Dockerfile,
+            Preset::DockerCompose,
             Preset::Nixpacks,
             Preset::Static,
             Preset::NodeJs,
@@ -421,6 +433,7 @@ impl std::str::FromStr for Preset {
             "java" => Ok(Preset::Java),
             "laravel" => Ok(Preset::Laravel),
             "dockerfile" => Ok(Preset::Dockerfile),
+            "docker-compose" | "dockercompose" | "compose" => Ok(Preset::DockerCompose),
             "nixpacks" => Ok(Preset::Nixpacks),
             "static" => Ok(Preset::Static),
             "nodejs" | "node" => Ok(Preset::NodeJs),
@@ -817,6 +830,36 @@ pub struct DockerfileConfig {
     pub target: Option<String>,
 }
 
+/// Docker Compose preset configuration
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DockerComposeConfig {
+    /// Path to compose file relative to project directory (default: "docker-compose.yml")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compose_path: Option<String>,
+    /// User-provided docker-compose.override.yml content.
+    /// Merged with the main compose file at deploy time.
+    /// Use to override ports, volumes, environment, commands, etc.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compose_override: Option<String>,
+    /// Ports to expose publicly through the proxy.
+    /// Each entry specifies a service name and container port that gets a public subdomain.
+    /// All other ports remain private (accessible only via host-mapped ports).
+    /// Format: `[{"service": "web", "port": 8080}, {"service": "api", "port": 3000}]`
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub public_ports: Vec<ComposePublicPort>,
+}
+
+/// A port that should be exposed publicly through the proxy for a compose service.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ComposePublicPort {
+    /// Compose service name (e.g. "web", "clickhouse")
+    pub service: String,
+    /// Container port to expose (e.g. 8123)
+    pub port: u16,
+}
+
 /// Nixpacks preset configuration
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema, Default)]
 #[serde(rename_all = "camelCase")]
@@ -887,6 +930,8 @@ pub enum PresetConfig {
     Java(JavaConfig),
     Laravel(LaravelConfig),
     Dockerfile(DockerfileConfig),
+    #[serde(rename = "docker-compose")]
+    DockerCompose(DockerComposeConfig),
     Nixpacks(NixpacksConfig),
     Static(StaticConfig),
     #[serde(rename = "nodejs")]
@@ -919,6 +964,7 @@ impl PresetConfig {
             Preset::Java => PresetConfig::Java(JavaConfig::default()),
             Preset::Laravel => PresetConfig::Laravel(LaravelConfig::default()),
             Preset::Dockerfile => PresetConfig::Dockerfile(DockerfileConfig::default()),
+            Preset::DockerCompose => PresetConfig::DockerCompose(DockerComposeConfig::default()),
             Preset::Nixpacks => PresetConfig::Nixpacks(NixpacksConfig::default()),
             Preset::Static => PresetConfig::Static(StaticConfig::default()),
             Preset::NodeJs => PresetConfig::NodeJs(NodeJsConfig::default()),
@@ -979,6 +1025,7 @@ impl PresetConfig {
             PresetConfig::Java(_) => Preset::Java,
             PresetConfig::Laravel(_) => Preset::Laravel,
             PresetConfig::Dockerfile(_) => Preset::Dockerfile,
+            PresetConfig::DockerCompose(_) => Preset::DockerCompose,
             PresetConfig::Nixpacks(_) => Preset::Nixpacks,
             PresetConfig::Static(_) => Preset::Static,
             PresetConfig::NodeJs(_) => Preset::NodeJs,
@@ -995,6 +1042,11 @@ mod tests {
         let preset = Preset::NextJs;
         let json = serde_json::to_string(&preset).unwrap();
         assert_eq!(json, "\"nextjs\"");
+
+        let compose = Preset::DockerCompose;
+        let json = serde_json::to_string(&compose).unwrap();
+        println!("DockerCompose serializes to: {}", json);
+        assert_eq!(json, "\"docker-compose\"");
     }
 
     #[test]
@@ -1073,6 +1125,30 @@ mod tests {
                 assert_eq!(cfg.build_command, Some("next build".to_string()));
             }
             _ => panic!("Expected NextJs config"),
+        }
+    }
+
+    #[test]
+    fn test_parse_for_preset_docker_compose_with_override() {
+        let value = serde_json::json!({
+            "preset": "docker-compose",
+            "composePath": "docker-compose.yaml",
+            "composeOverride": "services:\n  plausible:\n    ports:\n      - 48080:80",
+            "publicPorts": [{"service": "plausible", "port": 80}]
+        });
+        let config = PresetConfig::parse_for_preset(&Preset::DockerCompose, &value).unwrap();
+        match config {
+            PresetConfig::DockerCompose(cfg) => {
+                assert_eq!(cfg.compose_path, Some("docker-compose.yaml".to_string()));
+                assert_eq!(
+                    cfg.compose_override,
+                    Some("services:\n  plausible:\n    ports:\n      - 48080:80".to_string())
+                );
+                assert_eq!(cfg.public_ports.len(), 1);
+                assert_eq!(cfg.public_ports[0].service, "plausible");
+                assert_eq!(cfg.public_ports[0].port, 80);
+            }
+            _ => panic!("Expected DockerCompose config"),
         }
     }
 }

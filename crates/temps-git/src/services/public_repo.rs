@@ -59,6 +59,7 @@ pub struct DetectedPreset {
     pub exposed_port: Option<i32>,
     pub icon_url: Option<String>,
     pub project_type: String,
+    pub compose_files: Option<Vec<String>>,
 }
 
 /// Trait for public repository providers
@@ -93,6 +94,8 @@ pub trait PublicRepoProvider: Send + Sync {
 /// GitHub public repository provider
 pub struct GitHubPublicProvider {
     client: reqwest::Client,
+    /// Optional auth token to avoid rate limits (from any configured GitHub connection)
+    token: Option<String>,
 }
 
 impl GitHubPublicProvider {
@@ -103,7 +106,33 @@ impl GitHubPublicProvider {
             .build()
             .expect("Failed to create HTTP client");
 
-        Self { client }
+        Self {
+            client,
+            token: None,
+        }
+    }
+
+    /// Create a provider with an authentication token (increases rate limit from 60 to 5000/hr)
+    pub fn with_token(token: String) -> Self {
+        let client = reqwest::Client::builder()
+            .user_agent("Temps-Engine/1.0")
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("Failed to create HTTP client");
+
+        Self {
+            client,
+            token: Some(token),
+        }
+    }
+
+    /// Apply auth header if token is available
+    fn auth_request(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if let Some(ref token) = self.token {
+            req.header("Authorization", format!("token {}", token))
+        } else {
+            req
+        }
     }
 
     /// Send an HTTP request with retry logic for transient failures.
@@ -118,7 +147,7 @@ impl GitHubPublicProvider {
             .with_base_delay(std::time::Duration::from_secs(1))
             .with_max_delay(std::time::Duration::from_secs(10))
             .retry(|| {
-                let request = build_request();
+                let request = self.auth_request(build_request());
                 async move {
                     let response = request.send().await.map_err(Self::map_error)?;
 
@@ -233,15 +262,6 @@ impl PublicRepoProvider for GitHubPublicProvider {
         owner: &str,
         repo: &str,
     ) -> Result<Vec<PublicBranch>, PublicRepoError> {
-        let url = format!("https://api.github.com/repos/{}/{}/branches", owner, repo);
-
-        let response = self.send_with_retry(|| self.client.get(&url)).await?;
-
-        Self::check_response_status(
-            response.status(),
-            &format!("Branches for {}/{}", owner, repo),
-        )?;
-
         #[derive(Deserialize)]
         struct GitHubBranch {
             name: String,
@@ -254,19 +274,42 @@ impl PublicRepoProvider for GitHubPublicProvider {
             sha: String,
         }
 
-        let branches: Vec<GitHubBranch> = response
-            .json()
-            .await
-            .map_err(|e| PublicRepoError::ApiError(format!("Failed to parse branches: {}", e)))?;
+        let mut all_branches = Vec::new();
+        let mut page = 1u32;
+        let per_page = 100;
 
-        Ok(branches
-            .into_iter()
-            .map(|b| PublicBranch {
+        loop {
+            let url = format!(
+                "https://api.github.com/repos/{}/{}/branches?per_page={}&page={}",
+                owner, repo, per_page, page
+            );
+
+            let response = self.send_with_retry(|| self.client.get(&url)).await?;
+
+            Self::check_response_status(
+                response.status(),
+                &format!("Branches for {}/{}", owner, repo),
+            )?;
+
+            let branches: Vec<GitHubBranch> = response.json().await.map_err(|e| {
+                PublicRepoError::ApiError(format!("Failed to parse branches: {}", e))
+            })?;
+
+            let count = branches.len();
+            all_branches.extend(branches.into_iter().map(|b| PublicBranch {
                 name: b.name,
                 commit_sha: b.commit.sha,
                 protected: b.protected,
-            })
-            .collect())
+            }));
+
+            // Last page if fewer results than requested, or safety cap at 1000
+            if count < per_page || all_branches.len() >= 1000 {
+                break;
+            }
+            page += 1;
+        }
+
+        Ok(all_branches)
     }
 
     async fn get_file_tree(
@@ -464,19 +507,6 @@ impl PublicRepoProvider for GitLabPublicProvider {
         owner: &str,
         repo: &str,
     ) -> Result<Vec<PublicBranch>, PublicRepoError> {
-        let encoded_path = Self::encode_project_path(owner, repo);
-        let url = format!(
-            "{}/api/v4/projects/{}/repository/branches",
-            self.base_url, encoded_path
-        );
-
-        let response = self.send_with_retry(|| self.client.get(&url)).await?;
-
-        Self::check_response_status(
-            response.status(),
-            &format!("Branches for {}/{}", owner, repo),
-        )?;
-
         #[derive(Deserialize)]
         struct GitLabBranch {
             name: String,
@@ -489,19 +519,42 @@ impl PublicRepoProvider for GitLabPublicProvider {
             id: String,
         }
 
-        let branches: Vec<GitLabBranch> = response
-            .json()
-            .await
-            .map_err(|e| PublicRepoError::ApiError(format!("Failed to parse branches: {}", e)))?;
+        let encoded_path = Self::encode_project_path(owner, repo);
+        let mut all_branches = Vec::new();
+        let mut page = 1u32;
+        let per_page = 100;
 
-        Ok(branches
-            .into_iter()
-            .map(|b| PublicBranch {
+        loop {
+            let url = format!(
+                "{}/api/v4/projects/{}/repository/branches?per_page={}&page={}",
+                self.base_url, encoded_path, per_page, page
+            );
+
+            let response = self.send_with_retry(|| self.client.get(&url)).await?;
+
+            Self::check_response_status(
+                response.status(),
+                &format!("Branches for {}/{}", owner, repo),
+            )?;
+
+            let branches: Vec<GitLabBranch> = response.json().await.map_err(|e| {
+                PublicRepoError::ApiError(format!("Failed to parse branches: {}", e))
+            })?;
+
+            let count = branches.len();
+            all_branches.extend(branches.into_iter().map(|b| PublicBranch {
                 name: b.name,
                 commit_sha: b.commit.id,
                 protected: b.protected,
-            })
-            .collect())
+            }));
+
+            if count < per_page || all_branches.len() >= 1000 {
+                break;
+            }
+            page += 1;
+        }
+
+        Ok(all_branches)
     }
 
     async fn get_file_tree(
@@ -582,6 +635,21 @@ impl PublicRepoProviderFactory {
         }
     }
 
+    /// Create a provider with an optional auth token (for higher rate limits)
+    pub fn create_with_token(
+        provider: &str,
+        token: Option<String>,
+    ) -> Result<Box<dyn PublicRepoProvider>, PublicRepoError> {
+        match provider.to_lowercase().as_str() {
+            "github" => match token {
+                Some(t) => Ok(Box::new(GitHubPublicProvider::with_token(t))),
+                None => Ok(Box::new(GitHubPublicProvider::new())),
+            },
+            "gitlab" => Ok(Box::new(GitLabPublicProvider::new(None))),
+            _ => Err(PublicRepoError::ProviderNotSupported(provider.to_string())),
+        }
+    }
+
     /// Create a GitLab provider with a custom base URL (for self-hosted instances)
     pub fn create_gitlab_with_url(base_url: &str) -> Box<dyn PublicRepoProvider> {
         Box::new(GitLabPublicProvider::new(Some(base_url.to_string())))
@@ -620,6 +688,7 @@ pub fn detect_presets_from_files(files: &[String]) -> Vec<DetectedPreset> {
                 exposed_port,
                 icon_url,
                 project_type,
+                compose_files: preset.compose_files,
             }
         })
         .collect()
@@ -737,6 +806,7 @@ mod tests {
             exposed_port: Some(3000),
             icon_url: Some("https://example.com/icon.svg".to_string()),
             project_type: "frontend".to_string(),
+            compose_files: None,
         };
 
         let json = serde_json::to_string(&preset).unwrap();

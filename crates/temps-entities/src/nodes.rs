@@ -31,6 +31,8 @@ pub struct Model {
     /// Resource capacity metrics from heartbeats
     pub capacity: serde_json::Value,
     pub last_heartbeat: Option<DBDateTime>,
+    /// X25519 public key for edge nodes (base64-encoded, used for ECIES cert encryption)
+    pub edge_public_key: Option<String>,
     pub created_at: DBDateTime,
     pub updated_at: DBDateTime,
 }

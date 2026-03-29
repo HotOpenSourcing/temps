@@ -41,6 +41,7 @@ pub struct WorkflowExecutionService {
     source_map_service: OnceCell<Arc<SourceMapService>>,
     node_scheduler: OnceCell<Arc<crate::services::NodeScheduler>>,
     encryption_service: OnceCell<Arc<temps_core::EncryptionService>>,
+    file_store: OnceCell<Arc<dyn temps_file_store::FileStore>>,
 }
 
 impl WorkflowExecutionService {
@@ -73,6 +74,7 @@ impl WorkflowExecutionService {
             source_map_service: OnceCell::new(),
             node_scheduler: OnceCell::new(),
             encryption_service: OnceCell::new(),
+            file_store: OnceCell::new(),
         }
     }
 
@@ -84,6 +86,11 @@ impl WorkflowExecutionService {
     /// Set the encryption service for decrypting node tokens during remote deployments
     pub fn set_encryption_service(&self, service: Arc<temps_core::EncryptionService>) {
         let _ = self.encryption_service.set(service);
+    }
+
+    /// Set the content-addressable file store for deduplication of static assets
+    pub fn set_file_store(&self, store: Arc<dyn temps_file_store::FileStore>) {
+        let _ = self.file_store.set(store);
     }
 
     /// Set the source map service for automatic source map capture during deployments
@@ -306,6 +313,29 @@ impl WorkflowExecutionService {
             .one(self.db.as_ref())
             .await?
             .ok_or_else(|| WorkflowExecutionError::DeploymentNotFound(deployment_id))
+    }
+
+    /// Look up the health_check_path output from the build job for a deployment.
+    /// Returns None if no health config was found in .temps.yaml.
+    async fn get_health_check_path_from_jobs(&self, deployment_id: i32) -> Option<String> {
+        use temps_entities::deployment_jobs;
+
+        let jobs = deployment_jobs::Entity::find()
+            .filter(deployment_jobs::Column::DeploymentId.eq(deployment_id))
+            .filter(deployment_jobs::Column::JobType.eq("build_image"))
+            .all(self.db.as_ref())
+            .await
+            .ok()?;
+
+        for job in jobs {
+            if let Some(outputs) = &job.outputs {
+                if let Some(path) = outputs.get("health_check_path") {
+                    return serde_json::from_value::<String>(path.clone()).ok();
+                }
+            }
+        }
+
+        None
     }
 
     async fn get_project(
@@ -1015,6 +1045,93 @@ impl WorkflowExecutionService {
                 Ok(Arc::new(job))
             }
 
+            "PersistStaticAssetsJob" => {
+                let config = db_job.job_config.as_ref().ok_or_else(|| {
+                    WorkflowExecutionError::MissingJobConfig(db_job.job_id.clone())
+                })?;
+
+                let deployment_id = config
+                    .get("deployment_id")
+                    .and_then(|v| v.as_i64())
+                    .ok_or_else(|| {
+                        WorkflowExecutionError::InvalidJobConfig(
+                            "deployment_id is required".to_string(),
+                        )
+                    })? as i32;
+
+                let project_id = config
+                    .get("project_id")
+                    .and_then(|v| v.as_i64())
+                    .ok_or_else(|| {
+                        WorkflowExecutionError::InvalidJobConfig(
+                            "project_id is required".to_string(),
+                        )
+                    })? as i32;
+
+                let environment_id = config
+                    .get("environment_id")
+                    .and_then(|v| v.as_i64())
+                    .ok_or_else(|| {
+                        WorkflowExecutionError::InvalidJobConfig(
+                            "environment_id is required".to_string(),
+                        )
+                    })? as i32;
+
+                let build_job_id = config
+                    .get("build_job_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("build_image")
+                    .to_string();
+
+                let search_paths: Vec<String> = config
+                    .get("search_paths")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+
+                let path_rewrites: Vec<(String, String)> = config
+                    .get("path_rewrites")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+
+                let deployment_slug = config
+                    .get("deployment_slug")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&deployment_id.to_string())
+                    .to_string();
+
+                let chunks_dir = self
+                    .config_service
+                    .static_dir()
+                    .join("chunks")
+                    .join(project_id.to_string())
+                    .join(environment_id.to_string())
+                    .join(deployment_slug);
+
+                let mut job = crate::jobs::PersistStaticAssetsJob::new(
+                    db_job.job_id.clone(),
+                    deployment_id,
+                    project_id,
+                    environment_id,
+                    build_job_id,
+                    search_paths,
+                    path_rewrites,
+                    self.image_builder.clone(),
+                    chunks_dir,
+                )
+                .with_log_id(db_job.log_id.clone())
+                .with_log_service(self.log_service.clone());
+
+                // Wire file store for CAS blob storage
+                if let Some(store) = self.file_store.get() {
+                    job = job.with_file_store(store.clone());
+                }
+
+                // Wire database for URL→hash mapping
+                job = job.with_db(self.db.clone());
+
+                Ok(Arc::new(job))
+            }
+
             "DeployStaticJob" => {
                 let config = db_job.job_config.as_ref().ok_or_else(|| {
                     WorkflowExecutionError::MissingJobConfig(db_job.job_id.clone())
@@ -1189,6 +1306,78 @@ impl WorkflowExecutionService {
                 ))
             }
 
+            "DeployComposeJob" => {
+                let config = db_job.job_config.as_ref().ok_or_else(|| {
+                    WorkflowExecutionError::MissingJobConfig(db_job.job_id.clone())
+                })?;
+
+                let compose_path = config
+                    .get("compose_path")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                let env_vars: HashMap<String, String> = config
+                    .get("environment_vars")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+
+                let directory = config
+                    .get("directory")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("./")
+                    .to_string();
+
+                // Get dependencies to find the download job ID
+                let dependencies: Vec<String> = db_job
+                    .dependencies
+                    .as_ref()
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+
+                let download_job_id = dependencies
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "download_repo".to_string());
+
+                // Inline compose content (for manual projects without git repo)
+                let compose_content = config
+                    .get("compose_content")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                // User-provided compose override from project preset_config
+                let compose_override = project.preset_config.as_ref().and_then(|pc| {
+                    if let temps_entities::preset::PresetConfig::DockerCompose(cfg) = pc {
+                        cfg.compose_override.clone()
+                    } else {
+                        None
+                    }
+                });
+
+                let compose_executor = Arc::new(temps_deployer::compose::ComposeExecutor::new(
+                    self.docker.clone(),
+                    self.config_service.data_dir(),
+                ));
+
+                let job = crate::jobs::DeployComposeJobBuilder::new()
+                    .job_id(db_job.job_id.clone())
+                    .deployment_id(deployment.id)
+                    .project_id(project.id)
+                    .environment_id(environment.id)
+                    .compose_executor(compose_executor)
+                    .compose_path(compose_path)
+                    .directory(directory)
+                    .compose_content(compose_content)
+                    .compose_override(compose_override)
+                    .download_job_id(download_job_id)
+                    .environment_vars(env_vars)
+                    .log_id(Some(db_job.log_id.clone()))
+                    .log_service(self.log_service.clone())
+                    .build()?;
+
+                Ok(Arc::new(job))
+            }
+
             _ => {
                 warn!("Unknown job type: {}", db_job.job_type);
                 Err(WorkflowExecutionError::UnsupportedJobType(
@@ -1288,6 +1477,11 @@ impl WorkflowExecutionService {
                     None
                 };
 
+                // Extract health_check_path from deployment job outputs if available
+                let health_check_path = self
+                    .get_health_check_path_from_jobs(updated_deployment.id)
+                    .await;
+
                 let event = Job::DeploymentSucceeded(temps_core::DeploymentSucceededJob {
                     deployment_id: updated_deployment.id,
                     project_id: updated_deployment.project_id,
@@ -1295,6 +1489,7 @@ impl WorkflowExecutionService {
                     environment_name: environment.name.clone(),
                     commit_sha: updated_deployment.commit_sha.clone(),
                     url,
+                    health_check_path,
                 });
                 if let Err(e) = self.queue.send(event).await {
                     error!("Failed to send DeploymentSucceeded event: {}", e);

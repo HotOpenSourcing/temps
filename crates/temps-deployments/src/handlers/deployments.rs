@@ -144,6 +144,15 @@ pub fn configure_routes() -> Router<Arc<super::types::AppState>> {
             "/projects/{project_id}/environments/{env_id}/teardown",
             delete(teardown_environment),
         )
+        // Asset cache
+        .route(
+            "/projects/{project_id}/asset-cache",
+            delete(purge_asset_cache),
+        )
+        .route(
+            "/projects/{project_id}/environments/{environment_id}/asset-cache",
+            delete(purge_environment_asset_cache),
+        )
         // Analytics
         .route("/deployments/activity-graph", get(get_activity_graph))
         // Container management
@@ -184,6 +193,15 @@ pub fn configure_routes() -> Router<Arc<super::types::AppState>> {
         .route(
             "/projects/{project_id}/environments/{environment_id}/containers/{container_id}/metrics/stream",
             get(stream_container_metrics),
+        )
+        // Container exec and terminal
+        .route(
+            "/projects/{project_id}/environments/{environment_id}/containers/{container_id}/exec",
+            post(super::container_exec::exec_command),
+        )
+        .route(
+            "/projects/{project_id}/environments/{environment_id}/containers/{container_id}/terminal",
+            get(super::container_exec::container_terminal),
         )
 }
 
@@ -755,7 +773,7 @@ pub async fn list_containers(
     // Collect unique node_ids to resolve names in a single batch
     let node_ids: Vec<i32> = containers
         .iter()
-        .filter_map(|(_, node_id)| *node_id)
+        .filter_map(|(_, node_id, _)| *node_id)
         .collect::<std::collections::HashSet<i32>>()
         .into_iter()
         .collect();
@@ -772,11 +790,66 @@ pub async fn list_containers(
         }
     }
 
+    // Resolve preview_domain and env subdomain for per-service URLs
+    let preview_domain = temps_entities::settings::Entity::find()
+        .one(state.db.as_ref())
+        .await
+        .ok()
+        .flatten()
+        .and_then(|s| {
+            s.data
+                .get("preview_domain")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| "localho.st".to_string());
+
+    let env_subdomain = temps_entities::environments::Entity::find_by_id(environment_id)
+        .one(state.db.as_ref())
+        .await
+        .ok()
+        .flatten()
+        .map(|e| e.subdomain);
+
+    // Read public_ports from project's preset_config
+    let public_ports: Vec<temps_entities::preset::ComposePublicPort> =
+        temps_entities::projects::Entity::find_by_id(project_id)
+            .one(state.db.as_ref())
+            .await
+            .ok()
+            .flatten()
+            .and_then(|p| p.preset_config)
+            .and_then(|pc| {
+                if let temps_entities::preset::PresetConfig::DockerCompose(cfg) = pc {
+                    Some(cfg.public_ports)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
+
     let container_responses: Vec<ContainerInfoResponse> = containers
         .into_iter()
-        .map(|(info, node_id)| {
+        .map(|(info, node_id, service_name)| {
             let node_name = node_id.and_then(|id| node_names.get(&id).cloned());
-            ContainerInfoResponse::from_info(info, node_name)
+            // Build per-service URL only for ports marked as public
+            let service_url = service_name.as_ref().and_then(|svc| {
+                // Check if this service has any public port configured
+                let is_public = public_ports.iter().any(|pp| pp.service == *svc);
+                if !is_public {
+                    return None;
+                }
+                env_subdomain.as_ref().map(|sub| {
+                    let label = format!("{}-{}", svc, sub);
+                    let label = if label.len() > 63 {
+                        label[..63].trim_end_matches('-').to_string()
+                    } else {
+                        label
+                    };
+                    format!("https://{}.{}", label, preview_domain)
+                })
+            });
+            ContainerInfoResponse::from_info(info, node_name, service_name, service_url)
         })
         .collect();
 
@@ -1333,6 +1406,61 @@ pub async fn get_container_detail(
         .get_container_restart_count(&container.container_id)
         .await;
 
+    // Resolve per-service URL only for ports marked as public in preset_config
+    let service_url = if let Some(ref svc_name) = container.service_name {
+        // Check if this service has a public port
+        let is_public = temps_entities::projects::Entity::find_by_id(project_id)
+            .one(state.db.as_ref())
+            .await
+            .ok()
+            .flatten()
+            .and_then(|p| p.preset_config)
+            .map(|pc| {
+                if let temps_entities::preset::PresetConfig::DockerCompose(cfg) = pc {
+                    cfg.public_ports.iter().any(|pp| pp.service == *svc_name)
+                } else {
+                    false
+                }
+            })
+            .unwrap_or(false);
+
+        if is_public {
+            let preview_domain = temps_entities::settings::Entity::find()
+                .one(state.db.as_ref())
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| {
+                    s.data
+                        .get("preview_domain")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_else(|| "localho.st".to_string());
+
+            let env_subdomain = temps_entities::environments::Entity::find_by_id(environment_id)
+                .one(state.db.as_ref())
+                .await
+                .ok()
+                .flatten()
+                .map(|e| e.subdomain);
+
+            env_subdomain.map(|sub| {
+                let label = format!("{}-{}", svc_name, sub);
+                let label = if label.len() > 63 {
+                    label[..63].trim_end_matches('-').to_string()
+                } else {
+                    label
+                };
+                format!("https://{}.{}", label, preview_domain)
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let response = crate::handlers::types::ContainerDetailResponse {
         id: container.id,
         container_id: container.container_id,
@@ -1347,7 +1475,9 @@ pub async fn get_container_detail(
         host_port: container.host_port,
         environment_variables: env_vars,
         restart_count,
-        resource_limits: None, // Could be populated from deployment config if needed
+        resource_limits: None,
+        service_name: container.service_name,
+        service_url,
     };
 
     Ok(Json(response).into_response())
@@ -1697,6 +1827,70 @@ pub async fn get_activity_graph(
                 .with_detail(e.to_string()))
         }
     }
+}
+
+/// Purge all cached static assets for a project.
+/// Orphaned CAS blobs are cleaned up by the nightly garbage collector.
+#[utoipa::path(
+    delete,
+    path = "/projects/{project_id}/asset-cache",
+    tag = "Deployments",
+    responses(
+        (status = 200, description = "Asset cache purged"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+    ),
+    params(
+        ("project_id" = i32, Path, description = "Project ID")
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn purge_asset_cache(
+    State(state): State<Arc<super::types::AppState>>,
+    Path(project_id): Path<i32>,
+    RequireAuth(auth): RequireAuth,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, DeploymentsWrite);
+
+    let deleted = state
+        .deployment_service
+        .purge_asset_cache(project_id, None)
+        .await
+        .map_err(Problem::from)?;
+
+    Ok(Json(serde_json::json!({ "deleted": deleted })))
+}
+
+/// Purge cached static assets for a specific environment.
+#[utoipa::path(
+    delete,
+    path = "/projects/{project_id}/environments/{environment_id}/asset-cache",
+    tag = "Deployments",
+    responses(
+        (status = 200, description = "Environment asset cache purged"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+    ),
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("environment_id" = i32, Path, description = "Environment ID")
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn purge_environment_asset_cache(
+    State(state): State<Arc<super::types::AppState>>,
+    Path((project_id, environment_id)): Path<(i32, i32)>,
+    RequireAuth(auth): RequireAuth,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, DeploymentsWrite);
+
+    let deleted = state
+        .deployment_service
+        .purge_asset_cache(project_id, Some(environment_id))
+        .await
+        .map_err(Problem::from)?;
+
+    Ok(Json(serde_json::json!({ "deleted": deleted })))
 }
 
 #[cfg(test)]
@@ -2819,6 +3013,10 @@ mod tests {
             node_service: Arc::new(crate::services::NodeService::new(db.clone())),
             encryption_service: Arc::new(
                 temps_core::EncryptionService::new("01234567890123456789012345678901").unwrap(),
+            ),
+            docker: Arc::new(
+                bollard::Docker::connect_with_local_defaults()
+                    .unwrap_or_else(|_| bollard::Docker::connect_with_defaults().unwrap()),
             ),
         })
     }

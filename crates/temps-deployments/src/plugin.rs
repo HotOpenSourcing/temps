@@ -108,9 +108,17 @@ impl TempsPlugin for DeploymentsPlugin {
             });
 
             // Start Docker cleanup scheduler in background (nightly cleanup at 2 AM UTC)
-            let docker_cleanup = Arc::new(crate::services::DockerCleanupService::new(Arc::new(
-                crate::services::DefaultDockerClient,
-            )));
+            let cas_dir = config_service.data_dir().join("cas");
+            let cleanup_file_store: Arc<dyn temps_file_store::FileStore> =
+                Arc::new(temps_file_store::fs_store::FsFileStore::new(cas_dir));
+            let docker_cleanup = Arc::new(
+                crate::services::DockerCleanupService::new(
+                    Arc::new(crate::services::DefaultDockerClient),
+                    db.clone(),
+                    cleanup_file_store,
+                )
+                .with_static_dir(config_service.static_dir()),
+            );
             tokio::spawn({
                 let cleanup_service = docker_cleanup.clone();
                 async move {
@@ -127,12 +135,11 @@ impl TempsPlugin for DeploymentsPlugin {
             let static_deployer =
                 context.require_service::<dyn temps_deployer::static_deployer::StaticDeployer>();
 
-            // Create Docker client for external image pulls
+            // Create Docker client for container operations
             let docker = Arc::new(
                 bollard::Docker::connect_with_local_defaults()
                     .expect("Failed to connect to Docker"),
             );
-
             // Create WorkflowExecutionService
             let workflow_execution_service = Arc::new(WorkflowExecutionService::new(
                 db.clone(),
@@ -167,6 +174,15 @@ impl TempsPlugin for DeploymentsPlugin {
                 workflow_execution_service.set_encryption_service(encryption_service);
             }
             tracing::debug!("Node scheduler wired into workflow execution service");
+
+            // Wire content-addressable file store for static asset deduplication
+            {
+                let cas_dir = config_service.data_dir().join("cas");
+                let file_store: Arc<dyn temps_file_store::FileStore> =
+                    Arc::new(temps_file_store::fs_store::FsFileStore::new(cas_dir));
+                workflow_execution_service.set_file_store(file_store);
+                tracing::debug!("File store wired into workflow execution service");
+            }
 
             // Get ExternalServiceManager for accessing external service env vars
             let external_service_manager =
@@ -304,6 +320,12 @@ impl TempsPlugin for DeploymentsPlugin {
             .get_service::<temps_core::EncryptionService>()
             .expect("EncryptionService must be registered before configuring routes");
 
+        // Docker client for container exec/terminal
+        let docker_for_exec = Arc::new(
+            bollard::Docker::connect_with_local_defaults()
+                .expect("Failed to connect to Docker for container exec"),
+        );
+
         let app_state = Arc::new(handlers::types::AppState {
             deployment_service,
             log_service,
@@ -320,6 +342,7 @@ impl TempsPlugin for DeploymentsPlugin {
             audit_service,
             node_service,
             encryption_service,
+            docker: docker_for_exec,
         });
 
         let deployments_routes = handlers::deployments::configure_routes();

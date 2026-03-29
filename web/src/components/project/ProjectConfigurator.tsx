@@ -140,10 +140,143 @@ const formSchema = z.object({
   ),
   storageServices: z.array(z.number()),
   dockerfilePath: z.string().optional(),
+  composePath: z.string().optional(),
   port: z.coerce.number().min(1).max(65535).optional(),
 })
 
 export type ProjectFormValues = z.infer<typeof formSchema>
+
+// Compose file selector for docker-compose preset
+function ComposeFileSelector({
+  form,
+  presetData,
+}: {
+  form: ReturnType<typeof useForm<ProjectFormValues>>
+  presetData: { presets?: { preset: string; compose_files?: string[] | null; composeFiles?: string[] | null }[] } | undefined | null
+}) {
+  const [isCustomPath, setIsCustomPath] = useState(false)
+  const rootDirectory = form.watch('rootDirectory') || './'
+
+  // Extract compose files from the docker-compose preset data,
+  // filtered to only show files within the current root directory
+  const composeFiles = useMemo(() => {
+    if (!presetData?.presets) return []
+    const composePreset = presetData.presets.find(
+      (p) => p.preset === 'docker-compose'
+    )
+    // Handle both camelCase (from API) and snake_case
+    const allFiles = composePreset?.composeFiles ?? composePreset?.compose_files ?? []
+
+    // Normalize root directory: strip leading ./ and trailing /
+    const normalizedRoot = rootDirectory.replace(/^\.\//, '').replace(/\/$/, '')
+
+    if (!normalizedRoot) {
+      // Root is repo root — show all files but use just the filename
+      return allFiles.map((f) => ({
+        full: f,
+        relative: f,
+      }))
+    }
+
+    // Filter to only files within the root directory, then make paths relative
+    return allFiles
+      .filter((f) => f.startsWith(normalizedRoot + '/'))
+      .map((f) => ({
+        full: f,
+        relative: f.slice(normalizedRoot.length + 1),
+      }))
+  }, [presetData, rootDirectory])
+
+  // Auto-select first compose file when files are discovered
+  useEffect(() => {
+    if (composeFiles.length > 0 && !form.getValues('composePath')) {
+      form.setValue('composePath', composeFiles[0].relative)
+    }
+  }, [composeFiles, form])
+
+  if (composeFiles.length === 0 || isCustomPath) {
+    return (
+      <FormField
+        control={form.control}
+        name="composePath"
+        render={({ field }) => (
+          <FormItem>
+            <div className="flex items-center justify-between">
+              <FormLabel>Compose File Path</FormLabel>
+              {composeFiles.length > 0 && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setIsCustomPath(false)}
+                  className="h-auto py-1 px-2 text-xs"
+                >
+                  Back to detected files
+                </Button>
+              )}
+            </div>
+            <FormControl>
+              <Input
+                {...field}
+                placeholder="docker-compose.yml"
+                value={field.value || ''}
+              />
+            </FormControl>
+            <p className="text-xs text-muted-foreground">
+              Path to your compose file (e.g., docker-compose.yml, compose.yaml).
+            </p>
+            <FormMessage />
+          </FormItem>
+        )}
+      />
+    )
+  }
+
+  return (
+    <FormField
+      control={form.control}
+      name="composePath"
+      render={({ field }) => (
+        <FormItem>
+          <div className="flex items-center justify-between">
+            <FormLabel>Compose File</FormLabel>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => setIsCustomPath(true)}
+              className="h-auto py-1 px-2 text-xs"
+            >
+              Enter custom path
+            </Button>
+          </div>
+          <div className="space-y-2">
+            {composeFiles.map((file) => (
+              <div
+                key={file.full}
+                className={cn(
+                  'flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-colors',
+                  field.value === file.relative
+                    ? 'border-primary bg-primary/5 ring-1 ring-primary'
+                    : 'hover:bg-muted/50'
+                )}
+                onClick={() => field.onChange(file.relative)}
+              >
+                <Folder className="h-4 w-4 text-muted-foreground shrink-0" />
+                <span className="font-mono text-sm">{file.relative}</span>
+              </div>
+            ))}
+          </div>
+          <p className="text-xs text-muted-foreground">
+            {composeFiles.length} compose file{composeFiles.length !== 1 ? 's' : ''} found.
+            Each service with exposed ports gets a subdomain automatically.
+          </p>
+          <FormMessage />
+        </FormItem>
+      )}
+    />
+  )
+}
 
 // Step definitions for different modes
 type WizardStep = 'repo-config' | 'services' | 'env-vars' | 'review'
@@ -406,11 +539,12 @@ export function ProjectConfigurator({
     if (
       matchingPreset &&
       matchingPreset.default_port !== null &&
-      matchingPreset.default_port !== undefined
+      matchingPreset.default_port !== undefined &&
+      matchingPreset.default_port > 0
     ) {
       form.setValue('port', matchingPreset.default_port, {
         shouldValidate: true,
-        shouldDirty: false, // Don't mark as dirty when auto-setting
+        shouldDirty: false,
       })
     }
   }, [selectedPreset, allPresetsData, form])
@@ -486,6 +620,19 @@ export function ProjectConfigurator({
             environment_variables: finalData.environmentVariables?.map(
               (env) => [env.key, env.value] as [string, string]
             ),
+            preset_config:
+              finalData.preset === 'dockerfile' && finalData.dockerfilePath
+                ? {
+                    preset: 'dockerfile',
+                    dockerfilePath: finalData.dockerfilePath,
+                  }
+                : finalData.preset === 'docker-compose'
+                  ? {
+                      preset: 'docker-compose',
+                      composePath:
+                        finalData.composePath || 'docker-compose.yml',
+                    }
+                  : undefined,
           },
         })
       }
@@ -710,54 +857,63 @@ export function ProjectConfigurator({
       />
 
       {/* Docker Configuration - Only show for docker/dockerfile preset */}
-      {form.watch('preset')?.toLowerCase().includes('docker') && (
-        <>
-          <FormField
-            control={form.control}
-            name="dockerfilePath"
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>Dockerfile Path</FormLabel>
-                <FormControl>
-                  <Input
-                    {...field}
-                    placeholder="Dockerfile"
-                    value={field.value || 'Dockerfile'}
-                  />
-                </FormControl>
-                <p className="text-xs text-muted-foreground">
-                  Path to your Dockerfile relative to the root directory
-                </p>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
-        </>
+      {form.watch('preset')?.split('::')[0]?.toLowerCase() === 'dockerfile' && (
+        <FormField
+          control={form.control}
+          name="dockerfilePath"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Dockerfile Path</FormLabel>
+              <FormControl>
+                <Input
+                  {...field}
+                  placeholder="Dockerfile"
+                  value={field.value || 'Dockerfile'}
+                />
+              </FormControl>
+              <p className="text-xs text-muted-foreground">
+                Path to your Dockerfile relative to the root directory
+              </p>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
       )}
 
-      <FormField
-        control={form.control}
-        name="port"
-        render={({ field }) => (
-          <FormItem>
-            <FormLabel>Application Port</FormLabel>
-            <FormControl>
-              <Input
-                {...field}
-                type="number"
-                min="1"
-                max="65535"
-                placeholder="3000"
-                value={field.value || 3000}
-              />
-            </FormControl>
-            <p className="text-xs text-muted-foreground">
-              Port your application will listen on (e.g., 3000, 8080)
-            </p>
-            <FormMessage />
-          </FormItem>
-        )}
-      />
+      {/* Docker Compose Configuration */}
+      {form.watch('preset')?.split('::')[0]?.toLowerCase() === 'docker-compose' && (
+        <ComposeFileSelector
+          form={form}
+          presetData={presetData}
+        />
+      )}
+
+      {/* Application Port - hide for docker-compose (multiple services have their own ports) */}
+      {form.watch('preset')?.split('::')[0]?.toLowerCase() !== 'docker-compose' && (
+        <FormField
+          control={form.control}
+          name="port"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Application Port</FormLabel>
+              <FormControl>
+                <Input
+                  {...field}
+                  type="number"
+                  min="1"
+                  max="65535"
+                  placeholder="3000"
+                  value={field.value || 3000}
+                />
+              </FormControl>
+              <p className="text-xs text-muted-foreground">
+                Port your application will listen on (e.g., 3000, 8080)
+              </p>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+      )}
     </div>
   )
 
@@ -1191,7 +1347,9 @@ export function ProjectConfigurator({
   return (
     <div className={cn('space-y-6', className)}>
       <Form {...form}>
-        <form onSubmit={form.handleSubmit(handleSubmit)} className="space-y-6">
+        <form onSubmit={form.handleSubmit(handleSubmit, (errors) => {
+          console.error('Form validation errors:', errors)
+        })} className="space-y-6">
           {/* All sections in one view for inline/compact mode */}
           <Card>
             <CardHeader>

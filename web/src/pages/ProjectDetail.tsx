@@ -127,7 +127,7 @@ export function ProjectDetail() {
         name: project?.repo_name || '',
       },
     }),
-    enabled: !!project?.repo_owner && !!project?.repo_name,
+    enabled: !!project?.repo_owner && !!project?.repo_name && !!project?.git_provider_connection_id,
   })
 
   // Mutation to disable attack mode
@@ -289,7 +289,12 @@ export function ProjectDetail() {
           <ProjectDetailHeader
             project={project}
             activeVisitorsCount={activeVisitorsCount}
-            repositoryCloneUrl={repository?.clone_url}
+            repositoryCloneUrl={
+              repository?.clone_url ||
+              (project?.repo_owner && project?.repo_name
+                ? `https://github.com/${project.repo_owner}/${project.repo_name}`
+                : undefined)
+            }
             lastDeploymentUrl={lastDeployment?.url}
             isLoadingLastDeployment={isLoadingLastDeployment}
           />
@@ -366,6 +371,10 @@ export function ProjectDetail() {
               />
               <Route
                 path="logs/*"
+                element={<RequestLogs project={project} />}
+              />
+              <Route
+                path="request-logs/*"
                 element={<RequestLogs project={project} />}
               />
               <Route

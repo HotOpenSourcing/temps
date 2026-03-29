@@ -41,12 +41,14 @@ members = [
     "crates/temps-analytics-performance",
     "crates/temps-status-page",
     "crates/temps-static-files",
+    "crates/temps-file-store",
     "crates/temps-import-types",
     "crates/temps-import",
     "crates/temps-import-docker",
     "crates/temps-captcha-wasm",
     "crates/temps-webhooks",
     "crates/temps-email",
+    "crates/temps-email-tracking",
     "crates/temps-dns",
     "crates/temps-vulnerability-scanner",
     "crates/temps-kv",
@@ -60,6 +62,7 @@ members = [
     "crates/temps-wireguard",
     "crates/temps-ai-gateway",
     "crates/temps-agent",
+    "crates/temps-edge",
     "crates/temps-external-plugins",
     "examples/example-plugin",
     "examples/lighthouse-plugin",
@@ -169,7 +172,9 @@ schemars = { version = "0.8", features = ["preserve_order"] }
 # ============================================================================
 argon2 = "0.5"
 aes-gcm = "0.10.3"
+hkdf = "0.12"
 totp-rs = "5.7.0"
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
 sha2 = "0.10.9"
 base64 = "0.22"
 hex = "0.4.3"
@@ -186,6 +191,7 @@ rustls = { version = "0.23", default-features = false, features = [
     "logging",
     "aws_lc_rs"
 ] }
+rustls-pemfile = "2.0"
 rustls-platform-verifier = "0.5"
 webpki-roots = "0.26"
 

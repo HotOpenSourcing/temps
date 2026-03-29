@@ -32,6 +32,9 @@ pub struct ProjectPresetDomain {
     pub exposed_port: Option<u16>,
     pub icon_url: Option<String>,
     pub project_type: String,
+    /// Compose file paths found in the repository (only for docker-compose preset)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compose_files: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -114,6 +117,72 @@ impl GitProviderManager {
             queue_service,
             config_service,
         }
+    }
+
+    /// Get an access token from any active GitHub connection.
+    /// Used for public repo API calls to avoid unauthenticated rate limits (60 → 5000 req/hr).
+    /// Validates the token against GitHub's API before returning it.
+    pub async fn get_any_github_token(&self) -> Option<String> {
+        use temps_entities::git_providers;
+
+        let connections = self.get_user_connections().await.ok()?;
+
+        for conn in connections {
+            if !conn.is_active {
+                continue;
+            }
+
+            // Check provider type is GitHub
+            let provider = git_providers::Entity::find_by_id(conn.provider_id)
+                .one(self.db.as_ref())
+                .await
+                .ok()
+                .flatten();
+
+            let is_github = provider
+                .as_ref()
+                .map(|p| p.provider_type == "github" || p.provider_type == "github_app")
+                .unwrap_or(false);
+
+            if !is_github {
+                continue;
+            }
+
+            // get_connection_token validates expiry and refreshes OAuth/App tokens
+            let token = match self.get_connection_token(conn.id).await {
+                Ok(t) if !t.is_empty() => t,
+                _ => continue,
+            };
+
+            // Verify the token actually works with a lightweight API call
+            let client = reqwest::Client::builder()
+                .user_agent("Temps-Engine/1.0")
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .ok()?;
+
+            let resp = client
+                .get("https://api.github.com/rate_limit")
+                .header("Authorization", format!("token {}", token))
+                .send()
+                .await
+                .ok()?;
+
+            if resp.status().is_success() {
+                tracing::debug!(
+                    "Using GitHub token from connection {} for public repo API calls",
+                    conn.id
+                );
+                return Some(token);
+            }
+
+            tracing::warn!(
+                "GitHub token from connection {} failed validation (status {}), trying next",
+                conn.id,
+                resp.status()
+            );
+        }
+        None
     }
 
     /// Get provider service by ID
@@ -2402,6 +2471,7 @@ impl GitProviderManager {
                 exposed_port: p.exposed_port,
                 icon_url: p.icon_url.clone(),
                 project_type: p.project_type.clone(),
+                compose_files: p.compose_files.clone(),
             })
             .collect();
 
@@ -2470,6 +2540,7 @@ impl GitProviderManager {
                     exposed_port,
                     icon_url,
                     project_type,
+                    compose_files: preset.compose_files,
                 }
             })
             .collect()
@@ -3896,24 +3967,23 @@ impl GitProviderManagerTrait for GitProviderManager {
         // Checkout specific ref if provided
         if let Some(ref_name) = branch_or_ref {
             if ref_name != repo.default_branch {
-                let output = tokio::process::Command::new("git")
-                    .arg("checkout")
-                    .arg("--")
-                    .arg(ref_name)
-                    .current_dir(target_dir)
-                    .output()
-                    .await
-                    .map_err(|e| {
-                        TraitError::CloneError(format!("Failed to run git checkout: {}", e))
+                let target_dir_owned = target_dir.to_path_buf();
+                let ref_name_owned = ref_name.to_string();
+                tokio::task::spawn_blocking(move || {
+                    let repo = git2::Repository::open(&target_dir_owned).map_err(|e| {
+                        TraitError::CloneError(format!("Failed to open repository: {}", e))
                     })?;
-
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    return Err(TraitError::CloneError(format!(
-                        "Failed to checkout ref {}: {}",
-                        ref_name, stderr
-                    )));
-                }
+                    super::git_ops::checkout_ref(&repo, &ref_name_owned).map_err(|e| {
+                        TraitError::CloneError(format!(
+                            "Failed to checkout ref {}: {}",
+                            ref_name_owned, e
+                        ))
+                    })
+                })
+                .await
+                .map_err(|e| {
+                    TraitError::CloneError(format!("Git checkout task failed: {}", e))
+                })??;
             }
         }
 

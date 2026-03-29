@@ -823,6 +823,8 @@ impl ProjectService {
         preset: Option<String>,
         directory: String,
         preset_config: Option<serde_json::Value>,
+        git_url: Option<String>,
+        is_public_repo: Option<bool>,
     ) -> Result<Project, ProjectError> {
         // Get the current project
         let project = projects::Entity::find_by_id(project_id)
@@ -895,6 +897,14 @@ impl ProjectService {
             } else {
                 active_project.git_provider_connection_id = Set(None);
             }
+        }
+
+        if let Some(url) = git_url {
+            active_project.git_url = Set(Some(url));
+        }
+
+        if let Some(is_public) = is_public_repo {
+            active_project.is_public_repo = Set(is_public);
         }
 
         // Update preset_config if provided (e.g., Dockerfile path for Docker preset)
@@ -1117,9 +1127,16 @@ impl ProjectService {
         Ok(Self::map_db_project_to_project(updated_project))
     }
 
-    /// Generate a unique project slug by checking for collisions and appending a short UUID if needed
+    /// Generate a unique project slug by checking for collisions and appending a short UUID if needed.
+    /// Slug is truncated to 40 chars max to keep DNS labels within the 63-char limit
+    /// when combined with environment slug and service name prefix.
     pub async fn generate_unique_project_slug(&self, name: &str) -> Result<String, ProjectError> {
-        let base_slug = slugify(name);
+        let mut base_slug = slugify(name);
+        // Truncate to 40 chars max (leaves room for "-production" env slug + "service-" prefix
+        // within the 63-char DNS label limit)
+        if base_slug.len() > 40 {
+            base_slug = base_slug[..40].trim_end_matches('-').to_string();
+        }
 
         // First, try the base slug
         let existing = projects::Entity::find()
@@ -1449,12 +1466,20 @@ impl ProjectService {
                 "github"
             };
 
-            let provider = PublicRepoProviderFactory::create(provider_name).map_err(|e| {
-                ProjectError::Other(format!(
-                    "Failed to create public repo provider for {}: {}",
-                    provider_name, e
-                ))
-            })?;
+            // Use authenticated token if available (avoids 60 req/hr rate limit)
+            let token = if provider_name == "github" {
+                self.git_provider_manager.get_any_github_token().await
+            } else {
+                None
+            };
+
+            let provider = PublicRepoProviderFactory::create_with_token(provider_name, token)
+                .map_err(|e| {
+                    ProjectError::Other(format!(
+                        "Failed to create public repo provider for {}: {}",
+                        provider_name, e
+                    ))
+                })?;
 
             let branches = provider
                 .list_branches(&project.repo_owner, &project.repo_name)

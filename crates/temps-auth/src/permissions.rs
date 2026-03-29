@@ -214,6 +214,15 @@ pub enum Permission {
     AiGatewayRead,
     AiGatewayWrite,
     AiGatewayExecute,
+
+    // Container Exec permissions
+    ContainersExec,
+
+    // Compose Stacks permissions
+    StacksRead,
+    StacksWrite,
+    StacksDelete,
+    StacksCreate,
 }
 
 impl fmt::Display for Permission {
@@ -350,6 +359,11 @@ impl fmt::Display for Permission {
             Permission::AiGatewayRead => "ai_gateway:read",
             Permission::AiGatewayWrite => "ai_gateway:write",
             Permission::AiGatewayExecute => "ai_gateway:execute",
+            Permission::ContainersExec => "containers:exec",
+            Permission::StacksRead => "stacks:read",
+            Permission::StacksWrite => "stacks:write",
+            Permission::StacksDelete => "stacks:delete",
+            Permission::StacksCreate => "stacks:create",
         };
         write!(f, "{}", name)
     }
@@ -490,6 +504,11 @@ impl Permission {
             "ai_gateway:read" => Some(Permission::AiGatewayRead),
             "ai_gateway:write" => Some(Permission::AiGatewayWrite),
             "ai_gateway:execute" => Some(Permission::AiGatewayExecute),
+            "containers:exec" => Some(Permission::ContainersExec),
+            "stacks:read" => Some(Permission::StacksRead),
+            "stacks:write" => Some(Permission::StacksWrite),
+            "stacks:delete" => Some(Permission::StacksDelete),
+            "stacks:create" => Some(Permission::StacksCreate),
             _ => None,
         }
     }
@@ -627,6 +646,10 @@ impl Permission {
             Permission::AiGatewayRead,
             Permission::AiGatewayWrite,
             Permission::AiGatewayExecute,
+            Permission::StacksRead,
+            Permission::StacksWrite,
+            Permission::StacksDelete,
+            Permission::StacksCreate,
         ]
     }
 }
@@ -819,6 +842,11 @@ impl Role {
                 Permission::AiGatewayRead,
                 Permission::AiGatewayWrite,
                 Permission::AiGatewayExecute,
+                Permission::ContainersExec,
+                Permission::StacksRead,
+                Permission::StacksWrite,
+                Permission::StacksDelete,
+                Permission::StacksCreate,
             ],
             Role::User => &[
                 Permission::ProjectsRead,
@@ -917,6 +945,9 @@ impl Role {
                 Permission::OtelWrite,
                 Permission::AiGatewayRead,
                 Permission::AiGatewayExecute,
+                Permission::StacksRead,
+                Permission::StacksWrite,
+                Permission::StacksCreate,
             ],
             Role::Reader => &[
                 Permission::ProjectsRead,
@@ -956,6 +987,7 @@ impl Role {
                 Permission::StatusPageRead,
                 Permission::OtelRead,
                 Permission::AiGatewayRead,
+                Permission::StacksRead,
             ],
             Role::Mcp => &[
                 Permission::ProjectsRead,

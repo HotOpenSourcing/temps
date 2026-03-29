@@ -21,11 +21,13 @@ Install, configure, and manage the Temps self-hosted deployment platform and CLI
 curl -fsSL https://temps.sh/deploy.sh | bash
 
 # 2. Start PostgreSQL
+docker volume create temps-postgres
 docker run -d --name temps-postgres \
+  -v temps-postgres:/home/postgres/pgdata/data \
   -e POSTGRES_PASSWORD=temps \
   -e POSTGRES_DB=temps \
   -p 16432:5432 \
-  timescale/timescaledb:latest-pg18
+  timescale/timescaledb-ha:pg18
 
 # 3. Setup platform
 temps setup \

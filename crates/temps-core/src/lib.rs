@@ -17,6 +17,8 @@ pub use problemdetails::ProblemDetails;
 mod app_settings;
 mod constants;
 mod cookie_crypto;
+#[allow(deprecated)] // generic-array 0.14.x deprecation in aes-gcm 0.10
+pub mod ecies;
 mod encryption;
 pub mod repo_config;
 mod request_metadata;

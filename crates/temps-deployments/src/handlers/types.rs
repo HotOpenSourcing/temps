@@ -33,6 +33,8 @@ pub struct AppState {
     pub node_service: Arc<NodeService>,
     /// Encryption service for decrypting node tokens (used by drain to stop remote containers)
     pub encryption_service: Arc<temps_core::EncryptionService>,
+    /// Docker client for container exec/terminal
+    pub docker: Arc<bollard::Docker>,
 }
 
 use crate::services::types::Deployment;
@@ -586,10 +588,21 @@ pub struct ContainerInfoResponse {
     /// Node name where this container is running. None for local (single-node) deployments.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node_name: Option<String>,
+    /// Compose service name (e.g. "web", "redis"). None for single-container deployments.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_name: Option<String>,
+    /// Per-service URL for compose deployments (e.g. "https://web-myapp.localho.st")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_url: Option<String>,
 }
 
 impl ContainerInfoResponse {
-    pub fn from_info(info: temps_deployer::ContainerInfo, node_name: Option<String>) -> Self {
+    pub fn from_info(
+        info: temps_deployer::ContainerInfo,
+        node_name: Option<String>,
+        service_name: Option<String>,
+        service_url: Option<String>,
+    ) -> Self {
         Self {
             container_id: info.container_id,
             container_name: info.container_name,
@@ -597,13 +610,15 @@ impl ContainerInfoResponse {
             status: info.status.to_string(),
             created_at: info.created_at.to_rfc3339(),
             node_name,
+            service_name,
+            service_url,
         }
     }
 }
 
 impl From<temps_deployer::ContainerInfo> for ContainerInfoResponse {
     fn from(info: temps_deployer::ContainerInfo) -> Self {
-        Self::from_info(info, None)
+        Self::from_info(info, None, None, None)
     }
 }
 
@@ -641,6 +656,12 @@ pub struct ContainerDetailResponse {
     /// Resource limits
     #[schema(nullable = true)]
     pub resource_limits: Option<ResourceLimitsResponse>,
+    /// Compose service name (e.g. "web", "redis"). None for single-container deployments.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_name: Option<String>,
+    /// Per-service URL for compose deployments
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_url: Option<String>,
 }
 
 /// Environment variable with masked sensitive values

@@ -786,9 +786,22 @@ impl WorkflowPlanner {
         );
 
         // Gather environment variables for the deployment
-        let env_vars = self
+        let mut env_vars = self
             .gather_environment_variables(project, environment, deployment)
             .await?;
+
+        // Inject TEMPS_ASSET_PREFIX for stale-chunk prevention.
+        // Frameworks can use this to namespace static assets per deployment:
+        //   Next.js: assetPrefix: process.env.NEXT_PUBLIC_TEMPS_ASSET_PREFIX || ''
+        //   Vite:    base: process.env.TEMPS_ASSET_PREFIX || '/'
+        // The value is the deployment slug, which is unique and URL-safe.
+        let asset_prefix = format!("/_temps/assets/{}", deployment.slug);
+        env_vars.insert("TEMPS_ASSET_PREFIX".to_string(), asset_prefix.clone());
+        // NEXT_PUBLIC_ prefix makes it available at build time in Next.js client bundles
+        if project.preset == temps_entities::preset::Preset::NextJs {
+            env_vars.insert("NEXT_PUBLIC_TEMPS_ASSET_PREFIX".to_string(), asset_prefix);
+        }
+
         debug!(
             "📦 Gathered {} environment variables for deployment",
             env_vars.len()
@@ -800,6 +813,13 @@ impl WorkflowPlanner {
             .await;
         if remote_env_vars.is_some() {
             debug!("📦 Built remote environment variables for cross-node deployments");
+        }
+
+        // Docker Compose preset uses its own deployment path
+        if project.preset == temps_entities::preset::Preset::DockerCompose {
+            return self
+                .plan_compose_deployment(project, environment, deployment, env_vars)
+                .await;
         }
 
         // Route to appropriate job planning based on effective source type
@@ -986,6 +1006,41 @@ impl WorkflowPlanner {
                 required_for_completion: true,
             });
 
+            // Persist static assets to CAS for stale-chunk fallback
+            let search_paths_for_static_chunks: Vec<String> = match project.preset {
+                temps_entities::preset::Preset::Vite => vec!["dist/assets".to_string()],
+                _ => vec!["dist".to_string(), "build/static".to_string()],
+            };
+
+            let path_rewrites_for_static_chunks: Vec<(String, String)> = match project.preset {
+                temps_entities::preset::Preset::Vite => {
+                    vec![("dist/".to_string(), String::new())]
+                }
+                _ => vec![
+                    ("dist/".to_string(), String::new()),
+                    ("build/".to_string(), String::new()),
+                ],
+            };
+
+            jobs.push(JobDefinition {
+                job_id: "persist_static_assets".to_string(),
+                job_type: "PersistStaticAssetsJob".to_string(),
+                name: "Persist Static Assets".to_string(),
+                description: Some(
+                    "Extract and deduplicate static assets for stale-chunk fallback".to_string(),
+                ),
+                dependencies: vec!["build_image".to_string()],
+                job_config: Some(serde_json::json!({
+                    "deployment_id": deployment.id,
+                    "deployment_slug": deployment.slug,
+                    "project_id": project.id,
+                    "environment_id": deployment.environment_id,
+                    "search_paths": search_paths_for_static_chunks,
+                    "path_rewrites": path_rewrites_for_static_chunks,
+                })),
+                required_for_completion: false,
+            });
+
             "deploy_static".to_string()
         } else {
             // Container deployment path: BuildImageJob + DeployImageJob
@@ -1086,13 +1141,81 @@ impl WorkflowPlanner {
                 required_for_completion: true,
             });
 
+            // Persist static assets to CAS for stale-chunk fallback.
+            // Only for frontend presets that produce hashed static assets.
+            #[allow(clippy::type_complexity)]
+            let static_asset_config: Option<(Vec<String>, Vec<(String, String)>)> =
+                match project.preset {
+                    temps_entities::preset::Preset::NextJs => Some((
+                        vec![".next/static".to_string()],
+                        vec![(".next".to_string(), "_next".to_string())],
+                    )),
+                    temps_entities::preset::Preset::Vite
+                    | temps_entities::preset::Preset::Rsbuild => Some((
+                        vec!["dist/assets".to_string()],
+                        vec![("dist/".to_string(), String::new())],
+                    )),
+                    temps_entities::preset::Preset::Nuxt => Some((
+                        vec![".output/public/_nuxt".to_string()],
+                        vec![(".output/public/".to_string(), String::new())],
+                    )),
+                    temps_entities::preset::Preset::Remix
+                    | temps_entities::preset::Preset::Astro
+                    | temps_entities::preset::Preset::SvelteKit
+                    | temps_entities::preset::Preset::SolidStart => Some((
+                        vec!["build/static".to_string(), "dist/assets".to_string()],
+                        vec![
+                            ("build/".to_string(), String::new()),
+                            ("dist/".to_string(), String::new()),
+                        ],
+                    )),
+                    // Custom Dockerfile: may contain a frontend app (e.g., Next.js with Dockerfile)
+                    // Try common frontend asset paths — job completes quickly if none exist
+                    temps_entities::preset::Preset::Dockerfile => Some((
+                        vec![
+                            ".next/static".to_string(),
+                            "dist/assets".to_string(),
+                            "build/static".to_string(),
+                        ],
+                        vec![
+                            (".next".to_string(), "_next".to_string()),
+                            ("dist/".to_string(), String::new()),
+                            ("build/".to_string(), String::new()),
+                        ],
+                    )),
+                    // Backend presets (Rust, Go, Python, Java, etc.) don't produce static assets
+                    _ => None,
+                };
+
+            if let Some((search_paths, path_rewrites)) = static_asset_config {
+                jobs.push(JobDefinition {
+                    job_id: "persist_static_assets".to_string(),
+                    job_type: "PersistStaticAssetsJob".to_string(),
+                    name: "Persist Static Assets".to_string(),
+                    description: Some(
+                        "Extract and deduplicate static assets for stale-chunk fallback"
+                            .to_string(),
+                    ),
+                    dependencies: vec!["build_image".to_string()],
+                    job_config: Some(serde_json::json!({
+                        "deployment_id": deployment.id,
+                        "deployment_slug": deployment.slug,
+                        "project_id": project.id,
+                        "environment_id": deployment.environment_id,
+                        "search_paths": search_paths,
+                        "path_rewrites": path_rewrites,
+                    })),
+                    required_for_completion: false,
+                });
+            }
+
             "deploy_container".to_string()
         };
 
-        // Job 4: Mark deployment as complete
-        // This synthetic job marks the deployment as "Completed" and updates environment routing
-        // It acts as a barrier between core deployment jobs and optional post-deployment jobs
-        // Depends on either deploy_static or deploy_container depending on deployment strategy
+        // mark_deployment_complete depends only on the deploy job
+        let complete_dependencies = vec![deploy_job_id];
+
+        // Mark deployment as complete
         jobs.push(JobDefinition {
             job_id: "mark_deployment_complete".to_string(),
             job_type: "MarkDeploymentCompleteJob".to_string(),
@@ -1100,7 +1223,7 @@ impl WorkflowPlanner {
             description: Some(
                 "Mark deployment as complete and update environment routing".to_string(),
             ),
-            dependencies: vec![deploy_job_id],
+            dependencies: complete_dependencies,
             job_config: Some(serde_json::json!({
                 "deployment_id": deployment.id
             })),
@@ -1245,6 +1368,123 @@ impl WorkflowPlanner {
             jobs.len(),
             project.name
         );
+        Ok(jobs)
+    }
+
+    /// Plan jobs for Docker Compose deployment
+    /// DownloadRepoJob (if git) -> DeployComposeJob -> MarkDeploymentCompleteJob
+    async fn plan_compose_deployment(
+        &self,
+        project: &projects::Model,
+        environment: &environments::Model,
+        deployment: &deployments::Model,
+        env_vars: std::collections::HashMap<String, String>,
+    ) -> anyhow::Result<Vec<JobDefinition>> {
+        let mut jobs = Vec::new();
+
+        // Check if git info is available
+        let has_git_info = !project.repo_owner.is_empty() && !project.repo_name.is_empty();
+
+        // Job 1: Download repository (only if git-backed)
+        if has_git_info {
+            let branch_or_commit = deployment
+                .branch_ref
+                .as_ref()
+                .or(deployment.commit_sha.as_ref())
+                .unwrap_or(&project.main_branch);
+
+            jobs.push(JobDefinition {
+                job_id: "download_repo".to_string(),
+                job_type: "DownloadRepoJob".to_string(),
+                name: "Download Repository".to_string(),
+                description: Some("Download source code from git repository".to_string()),
+                dependencies: vec![],
+                job_config: Some(serde_json::json!({
+                    "branch_ref": branch_or_commit,
+                    "tag_ref": deployment.tag_ref,
+                    "commit_sha": deployment.commit_sha,
+                    "repo_owner": project.repo_owner,
+                    "repo_name": project.repo_name,
+                    "git_provider_connection_id": project.git_provider_connection_id,
+                    "git_url": project.git_url,
+                    "is_public_repo": project.is_public_repo,
+                    "directory": project.directory
+                })),
+                required_for_completion: true,
+            });
+        }
+
+        // Get compose path from preset config
+        let compose_path = project
+            .preset_config
+            .as_ref()
+            .and_then(|pc| {
+                if let temps_entities::preset::PresetConfig::DockerCompose(cfg) = pc {
+                    cfg.compose_path.clone()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "docker-compose.yml".to_string());
+
+        // Job 2: Deploy Compose Stack (no build step)
+        let deploy_dependencies = if has_git_info {
+            vec!["download_repo".to_string()]
+        } else {
+            vec![]
+        };
+
+        jobs.push(JobDefinition {
+            job_id: "deploy_compose".to_string(),
+            job_type: "DeployComposeJob".to_string(),
+            name: "Deploy Compose Stack".to_string(),
+            description: Some("Pull images and start Docker Compose services".to_string()),
+            dependencies: deploy_dependencies,
+            job_config: Some(serde_json::json!({
+                "compose_path": compose_path,
+                "environment_vars": env_vars,
+                "project_id": project.id,
+                "environment_id": environment.id,
+                "directory": project.directory,
+            })),
+            required_for_completion: true,
+        });
+
+        // Job 3: Mark deployment complete
+        jobs.push(JobDefinition {
+            job_id: "mark_complete".to_string(),
+            job_type: "MarkDeploymentCompleteJob".to_string(),
+            name: "Finalize Deployment".to_string(),
+            description: Some("Register containers and update routes".to_string()),
+            dependencies: vec!["deploy_compose".to_string()],
+            job_config: Some(serde_json::json!({
+                "deployment_id": deployment.id
+            })),
+            required_for_completion: true,
+        });
+
+        // Job 4: Take screenshot (optional, runs after deployment is live)
+        let screenshots_enabled = self.config_service.is_screenshots_enabled().await;
+        if screenshots_enabled {
+            jobs.push(JobDefinition {
+                job_id: "take_screenshot".to_string(),
+                job_type: "TakeScreenshotJob".to_string(),
+                name: "Take Screenshot".to_string(),
+                description: Some("Capture screenshot of deployed application".to_string()),
+                dependencies: vec!["mark_complete".to_string()],
+                job_config: Some(serde_json::json!({
+                    "deployment_id": deployment.id
+                })),
+                required_for_completion: false,
+            });
+        }
+
+        debug!(
+            "Planned {} jobs for compose deployment of project '{}'",
+            jobs.len(),
+            project.name
+        );
+
         Ok(jobs)
     }
 

@@ -2,6 +2,7 @@ use std::{fmt, path::Path};
 use async_trait::async_trait;
 
 mod docker;
+mod docker_compose;
 mod docusaurus;
 mod nextjs;
 mod nixpacks_preset;
@@ -267,6 +268,7 @@ pub fn all_presets() -> Vec<Box<dyn Preset>> {
         Box::new(PythonPreset::new()),
         Box::new(JavaPreset::new()),
         // Generic presets
+        Box::new(docker_compose::DockerComposePreset),
         Box::new(DockerfilePreset),
         Box::new(docker_custom::DockerCustomPreset),
         // Nixpacks auto-detect
@@ -294,7 +296,16 @@ pub fn get_preset_by_slug(slug: &str) -> Option<Box<dyn Preset>> {
 }
 
 pub fn detect_preset_from_files(files: &[String]) -> Option<Box<dyn Preset>> {
-    // Check for Dockerfile first
+    // Check for Docker Compose files first
+    if files.iter().any(|path| {
+        docker_compose::COMPOSE_FILE_NAMES
+            .iter()
+            .any(|name| path.ends_with(name))
+    }) {
+        return Some(Box::new(docker_compose::DockerComposePreset));
+    }
+
+    // Check for Dockerfile
     if files.iter().any(|path| path.ends_with("Dockerfile")) {
         return Some(Box::new(DockerfilePreset));
     }
@@ -385,6 +396,8 @@ pub struct DetectedPreset {
     pub label: String,
     /// Exposed port if applicable
     pub exposed_port: Option<u16>,
+    /// Compose file paths found in the repository (only for docker-compose preset)
+    pub compose_files: Option<Vec<String>>,
 }
 
 /// Detect all presets in a file tree
@@ -467,11 +480,35 @@ pub fn detect_presets_from_file_tree(files: &[String]) -> Vec<DetectedPreset> {
                 dir.clone()
             };
 
+            // For docker-compose presets, collect all compose file paths in the repo
+            let compose_files = if preset.slug() == "docker-compose" {
+                let mut files_found: Vec<String> = Vec::new();
+                for (d, d_files) in &directory_files {
+                    for file_path in d_files {
+                        let filename = file_path.rsplit('/').next().unwrap_or(file_path);
+                        if docker_compose::COMPOSE_FILE_NAMES.contains(&filename) {
+                            // Build relative path from repo root
+                            let relative = if d.is_empty() {
+                                filename.to_string()
+                            } else {
+                                file_path.clone()
+                            };
+                            files_found.push(relative);
+                        }
+                    }
+                }
+                files_found.sort();
+                Some(files_found)
+            } else {
+                None
+            };
+
             presets.push(DetectedPreset {
                 path,
                 slug: preset.slug(),
                 label: preset.label(),
                 exposed_port: None, // Port will be determined during deployment
+                compose_files,
             });
         }
     }

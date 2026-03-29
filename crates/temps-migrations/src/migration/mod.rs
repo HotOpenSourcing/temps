@@ -48,6 +48,13 @@ mod m20260314_000001_update_environment_route_trigger;
 mod m20260315_000001_add_last_activity_at_to_environments;
 mod m20260315_000002_create_error_alert_rules;
 mod m20260320_000001_add_email_tracking;
+mod m20260323_000004_add_deployment_container_service_name;
+mod m20260326_000001_create_asset_manifests;
+mod m20260326_000002_create_static_asset_cache;
+mod m20260326_000003_add_edge_public_key_to_nodes;
+mod m20260327_000001_add_service_name_to_custom_domains;
+mod m20260328_000001_create_email_events;
+mod m20260328_000002_add_check_path_to_status_monitors;
 
 pub struct Migrator;
 
@@ -103,6 +110,13 @@ impl MigratorTrait for Migrator {
             Box::new(m20260315_000001_add_last_activity_at_to_environments::Migration),
             Box::new(m20260315_000002_create_error_alert_rules::Migration),
             Box::new(m20260320_000001_add_email_tracking::Migration),
+            Box::new(m20260323_000004_add_deployment_container_service_name::Migration),
+            Box::new(m20260326_000001_create_asset_manifests::Migration),
+            Box::new(m20260326_000002_create_static_asset_cache::Migration),
+            Box::new(m20260326_000003_add_edge_public_key_to_nodes::Migration),
+            Box::new(m20260327_000001_add_service_name_to_custom_domains::Migration),
+            Box::new(m20260328_000001_create_email_events::Migration),
+            Box::new(m20260328_000002_add_check_path_to_status_monitors::Migration),
         ]
     }
 }

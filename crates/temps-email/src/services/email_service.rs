@@ -14,11 +14,18 @@ use crate::errors::EmailError;
 use crate::providers::SendEmailRequest as ProviderSendRequest;
 use crate::services::{DomainService, ProviderService, TrackingService};
 
+/// Trait for rewriting HTML to inject tracking (pixel + click links).
+/// Implemented by `temps-email-tracking::HtmlTrackingRewriter`.
+pub trait TrackingRewriter: Send + Sync {
+    fn rewrite(&self, email_id: &Uuid, html: &str) -> Result<String, String>;
+}
+
 /// Service for sending and managing emails
 pub struct EmailService {
     db: Arc<DatabaseConnection>,
     provider_service: Arc<ProviderService>,
     domain_service: Arc<DomainService>,
+    tracking_rewriter: Option<Arc<dyn TrackingRewriter>>,
     tracking_service: Arc<TrackingService>,
 }
 
@@ -73,8 +80,15 @@ impl EmailService {
             db,
             provider_service,
             domain_service,
+            tracking_rewriter: None,
             tracking_service,
         }
+    }
+
+    /// Set the tracking rewriter for injecting open/click tracking into emails
+    pub fn with_tracking_rewriter(mut self, rewriter: Arc<dyn TrackingRewriter>) -> Self {
+        self.tracking_rewriter = Some(rewriter);
+        self
     }
 
     /// Send an email
@@ -125,14 +139,8 @@ impl EmailService {
             from_address: Set(request.from.clone()),
             from_name: Set(request.from_name.clone()),
             to_addresses: Set(serde_json::to_value(&request.to)?),
-            cc_addresses: Set(request
-                .cc
-                .as_ref()
-                .map(|v| serde_json::to_value(v).unwrap())),
-            bcc_addresses: Set(request
-                .bcc
-                .as_ref()
-                .map(|v| serde_json::to_value(v).unwrap())),
+            cc_addresses: Set(request.cc.as_ref().map(serde_json::to_value).transpose()?),
+            bcc_addresses: Set(request.bcc.as_ref().map(serde_json::to_value).transpose()?),
             reply_to: Set(request.reply_to.clone()),
             subject: Set(request.subject.clone()),
             html_body: Set(request.html.clone()),
@@ -140,11 +148,13 @@ impl EmailService {
             headers: Set(request
                 .headers
                 .as_ref()
-                .map(|v| serde_json::to_value(v).unwrap())),
+                .map(serde_json::to_value)
+                .transpose()?),
             tags: Set(request
                 .tags
                 .as_ref()
-                .map(|v| serde_json::to_value(v).unwrap())),
+                .map(serde_json::to_value)
+                .transpose()?),
             status: Set("queued".to_string()),
             track_opens: Set(track_opens),
             track_clicks: Set(track_clicks),
@@ -281,6 +291,8 @@ impl EmailService {
                 });
             }
         };
+
+        // Use tracked HTML (with open/click tracking injected) if available
 
         let provider_request = ProviderSendRequest {
             from: request.from,

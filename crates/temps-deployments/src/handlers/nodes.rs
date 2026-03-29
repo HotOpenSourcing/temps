@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
@@ -17,7 +17,7 @@ use axum::{
 use sea_orm::{DatabaseConnection, EntityTrait};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
-use temps_auth::RequireAuth;
+use temps_auth::{permission_guard, RequireAuth};
 use temps_config::ConfigService;
 use tracing::{error, info, warn};
 use utoipa::{OpenApi, ToSchema};
@@ -57,6 +57,8 @@ pub struct RegisterNodeApiRequest {
     pub role: Option<String>,
     /// Labels for scheduling (e.g., {"region": "us-east", "gpu": "true"})
     pub labels: Option<serde_json::Value>,
+    /// X25519 public key for ECIES certificate encryption (base64-encoded, edge nodes only)
+    pub edge_public_key: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -174,6 +176,48 @@ pub struct UndrainNodeResponse {
     pub message: String,
 }
 
+/// A single route entry for edge CDN nodes.
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct EdgeRouteEntry {
+    pub domain: String,
+    pub is_static: bool,
+    /// Whether this domain uses wildcard matching (e.g. `*.localho.st`).
+    #[serde(default)]
+    pub is_wildcard: bool,
+    pub project_id: Option<i32>,
+    pub environment_id: Option<i32>,
+}
+
+/// An encrypted TLS certificate bundle for an edge node.
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct EdgeCertBundle {
+    pub domain: String,
+    /// Base64-encoded AES-256-GCM ciphertext of (cert_pem + "\n" + key_pem)
+    pub ciphertext: String,
+    /// Base64-encoded 12-byte nonce
+    pub nonce: String,
+    /// SHA-256 hex fingerprint of the certificate PEM (for change detection)
+    pub fingerprint: String,
+}
+
+/// Encrypted certificate payload in the edge routes response.
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct EdgeCertificates {
+    /// Base64-encoded ephemeral X25519 public key (for ECDH)
+    pub ephemeral_public_key: String,
+    pub bundles: Vec<EdgeCertBundle>,
+}
+
+/// Response from `GET /api/internal/edge/routes`.
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct EdgeRoutesResponse {
+    pub routes: Vec<EdgeRouteEntry>,
+    pub version: u64,
+    /// Encrypted TLS certificates (present only if the edge node has a public key registered)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub certificates: Option<EdgeCertificates>,
+}
+
 /// S3 credentials distributed to agents for backup/restore operations.
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct S3CredentialsResponse {
@@ -233,6 +277,7 @@ pub fn configure_routes() -> Router<Arc<NodeAppState>> {
             "/internal/nodes/{node_id}/s3-credentials/{s3_source_id}",
             get(get_s3_credentials),
         )
+        .route("/internal/edge/routes", get(edge_routes))
 }
 
 /// Configure UI-facing admin node routes (session auth via RequireAuth).
@@ -254,12 +299,86 @@ pub fn configure_admin_routes() -> Router<Arc<AppState>> {
                 .post(admin_drain_node)
                 .delete(admin_undrain_node),
         )
+        // Edge analytics proxy routes — forwards queries to edge nodes
+        .route(
+            "/internal/edge/analytics/overview",
+            get(proxy_edge_analytics_overview),
+        )
+        .route(
+            "/internal/edge/analytics/domains",
+            get(proxy_edge_analytics_domains),
+        )
+        .route(
+            "/internal/edge/analytics/assets",
+            get(proxy_edge_analytics_assets),
+        )
+        .route(
+            "/internal/edge/analytics/timeseries",
+            get(proxy_edge_analytics_timeseries),
+        )
+        .route("/internal/edge/nodes", get(list_edge_nodes))
 }
 
 /// SHA-256 hash a token string
 fn sha256_hash(token: &str) -> String {
     let digest = sha2::Sha256::digest(token.as_bytes());
     format!("{:x}", digest)
+}
+
+/// Constant-time comparison of two byte slices to prevent timing attacks on token hashes.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Validate that an api_address is a safe host:port pair.
+/// Rejects cloud metadata IPs, loopback, and link-local ranges to prevent SSRF.
+fn is_safe_api_address(addr: &str) -> bool {
+    // Must be host:port format
+    let Some((host, port_str)) = addr.rsplit_once(':') else {
+        return false;
+    };
+    // Port must be a valid number
+    if port_str.parse::<u16>().is_err() {
+        return false;
+    }
+    // Reject if host contains path separators (injection attempt)
+    if host.contains('/') || host.contains('@') || host.contains('#') {
+        return false;
+    }
+    // Check IP-based addresses against blocklist
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        use std::net::IpAddr;
+        match ip {
+            IpAddr::V4(v4) => {
+                // Block cloud metadata (169.254.169.254), link-local, loopback
+                if v4.is_loopback()
+                    || v4.is_link_local()
+                    || v4.is_broadcast()
+                    || v4.is_unspecified()
+                {
+                    return false;
+                }
+                // Block AWS/GCP/Azure metadata endpoint specifically
+                let octets = v4.octets();
+                if octets[0] == 169 && octets[1] == 254 {
+                    return false;
+                }
+            }
+            IpAddr::V6(v6) => {
+                if v6.is_loopback() || v6.is_unspecified() {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
 
 /// Extract and verify the bearer token from request headers.
@@ -313,7 +432,7 @@ async fn register_node(
             match &request.join_token {
                 Some(provided_token) => {
                     let provided_hash = sha256_hash(provided_token);
-                    if provided_hash != *stored_hash {
+                    if !constant_time_eq(provided_hash.as_bytes(), stored_hash.as_bytes()) {
                         warn!(
                             "Node registration rejected: invalid join token for node '{}'",
                             request.name
@@ -367,6 +486,7 @@ async fn register_node(
         wg_public_key: request.wg_public_key,
         role: request.role.unwrap_or_else(|| "worker".to_string()),
         labels: request.labels.unwrap_or(serde_json::json!({})),
+        edge_public_key: request.edge_public_key,
     };
 
     let node = app_state
@@ -421,7 +541,7 @@ async fn node_heartbeat(
         .map_err(Problem::from)?;
 
     let token_hash = sha256_hash(&token);
-    if node.token_hash != token_hash {
+    if !constant_time_eq(node.token_hash.as_bytes(), token_hash.as_bytes()) {
         warn!(node_id, "Invalid heartbeat token");
         return Err(problemdetails::new(StatusCode::UNAUTHORIZED)
             .with_title("Invalid Token")
@@ -516,7 +636,7 @@ async fn get_s3_credentials(
         .map_err(Problem::from)?;
 
     let token_hash = sha256_hash(&token);
-    if node.token_hash != token_hash {
+    if !constant_time_eq(node.token_hash.as_bytes(), token_hash.as_bytes()) {
         warn!(node_id, "Invalid token for S3 credentials request");
         return Err(problemdetails::new(StatusCode::UNAUTHORIZED)
             .with_title("Invalid Token")
@@ -581,6 +701,311 @@ async fn get_s3_credentials(
     }))
 }
 
+/// Return the route table for edge CDN nodes.
+///
+/// Lists all active environment domains with their project/environment IDs
+/// and whether they serve static files. Edge nodes poll this endpoint to
+/// know which domains they should handle.
+#[utoipa::path(
+    tag = "Nodes",
+    get,
+    path = "/internal/edge/routes",
+    responses(
+        (status = 200, description = "Edge route table", body = EdgeRoutesResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error")
+    )
+)]
+async fn edge_routes(
+    State(app_state): State<Arc<NodeAppState>>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, Problem> {
+    // Verify bearer token belongs to a registered node
+    let token = extract_bearer_token(&headers)?;
+    let token_hash = sha256_hash(&token);
+
+    use sea_orm::{ColumnTrait, QueryFilter};
+    use temps_entities::nodes;
+
+    let node = nodes::Entity::find()
+        .filter(nodes::Column::TokenHash.eq(&token_hash))
+        .one(app_state.db.as_ref())
+        .await
+        .map_err(|e| {
+            error!("Edge routes: DB error verifying token: {}", e);
+            problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
+                .with_title("Database Error")
+                .with_detail("Failed to verify edge token")
+        })?
+        .ok_or_else(|| {
+            problemdetails::new(StatusCode::UNAUTHORIZED)
+                .with_title("Invalid Token")
+                .with_detail("No node found with this token")
+        })?;
+
+    info!(
+        "Edge node {} ({}) requested route table",
+        node.id, node.name
+    );
+
+    // Query all active environment domains with their environments and deployments
+    use temps_entities::{
+        custom_routes, deployments, environment_domains, environments, project_custom_domains,
+    };
+
+    let domains: Vec<(environment_domains::Model, Option<environments::Model>)> =
+        environment_domains::Entity::find()
+            .find_also_related(environments::Entity)
+            .all(app_state.db.as_ref())
+            .await
+            .map_err(|e| {
+                error!("Edge routes: failed to query domains: {}", e);
+                problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
+                    .with_title("Database Error")
+                    .with_detail("Failed to query environment domains")
+            })?;
+
+    let mut routes = Vec::with_capacity(domains.len());
+
+    // 1. Environment domains (explicit per-environment domains)
+    for (domain_entry, env_opt) in &domains {
+        let env = match env_opt {
+            Some(e) => e,
+            None => continue,
+        };
+
+        // Check if the current deployment is static
+        let is_static = if let Some(deploy_id) = env.current_deployment_id {
+            deployments::Entity::find_by_id(deploy_id)
+                .one(app_state.db.as_ref())
+                .await
+                .ok()
+                .flatten()
+                .map(|d| d.static_dir_location.is_some())
+                .unwrap_or(false)
+        } else {
+            false
+        };
+
+        routes.push(EdgeRouteEntry {
+            domain: domain_entry.domain.clone(),
+            is_static,
+            is_wildcard: false,
+            project_id: Some(env.project_id),
+            environment_id: Some(env.id),
+        });
+    }
+
+    // 2. Preview domain routes: {subdomain}.{preview_domain} for all active environments
+    //    (mirrors Section 4 of the control-plane route table)
+    {
+        use temps_entities::settings;
+
+        let preview_domain = settings::Entity::find()
+            .one(app_state.db.as_ref())
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| {
+                s.data
+                    .get("preview_domain")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| "localho.st".to_string());
+
+        let all_envs = environments::Entity::find()
+            .filter(environments::Column::Subdomain.is_not_null())
+            .filter(environments::Column::CurrentDeploymentId.is_not_null())
+            .filter(environments::Column::DeletedAt.is_null())
+            .all(app_state.db.as_ref())
+            .await
+            .map_err(|e| {
+                error!(
+                    "Edge routes: failed to query environments for preview domains: {}",
+                    e
+                );
+                problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
+                    .with_title("Database Error")
+                    .with_detail("Failed to query environments")
+            })?;
+
+        for env in &all_envs {
+            let full_domain = format!("{}.{}", env.subdomain, preview_domain);
+            // Skip if already added from environment_domains
+            if routes.iter().any(|r| r.domain == full_domain) {
+                continue;
+            }
+
+            let is_static = if let Some(deploy_id) = env.current_deployment_id {
+                deployments::Entity::find_by_id(deploy_id)
+                    .one(app_state.db.as_ref())
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|d| d.static_dir_location.is_some())
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+
+            routes.push(EdgeRouteEntry {
+                domain: full_domain,
+                is_static,
+                is_wildcard: false,
+                project_id: Some(env.project_id),
+                environment_id: Some(env.id),
+            });
+        }
+    }
+
+    // 3. Custom routes (including wildcards like *.localho.st)
+    let custom_routes_data = custom_routes::Entity::find()
+        .filter(custom_routes::Column::Enabled.eq(true))
+        .all(app_state.db.as_ref())
+        .await
+        .map_err(|e| {
+            error!("Edge routes: failed to query custom routes: {}", e);
+            problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
+                .with_title("Database Error")
+                .with_detail("Failed to query custom routes")
+        })?;
+
+    for custom_route in &custom_routes_data {
+        routes.push(EdgeRouteEntry {
+            domain: custom_route.domain.clone(),
+            is_static: false,
+            is_wildcard: custom_route.domain.starts_with("*."),
+            project_id: None,
+            environment_id: None,
+        });
+    }
+
+    // 3. Project custom domains (custom domains mapped to environments)
+    let custom_domains = project_custom_domains::Entity::find()
+        .all(app_state.db.as_ref())
+        .await
+        .map_err(|e| {
+            error!("Edge routes: failed to query project custom domains: {}", e);
+            problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
+                .with_title("Database Error")
+                .with_detail("Failed to query project custom domains")
+        })?;
+
+    for custom_domain in &custom_domains {
+        // Skip domains already added from environment_domains
+        if routes.iter().any(|r| r.domain == custom_domain.domain) {
+            continue;
+        }
+        routes.push(EdgeRouteEntry {
+            domain: custom_domain.domain.clone(),
+            is_static: false,
+            is_wildcard: false,
+            project_id: Some(custom_domain.project_id),
+            environment_id: Some(custom_domain.environment_id),
+        });
+    }
+
+    // Encrypt TLS certificates for this edge node (if it has a public key)
+    // Only edge nodes should receive TLS private keys — never workers
+    let certificates = 'cert_block: {
+        if node.role != "edge" {
+            break 'cert_block None;
+        }
+        let edge_pk = match node.edge_public_key {
+            Some(ref pk) => pk,
+            None => break 'cert_block None,
+        };
+
+        use temps_entities::domains;
+
+        let active_domains = domains::Entity::find()
+            .filter(domains::Column::Status.eq("active"))
+            .all(app_state.db.as_ref())
+            .await
+            .map_err(|e| {
+                error!("Edge routes: failed to query domains for certs: {}", e);
+                problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
+                    .with_title("Database Error")
+                    .with_detail("Failed to query domain certificates")
+            })?;
+
+        // Create one encryption session per sync (single ephemeral key, forward secrecy)
+        let session = match temps_core::ecies::EncryptionSession::new(edge_pk) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(
+                    "Edge routes: invalid edge public key for node {}: {}",
+                    node.id, e
+                );
+                break 'cert_block None;
+            }
+        };
+
+        let mut bundles = Vec::new();
+
+        for domain in &active_domains {
+            if let (Some(cert_pem), Some(encrypted_key_pem)) =
+                (&domain.certificate, &domain.private_key)
+            {
+                // Decrypt the private key stored in the DB (it's AES-encrypted by EncryptionService)
+                let key_pem = match app_state
+                    .encryption_service
+                    .decrypt_string(encrypted_key_pem)
+                {
+                    Ok(k) => k,
+                    Err(e) => {
+                        warn!(
+                            "Edge routes: failed to decrypt private key for domain {}: {}",
+                            domain.domain, e
+                        );
+                        continue;
+                    }
+                };
+
+                // Combine cert + key into a single payload
+                let payload = format!("{}\n{}", cert_pem, key_pem);
+                let fingerprint = temps_core::ecies::cert_fingerprint(cert_pem);
+
+                match session.encrypt(payload.as_bytes()) {
+                    Ok(bundle) => {
+                        bundles.push(EdgeCertBundle {
+                            domain: domain.domain.clone(),
+                            ciphertext: bundle.ciphertext,
+                            nonce: bundle.nonce,
+                            fingerprint,
+                        });
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Edge routes: failed to encrypt cert for domain {}: {}",
+                            domain.domain, e
+                        );
+                    }
+                }
+            }
+        }
+
+        if bundles.is_empty() {
+            None
+        } else {
+            Some(EdgeCertificates {
+                ephemeral_public_key: session.ephemeral_public_key().to_string(),
+                bundles,
+            })
+        }
+    };
+
+    // Use a simple counter based on the current timestamp as version
+    let version = chrono::Utc::now().timestamp() as u64;
+
+    Ok(Json(EdgeRoutesResponse {
+        routes,
+        version,
+        certificates,
+    }))
+}
+
 /// List all registered nodes (admin — session auth via RequireAuth)
 #[utoipa::path(
     tag = "Nodes",
@@ -594,9 +1019,10 @@ async fn get_s3_credentials(
     security(("bearer_auth" = []))
 )]
 async fn admin_list_nodes(
-    RequireAuth(_auth): RequireAuth,
+    RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsRead);
     let nodes = app_state
         .node_service
         .list_all()
@@ -643,10 +1069,11 @@ async fn admin_list_nodes(
     security(("bearer_auth" = []))
 )]
 async fn admin_get_node(
-    RequireAuth(_auth): RequireAuth,
+    RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path(node_id): Path<i32>,
 ) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsRead);
     let node = app_state
         .node_service
         .get_by_id(node_id)
@@ -684,10 +1111,11 @@ async fn admin_get_node(
     security(("bearer_auth" = []))
 )]
 async fn admin_list_node_containers(
-    RequireAuth(_auth): RequireAuth,
+    RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path(node_id): Path<i32>,
 ) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsRead);
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
     // Verify the node exists
@@ -811,10 +1239,11 @@ fn create_remote_deployer(
     security(("bearer_auth" = []))
 )]
 async fn admin_drain_node(
-    RequireAuth(_auth): RequireAuth,
+    RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path(node_id): Path<i32>,
 ) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsWrite);
     let node = app_state
         .node_service
         .get_by_id(node_id)
@@ -966,10 +1395,11 @@ async fn admin_drain_node(
     security(("bearer_auth" = []))
 )]
 async fn admin_undrain_node(
-    RequireAuth(_auth): RequireAuth,
+    RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path(node_id): Path<i32>,
 ) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsWrite);
     let node = app_state
         .node_service
         .get_by_id(node_id)
@@ -1014,10 +1444,11 @@ async fn admin_undrain_node(
     security(("bearer_auth" = []))
 )]
 async fn admin_remove_node(
-    RequireAuth(_auth): RequireAuth,
+    RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path(node_id): Path<i32>,
 ) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsWrite);
     let node = app_state
         .node_service
         .get_by_id(node_id)
@@ -1076,10 +1507,11 @@ async fn admin_remove_node(
     security(("bearer_auth" = []))
 )]
 async fn admin_drain_status(
-    RequireAuth(_auth): RequireAuth,
+    RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path(node_id): Path<i32>,
 ) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsRead);
     // Check drain completion first — this may transition the node to "drained"
     let _ = app_state
         .node_service
@@ -1131,6 +1563,255 @@ async fn admin_drain_status(
     }))
 }
 
+// ---------------------------------------------------------------------------
+// Edge analytics proxy — forwards queries from dashboard to edge nodes
+// ---------------------------------------------------------------------------
+
+/// Query params for edge analytics proxy endpoints.
+#[derive(Deserialize, ToSchema)]
+pub struct EdgeAnalyticsQuery {
+    /// ISO 8601 start time
+    pub since: Option<String>,
+    /// ISO 8601 end time
+    pub until: Option<String>,
+    /// Max results
+    pub limit: Option<u32>,
+    /// Time bucket in minutes (for timeseries)
+    pub bucket: Option<u32>,
+    /// Filter by domain
+    pub domain: Option<String>,
+    /// Filter by edge node ID (omit to query all edge nodes)
+    pub node_id: Option<i32>,
+}
+
+/// Edge node info for the dashboard.
+#[derive(Serialize, ToSchema)]
+pub struct EdgeNodeInfo {
+    pub id: i32,
+    pub name: String,
+    pub status: String,
+    pub region: Option<String>,
+    pub api_address: Option<String>,
+    pub last_heartbeat: Option<String>,
+}
+
+/// List all edge nodes.
+async fn list_edge_nodes(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsRead);
+    use sea_orm::{ColumnTrait, QueryFilter};
+    use temps_entities::nodes;
+
+    let edge_nodes = nodes::Entity::find()
+        .filter(nodes::Column::Role.eq("edge"))
+        .all(app_state.db.as_ref())
+        .await
+        .map_err(|e| {
+            problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
+                .with_title("Database Error")
+                .with_detail(format!("Failed to query edge nodes: {}", e))
+        })?;
+
+    let nodes: Vec<EdgeNodeInfo> = edge_nodes
+        .into_iter()
+        .map(|n| {
+            let region = n
+                .labels
+                .get("region")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let api_address = n
+                .labels
+                .get("api_address")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            EdgeNodeInfo {
+                id: n.id,
+                name: n.name,
+                status: n.status,
+                region,
+                api_address,
+                last_heartbeat: n.last_heartbeat.map(|t| t.to_string()),
+            }
+        })
+        .collect();
+
+    Ok(Json(nodes))
+}
+
+/// Proxy an analytics query to edge node(s) and return the result.
+/// If `node_id` is specified, queries that specific edge node.
+/// Otherwise queries all active edge nodes and merges results.
+async fn proxy_edge_query(
+    app_state: &AppState,
+    query: &EdgeAnalyticsQuery,
+    endpoint: &str,
+) -> Result<serde_json::Value, Problem> {
+    use sea_orm::{ColumnTrait, QueryFilter};
+    use temps_entities::nodes;
+
+    // Find the target edge node(s)
+    let mut finder = nodes::Entity::find().filter(nodes::Column::Role.eq("edge"));
+    if let Some(nid) = query.node_id {
+        finder = finder.filter(nodes::Column::Id.eq(nid));
+    }
+    // Only query active nodes
+    finder = finder.filter(nodes::Column::Status.eq("active"));
+
+    let edge_nodes = finder.all(app_state.db.as_ref()).await.map_err(|e| {
+        problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
+            .with_title("Database Error")
+            .with_detail(format!("Failed to query edge nodes: {}", e))
+    })?;
+
+    if edge_nodes.is_empty() {
+        return Ok(serde_json::json!([]));
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| {
+            problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
+                .with_title("HTTP Client Error")
+                .with_detail(format!("{}", e))
+        })?;
+
+    let mut results = Vec::new();
+
+    for node in &edge_nodes {
+        let api_address = match node.labels.get("api_address").and_then(|v| v.as_str()) {
+            Some(addr) => {
+                // Replace 0.0.0.0 with 127.0.0.1 — 0.0.0.0 is a listen address, not routable
+                addr.replace("0.0.0.0", "127.0.0.1")
+            }
+            None => {
+                warn!(
+                    "Edge node {} has no api_address in labels, skipping",
+                    node.id
+                );
+                continue;
+            }
+        };
+
+        // Validate api_address is a safe host:port — reject internal/metadata IPs (SSRF protection)
+        if !is_safe_api_address(&api_address) {
+            warn!(
+                "Edge node {} has unsafe api_address '{}', skipping (SSRF protection)",
+                node.id, api_address
+            );
+            continue;
+        }
+
+        // Decrypt the node's token to authenticate with its API
+        let token = match &node.token_encrypted {
+            Some(encrypted) => match app_state.encryption_service.decrypt_string(encrypted) {
+                Ok(t) => t,
+                Err(e) => {
+                    warn!("Failed to decrypt token for edge node {}: {}", node.id, e);
+                    continue;
+                }
+            },
+            None => continue,
+        };
+
+        // Build query string
+        let mut url = format!("http://{}/edge/analytics/{}", api_address, endpoint);
+        let mut params = Vec::new();
+        if let Some(ref since) = query.since {
+            params.push(format!("since={}", urlencoding::encode(since)));
+        }
+        if let Some(ref until) = query.until {
+            params.push(format!("until={}", urlencoding::encode(until)));
+        }
+        if let Some(limit) = query.limit {
+            params.push(format!("limit={}", limit));
+        }
+        if let Some(bucket) = query.bucket {
+            params.push(format!("bucket={}", bucket));
+        }
+        if let Some(ref domain) = query.domain {
+            params.push(format!("domain={}", urlencoding::encode(domain)));
+        }
+        if !params.is_empty() {
+            url = format!("{}?{}", url, params.join("&"));
+        }
+
+        match client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                if let Ok(body) = resp.json::<serde_json::Value>().await {
+                    let region = node
+                        .labels
+                        .get("region")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    results.push(serde_json::json!({
+                        "node_id": node.id,
+                        "node_name": node.name,
+                        "region": region,
+                        "data": body,
+                    }));
+                }
+            }
+            Ok(resp) => {
+                warn!("Edge node {} returned {}", node.id, resp.status());
+            }
+            Err(e) => {
+                warn!("Failed to query edge node {}: {}", node.id, e);
+            }
+        }
+    }
+
+    Ok(serde_json::Value::Array(results))
+}
+
+async fn proxy_edge_analytics_overview(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    Query(query): Query<EdgeAnalyticsQuery>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsRead);
+    let results = proxy_edge_query(&app_state, &query, "overview").await?;
+    Ok(Json(results))
+}
+
+async fn proxy_edge_analytics_domains(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    Query(query): Query<EdgeAnalyticsQuery>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsRead);
+    let results = proxy_edge_query(&app_state, &query, "domains").await?;
+    Ok(Json(results))
+}
+
+async fn proxy_edge_analytics_assets(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    Query(query): Query<EdgeAnalyticsQuery>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsRead);
+    let results = proxy_edge_query(&app_state, &query, "assets").await?;
+    Ok(Json(results))
+}
+
+async fn proxy_edge_analytics_timeseries(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    Query(query): Query<EdgeAnalyticsQuery>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsRead);
+    let results = proxy_edge_query(&app_state, &query, "timeseries").await?;
+    Ok(Json(results))
+}
+
 impl From<NodeError> for Problem {
     fn from(error: NodeError) -> Self {
         match error {
@@ -1180,6 +1861,7 @@ mod tests {
             labels: serde_json::json!({}),
             capacity: serde_json::json!({}),
             last_heartbeat: Some(chrono::Utc::now()),
+            edge_public_key: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }
@@ -1553,6 +2235,7 @@ mod tests {
             host_port: Some(30001),
             image_name: Some("myapp:latest".to_string()),
             status: Some("running".to_string()),
+            service_name: None,
             created_at: chrono::Utc::now(),
             deployed_at: chrono::Utc::now(),
             ready_at: Some(chrono::Utc::now()),
@@ -1568,6 +2251,7 @@ mod tests {
             host_port: Some(30002),
             image_name: Some("myapp:latest".to_string()),
             status: Some("running".to_string()),
+            service_name: None,
             created_at: chrono::Utc::now(),
             deployed_at: chrono::Utc::now(),
             ready_at: Some(chrono::Utc::now()),
@@ -1672,6 +2356,7 @@ mod tests {
             host_port: Some(30001),
             image_name: Some("myapp:latest".to_string()),
             status: Some("running".to_string()),
+            service_name: None,
             created_at: chrono::Utc::now(),
             deployed_at: chrono::Utc::now(),
             ready_at: Some(chrono::Utc::now()),
@@ -1715,5 +2400,81 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // ── Security fix tests ────────────────────────────────────
+
+    #[test]
+    fn test_constant_time_eq_equal_strings() {
+        assert!(constant_time_eq(b"abcdef", b"abcdef"));
+    }
+
+    #[test]
+    fn test_constant_time_eq_different_strings() {
+        assert!(!constant_time_eq(b"abcdef", b"ghijkl"));
+    }
+
+    #[test]
+    fn test_constant_time_eq_different_lengths() {
+        assert!(!constant_time_eq(b"short", b"longer_string"));
+    }
+
+    #[test]
+    fn test_constant_time_eq_empty() {
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn test_constant_time_eq_with_sha256_hashes() {
+        let hash1 = sha256_hash("test-token");
+        let hash2 = sha256_hash("test-token");
+        let hash3 = sha256_hash("wrong-token");
+        assert!(constant_time_eq(hash1.as_bytes(), hash2.as_bytes()));
+        assert!(!constant_time_eq(hash1.as_bytes(), hash3.as_bytes()));
+    }
+
+    #[test]
+    fn test_is_safe_api_address_valid() {
+        assert!(is_safe_api_address("10.0.0.5:3200"));
+        assert!(is_safe_api_address("192.168.1.100:8080"));
+        assert!(is_safe_api_address("edge-node.example.com:3200"));
+    }
+
+    #[test]
+    fn test_is_safe_api_address_blocks_metadata() {
+        // AWS/GCP/Azure metadata endpoint
+        assert!(!is_safe_api_address("169.254.169.254:80"));
+        // Link-local range
+        assert!(!is_safe_api_address("169.254.1.1:80"));
+    }
+
+    #[test]
+    fn test_is_safe_api_address_blocks_loopback() {
+        assert!(!is_safe_api_address("127.0.0.1:3200"));
+        assert!(!is_safe_api_address("127.0.0.2:8080"));
+    }
+
+    #[test]
+    fn test_is_safe_api_address_blocks_injection() {
+        // Path injection attempt
+        assert!(!is_safe_api_address("evil.com/admin#:3200"));
+        // @ injection
+        assert!(!is_safe_api_address("user@internal:3200"));
+    }
+
+    #[test]
+    fn test_is_safe_api_address_rejects_missing_port() {
+        assert!(!is_safe_api_address("10.0.0.5"));
+        assert!(!is_safe_api_address("example.com"));
+    }
+
+    #[test]
+    fn test_is_safe_api_address_rejects_invalid_port() {
+        assert!(!is_safe_api_address("10.0.0.5:notaport"));
+    }
+
+    #[test]
+    fn test_is_safe_api_address_blocks_unspecified() {
+        assert!(!is_safe_api_address("0.0.0.0:3200"));
     }
 }

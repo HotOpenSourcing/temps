@@ -1,4 +1,4 @@
-//! Email events entity for tracking opens, clicks, and other email events
+//! Email events entity — tracks opens, clicks, bounces, complaints, deliveries
 
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -11,6 +11,10 @@ pub struct Model {
     pub id: i64,
     pub email_id: Uuid,
     pub event_type: String,
+    pub provider_message_id: Option<String>,
+    pub recipient: Option<String>,
+    #[sea_orm(column_type = "JsonBinary", nullable)]
+    pub metadata: Option<Json>,
     pub link_url: Option<String>,
     pub link_index: Option<i32>,
     pub ip_address: Option<String>,

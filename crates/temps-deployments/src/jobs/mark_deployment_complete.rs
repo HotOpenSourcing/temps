@@ -253,18 +253,37 @@ impl MarkDeploymentCompleteJob {
 
         // Extract container info from deploy job output and create deployment_container records
         // Try to get container_ids array first (for multi-replica deployments)
-        let container_ids = context
-            .get_output::<Vec<String>>("deploy_container", "container_ids")
-            .ok()
-            .flatten()
-            .or_else(|| {
-                // Fallback to single container_id for backward compatibility
-                context
-                    .get_output::<String>("deploy_container", "container_id")
-                    .ok()
-                    .flatten()
-                    .map(|id| vec![id])
-            });
+        let container_ids = match context.get_output::<Vec<String>>("deploy_container", "container_ids") {
+            Ok(Some(ids)) => {
+                info!("Got {} container_ids from deploy_container output", ids.len());
+                Some(ids)
+            }
+            Ok(None) => {
+                debug!("No container_ids array in deploy_container output, trying single container_id");
+                None
+            }
+            Err(e) => {
+                warn!("Failed to deserialize container_ids from deploy_container: {}. Trying single container_id fallback.", e);
+                None
+            }
+        }
+        .or_else(|| {
+            // Fallback to single container_id for backward compatibility
+            match context.get_output::<String>("deploy_container", "container_id") {
+                Ok(Some(id)) => {
+                    info!("Got single container_id from deploy_container output: {}", id);
+                    Some(vec![id])
+                }
+                Ok(None) => {
+                    warn!("No container_id found in deploy_container output either");
+                    None
+                }
+                Err(e) => {
+                    warn!("Failed to deserialize container_id from deploy_container: {}", e);
+                    None
+                }
+            }
+        });
 
         let host_ports = context
             .get_output::<Vec<u16>>("deploy_container", "host_ports")
@@ -279,6 +298,20 @@ impl MarkDeploymentCompleteJob {
                     .map(|port| vec![port])
             });
 
+        if container_ids.is_none() {
+            warn!(
+                "No container_ids found in workflow context from deploy_container job. \
+                 Container registration will be skipped. This means the Environments page \
+                 will show 'No containers'. Check that deploy_container job set its outputs."
+            );
+            self.log(
+                "WARNING: No container IDs found from deploy job — containers won't appear in UI"
+                    .to_string(),
+            )
+            .await
+            .ok();
+        }
+
         if let Some(container_ids) = container_ids {
             let now = chrono::Utc::now();
             let container_port = context
@@ -287,26 +320,54 @@ impl MarkDeploymentCompleteJob {
                 .flatten()
                 .unwrap_or(8080);
 
+            // Compose-specific: per-container data arrays (set by DeployComposeJob)
+            let service_names: Option<Vec<String>> = context
+                .get_output("deploy_container", "service_names")
+                .ok()
+                .flatten();
+            let container_names_list: Option<Vec<String>> = context
+                .get_output("deploy_container", "container_names")
+                .ok()
+                .flatten();
+            let container_ports_list: Option<Vec<i32>> = context
+                .get_output("deploy_container", "container_ports")
+                .ok()
+                .flatten();
+            let image_names_list: Option<Vec<String>> = context
+                .get_output("deploy_container", "image_names")
+                .ok()
+                .flatten();
+
             // Create a deployment_container record for each container
             for (index, container_id) in container_ids.iter().enumerate() {
-                let container_name = if container_ids.len() > 1 {
-                    // Multi-replica: append index to name
-                    context
-                        .get_output::<String>("deploy_container", "container_name")
-                        .ok()
-                        .flatten()
-                        .map(|name| format!("{}-{}", name, index + 1))
-                        .unwrap_or_else(|| {
-                            format!("container-{}-{}", self.deployment_id, index + 1)
-                        })
-                } else {
-                    // Single replica: use original name
-                    context
-                        .get_output::<String>("deploy_container", "container_name")
-                        .ok()
-                        .flatten()
-                        .unwrap_or_else(|| format!("container-{}", self.deployment_id))
-                };
+                // Use per-container name if available (compose), otherwise generate
+                let container_name = container_names_list
+                    .as_ref()
+                    .and_then(|names| names.get(index).cloned())
+                    .unwrap_or_else(|| {
+                        if container_ids.len() > 1 {
+                            context
+                                .get_output::<String>("deploy_container", "container_name")
+                                .ok()
+                                .flatten()
+                                .map(|name| format!("{}-{}", name, index + 1))
+                                .unwrap_or_else(|| {
+                                    format!("container-{}-{}", self.deployment_id, index + 1)
+                                })
+                        } else {
+                            context
+                                .get_output::<String>("deploy_container", "container_name")
+                                .ok()
+                                .flatten()
+                                .unwrap_or_else(|| format!("container-{}", self.deployment_id))
+                        }
+                    });
+
+                // Use per-container port if available (compose), otherwise use shared port
+                let effective_port = container_ports_list
+                    .as_ref()
+                    .and_then(|ports| ports.get(index).copied())
+                    .unwrap_or(container_port);
 
                 let host_port = host_ports
                     .as_ref()
@@ -322,19 +383,31 @@ impl MarkDeploymentCompleteJob {
                     .and_then(|ids| ids.get(index).cloned())
                     .flatten();
 
+                // Get service_name for compose containers
+                let service_name = service_names
+                    .as_ref()
+                    .and_then(|names| names.get(index).cloned());
+
+                // Get per-container image name (compose) or fall back to deployment image
+                let image_name = image_names_list
+                    .as_ref()
+                    .and_then(|names| names.get(index).cloned())
+                    .or_else(|| match &active_deployment.image_name {
+                        sea_orm::ActiveValue::Set(v) => v.clone(),
+                        sea_orm::ActiveValue::Unchanged(v) => v.clone(),
+                        _ => None,
+                    });
+
                 // Create deployment_container record
                 let deployment_container = deployment_containers::ActiveModel {
                     deployment_id: Set(self.deployment_id),
                     container_id: Set(container_id.clone()),
                     container_name: Set(container_name.clone()),
-                    container_port: Set(container_port),
+                    container_port: Set(effective_port),
                     host_port: Set(host_port),
-                    image_name: Set(match &active_deployment.image_name {
-                        sea_orm::ActiveValue::Set(v) => v.clone(),
-                        sea_orm::ActiveValue::Unchanged(v) => v.clone(),
-                        _ => None,
-                    }),
+                    image_name: Set(image_name),
                     status: Set(Some("running".to_string())),
+                    service_name: Set(service_name),
                     created_at: Set(now),
                     deployed_at: Set(now),
                     ready_at: Set(Some(now)),
@@ -666,6 +739,13 @@ impl MarkDeploymentCompleteJob {
             None
         };
 
+        // Extract health_check_path from any build job output in the workflow context
+        let health_check_path = context.outputs.values().find_map(|job_outputs| {
+            job_outputs
+                .get("health_check_path")
+                .and_then(|v| serde_json::from_value::<String>(v.clone()).ok())
+        });
+
         let event = Job::DeploymentSucceeded(temps_core::DeploymentSucceededJob {
             deployment_id: self.deployment_id,
             project_id: deployment.project_id,
@@ -673,6 +753,7 @@ impl MarkDeploymentCompleteJob {
             environment_name: active_environment.name.as_ref().clone(),
             commit_sha: deployment.commit_sha.clone(),
             url,
+            health_check_path,
         });
 
         if let Err(e) = self.queue.send(event).await {
@@ -1039,6 +1120,30 @@ impl MarkDeploymentCompleteJob {
                     continue;
                 }
             };
+
+            if containers.is_empty() {
+                // Fallback: no deployment_containers records (pre-migration deployments).
+                // Try to stop the container by its slug name convention: {slug}
+                let slug = &deployment.slug;
+                self.log(format!(
+                    "No container records for deployment {} — trying slug-based cleanup: {}",
+                    deployment_id, slug
+                ))
+                .await
+                .ok();
+
+                // Try stop + remove by container name (slug)
+                if let Err(e) = self.container_deployer.stop_container(slug).await {
+                    debug!("Could not stop container by slug {}: {}", slug, e);
+                }
+                if let Err(e) = self.container_deployer.remove_container(slug).await {
+                    debug!("Could not remove container by slug {}: {}", slug, e);
+                } else {
+                    self.log(format!("Removed orphaned container {}", slug))
+                        .await
+                        .ok();
+                }
+            }
 
             for container in containers {
                 let container_id = container.container_id.clone();

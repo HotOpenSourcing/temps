@@ -258,6 +258,9 @@ pub struct ProjectResponse {
     pub updated_at: i64,
     pub last_deployment: Option<i64>,
     pub git_provider_connection_id: Option<i32>,
+    /// Git clone URL for the repository (used for public repos without a provider connection)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_url: Option<String>,
     /// Deployment configuration (resources, autoscaling, features)
     pub deployment_config: DeploymentConfig,
     /// Attack mode - when enabled, requires CAPTCHA verification for all project environments
@@ -291,6 +294,7 @@ impl ProjectResponse {
             updated_at: project.updated_at.timestamp_millis(),
             last_deployment: project.last_deployment.map(|d| d.timestamp_millis()),
             git_provider_connection_id: project.git_provider_connection_id,
+            git_url: project.git_url,
             attack_mode: project.attack_mode,
             enable_preview_environments: project.enable_preview_environments,
             source_type: project.source_type,
@@ -369,6 +373,11 @@ impl ProjectResponse {
                     .clone()
                     .map(|c| c.wake_timeout_seconds)
                     .unwrap_or(30),
+                container_exec_enabled: project
+                    .deployment_config
+                    .clone()
+                    .map(|c| c.container_exec_enabled)
+                    .unwrap_or(false),
             },
         }
     }
@@ -381,6 +390,8 @@ pub struct CustomDomainRequest {
     pub status_code: Option<i32>,
     pub branch: Option<String>,
     pub environment_id: i32,
+    /// Docker Compose service name this domain routes to (only for docker-compose projects)
+    pub service_name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]
@@ -406,6 +417,9 @@ pub struct CustomDomainResponse {
     pub updated_at: i64,
     pub expiration_time: Option<i64>,
     pub last_renewed: Option<i64>,
+    /// Docker Compose service name this domain routes to
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_name: Option<String>,
 }
 
 impl From<CustomDomainWithInfo> for CustomDomainResponse {
@@ -439,6 +453,7 @@ impl From<CustomDomainWithInfo> for CustomDomainResponse {
             last_renewed: domain_info
                 .as_ref()
                 .and_then(|info| info.last_renewed.map(|dt| dt.timestamp_millis())),
+            service_name: domain.service_name,
         }
     }
 }
@@ -575,6 +590,12 @@ pub struct UpdateGitSettingsRequest {
     pub repo_name: String,
     pub preset: Option<String>,
     pub directory: String,
+    /// Git clone URL for public repositories
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_url: Option<String>,
+    /// Whether this is a public repository (no git provider connection needed)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_public_repo: Option<bool>,
     /// Preset-specific configuration (e.g., Dockerfile path for Docker preset)
     ///
     /// Example for Dockerfile preset:
@@ -647,6 +668,8 @@ pub struct UpdateCustomDomainRequest {
     pub redirect_to: Option<String>,
     pub status_code: Option<i32>,
     pub branch: Option<String>,
+    /// Docker Compose service name this domain routes to (empty string clears it)
+    pub service_name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]

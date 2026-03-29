@@ -14,6 +14,8 @@ use std::pin::Pin;
 use temps_core::UtcDateTime;
 use thiserror::Error;
 
+pub mod compose;
+
 /// Callback function type for processing build logs in real-time
 pub type LogCallback =
     std::sync::Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;

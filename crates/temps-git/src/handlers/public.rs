@@ -76,6 +76,9 @@ pub struct PresetInfo {
     pub icon_url: Option<String>,
     /// Project type (e.g., "frontend", "backend", "fullstack")
     pub project_type: String,
+    /// Compose file paths found in the repository (only for docker-compose preset)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compose_files: Option<Vec<String>>,
 }
 
 /// Response for preset detection
@@ -161,9 +164,16 @@ pub async fn get_public_branches(
         }
     }
 
-    // Create provider
-    let repo_provider =
-        PublicRepoProviderFactory::create(&provider).map_err(|e| map_error(e, &owner, &repo))?;
+    // Try to get a token from any existing GitHub connection for higher rate limits
+    let token = if provider == "github" {
+        get_github_token_from_connections(&state).await
+    } else {
+        None
+    };
+
+    // Create provider with token if available
+    let repo_provider = PublicRepoProviderFactory::create_with_token(&provider, token)
+        .map_err(|e| map_error(e, &owner, &repo))?;
 
     // Fetch branches from provider
     let provider_branches = repo_provider
@@ -226,9 +236,16 @@ pub async fn detect_public_presets(
     Path((provider, owner, repo)): Path<(String, String, String)>,
     Query(params): Query<PresetQueryParams>,
 ) -> Result<Json<PublicPresetResponse>, Problem> {
-    // Create provider
-    let repo_provider =
-        PublicRepoProviderFactory::create(&provider).map_err(|e| map_error(e, &owner, &repo))?;
+    // Try to get a token from any existing GitHub connection for higher rate limits
+    let token = if provider == "github" {
+        get_github_token_from_connections(&state).await
+    } else {
+        None
+    };
+
+    // Create provider with token if available
+    let repo_provider = PublicRepoProviderFactory::create_with_token(&provider, token)
+        .map_err(|e| map_error(e, &owner, &repo))?;
 
     // Get repository info to determine default branch if not specified
     let target_branch = if let Some(branch) = params.branch.clone() {
@@ -264,6 +281,7 @@ pub async fn detect_public_presets(
                     exposed_port: p.exposed_port,
                     icon_url: p.icon_url,
                     project_type: p.project_type,
+                    compose_files: p.compose_files,
                 })
                 .collect();
             return Ok(Json(PublicPresetResponse {
@@ -292,6 +310,7 @@ pub async fn detect_public_presets(
             exposed_port: p.exposed_port,
             icon_url: p.icon_url,
             project_type: p.project_type,
+            compose_files: p.compose_files,
         })
         .collect();
 
@@ -312,6 +331,7 @@ pub async fn detect_public_presets(
             exposed_port: p.exposed_port,
             icon_url: p.icon_url,
             project_type: p.project_type,
+            compose_files: p.compose_files,
         })
         .collect();
 
@@ -340,11 +360,19 @@ pub async fn detect_public_presets(
     tag = "Public Repositories"
 )]
 pub async fn get_public_repository(
+    State(state): State<Arc<AppState>>,
     Path((provider, owner, repo)): Path<(String, String, String)>,
 ) -> Result<Json<PublicRepositoryInfo>, Problem> {
-    // Create provider
-    let repo_provider =
-        PublicRepoProviderFactory::create(&provider).map_err(|e| map_error(e, &owner, &repo))?;
+    // Try to get a token from any existing GitHub connection for higher rate limits
+    let token = if provider == "github" {
+        get_github_token_from_connections(&state).await
+    } else {
+        None
+    };
+
+    // Create provider with token if available
+    let repo_provider = PublicRepoProviderFactory::create_with_token(&provider, token)
+        .map_err(|e| map_error(e, &owner, &repo))?;
 
     // Fetch repository info
     let repo_info = repo_provider
@@ -404,6 +432,12 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
     )
 )]
 pub struct PublicRepositoriesApiDoc;
+
+/// Try to get a GitHub access token from any configured GitHub connection.
+/// This avoids the 60 req/hr unauthenticated rate limit by using an existing token (5000 req/hr).
+async fn get_github_token_from_connections(state: &AppState) -> Option<String> {
+    state.git_provider_manager.get_any_github_token().await
+}
 
 #[cfg(test)]
 mod tests {
@@ -556,6 +590,7 @@ mod tests {
             exposed_port: Some(3000),
             icon_url: Some("https://example.com/nextjs.svg".to_string()),
             project_type: "frontend".to_string(),
+            compose_files: None,
         }];
 
         // Set cache
@@ -641,6 +676,7 @@ mod tests {
             exposed_port: Some(3000),
             icon_url: Some("https://example.com/nextjs.svg".to_string()),
             project_type: "frontend".to_string(),
+            compose_files: None,
         };
 
         let json = serde_json::to_string(&preset).unwrap();
@@ -661,6 +697,7 @@ mod tests {
                     exposed_port: Some(3000),
                     icon_url: None,
                     project_type: "backend".to_string(),
+                    compose_files: None,
                 },
                 PresetInfo {
                     path: "frontend".to_string(),
@@ -669,6 +706,7 @@ mod tests {
                     exposed_port: Some(3000),
                     icon_url: None,
                     project_type: "frontend".to_string(),
+                    compose_files: None,
                 },
             ],
         };

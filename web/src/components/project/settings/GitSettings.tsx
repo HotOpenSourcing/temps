@@ -5,6 +5,7 @@ import {
   listRepositoriesByConnection,
 } from '@/api/client'
 import {
+  detectPublicPresetsOptions,
   getRepositoryPresetLiveOptions,
   listConnectionsOptions,
   listGitProvidersOptions,
@@ -44,6 +45,7 @@ import {
 import { Switch } from '@/components/ui/switch'
 import GithubIcon from '@/icons/Github'
 import { zodResolver } from '@hookform/resolvers/zod'
+import { useFieldArray } from 'react-hook-form'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import {
   AlertCircle,
@@ -54,6 +56,7 @@ import {
   Loader2,
   Plus,
   RefreshCw,
+  Trash2,
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useForm, useWatch } from 'react-hook-form'
@@ -75,9 +78,219 @@ const gitSettingsSchema = z.object({
   preset: z.string().optional(),
   directory: z.string().optional(),
   dockerfilePath: z.string().optional(),
+  composePath: z.string().optional(),
+  composeOverride: z.string().optional(),
+  publicPorts: z
+    .array(
+      z.object({
+        service: z.string(),
+        port: z.number().min(1).max(65535),
+      })
+    )
+    .optional(),
 })
 
 type GitSettingsFormValues = z.infer<typeof gitSettingsSchema>
+
+/** Known service/port combinations commonly found in Docker Compose files */
+const COMMON_PORTS: Record<string, number[]> = {
+  clickhouse: [8123, 9000],
+  postgres: [5432],
+  mysql: [3306],
+  redis: [6379],
+  mongodb: [27017],
+  elasticsearch: [9200, 9300],
+  rabbitmq: [5672, 15672],
+  kafka: [9092],
+  nginx: [80, 443],
+  traefik: [80, 443, 8080],
+  minio: [9000, 9001],
+  grafana: [3000],
+  prometheus: [9090],
+}
+
+function PortSuggestions({
+  suggestions,
+  currentPorts,
+  onAdd,
+}: {
+  suggestions: { service: string; port: number }[]
+  currentPorts: { service: string; port: number }[]
+  onAdd: (s: { service: string; port: number }) => void
+}) {
+  const remaining = suggestions.filter(
+    (s) =>
+      !currentPorts.some(
+        (cp) => cp.service === s.service && cp.port === s.port
+      )
+  )
+  if (remaining.length === 0) return null
+  return (
+    <div className="space-y-1.5">
+      <p className="text-xs text-muted-foreground">Detected from compose:</p>
+      <div className="flex flex-wrap gap-1.5">
+        {remaining.map((s) => (
+          <Button
+            key={`${s.service}:${s.port}`}
+            type="button"
+            variant="outline"
+            size="sm"
+            className="text-xs h-7"
+            onClick={() => onAdd(s)}
+          >
+            <Plus className="h-3 w-3 mr-1" />
+            {s.service}:{s.port}
+          </Button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function PublicPortsField({
+  form,
+}: {
+  form: ReturnType<typeof useForm<GitSettingsFormValues>>
+}) {
+  const { fields, append, remove } = useFieldArray({
+    control: form.control,
+    name: 'publicPorts',
+  })
+
+  // Parse compose override to suggest services/ports
+  const composeOverride = useWatch({
+    control: form.control,
+    name: 'composeOverride',
+  })
+
+  // Suggest services from compose override or common ports
+  const suggestions = useMemo(() => {
+    const result: { service: string; port: number }[] = []
+    // Parse services from compose override if available
+    if (composeOverride) {
+      let inServices = false
+      let currentService: string | null = null
+      let servicesIndent = 0
+      let serviceIndent: number | null = null
+      for (const line of composeOverride.split('\n')) {
+        const trimmed = line.trim()
+        const indent = line.length - line.trimStart().length
+        if (trimmed === 'services:' || trimmed.startsWith('services:')) {
+          inServices = true
+          servicesIndent = indent
+          serviceIndent = null
+          continue
+        }
+        if (inServices && indent <= servicesIndent && trimmed) {
+          inServices = false
+        }
+        if (
+          inServices &&
+          trimmed.endsWith(':') &&
+          !trimmed.includes(' ') &&
+          !trimmed.startsWith('-')
+        ) {
+          if (serviceIndent === null || indent === serviceIndent) {
+            serviceIndent = indent
+            currentService = trimmed.replace(':', '')
+            // Add common ports for this service
+            const known = COMMON_PORTS[currentService.toLowerCase()]
+            if (known) {
+              known.forEach((p) =>
+                result.push({ service: currentService!, port: p })
+              )
+            }
+          }
+        }
+        // Parse port entries: handles - 48080:80, - "48080:80", - '48080:80'
+        // Uses the host port (left side) since that's what's externally accessible
+        if (currentService && trimmed.startsWith('-')) {
+          const portMatch = trimmed.match(/(\d+):(\d+)/)
+          if (portMatch) {
+            result.push({
+              service: currentService!,
+              port: parseInt(portMatch[1]),
+            })
+          }
+        }
+      }
+    }
+    return result
+  }, [composeOverride])
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <div>
+          <Label className="text-sm font-medium">Public Ports</Label>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            Ports exposed publicly through the proxy. All other ports remain
+            private.
+          </p>
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => append({ service: '', port: 0 })}
+        >
+          <Plus className="h-3.5 w-3.5 mr-1" />
+          Add
+        </Button>
+      </div>
+
+      {fields.length === 0 && (
+        <p className="text-xs text-muted-foreground italic py-2">
+          No public ports configured. All services are private by default.
+        </p>
+      )}
+
+      {fields.map((field, index) => (
+        <div key={field.id} className="flex items-center gap-2">
+          <Input
+            placeholder="Service name"
+            list="compose-services"
+            className="flex-1 text-sm"
+            {...form.register(`publicPorts.${index}.service`)}
+          />
+          <Input
+            type="number"
+            placeholder="Port"
+            className="w-24 text-sm"
+            {...form.register(`publicPorts.${index}.port`, {
+              valueAsNumber: true,
+            })}
+          />
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 shrink-0"
+            onClick={() => remove(index)}
+          >
+            <Trash2 className="h-3.5 w-3.5 text-muted-foreground" />
+          </Button>
+        </div>
+      ))}
+
+      <PortSuggestions
+        suggestions={suggestions}
+        currentPorts={(form.getValues('publicPorts') || []).map((p) => ({
+          service: p.service || '',
+          port: p.port || 0,
+        }))}
+        onAdd={(s) => append(s)}
+      />
+
+      {/* Datalist for autocomplete */}
+      <datalist id="compose-services">
+        {[...new Set(suggestions.map((s) => s.service))].map((svc) => (
+          <option key={svc} value={svc} />
+        ))}
+      </datalist>
+    </div>
+  )
+}
 
 function getGithubRepoUrl(owner: string, repo: string) {
   return `https://github.com/${owner}/${repo}`
@@ -106,6 +319,8 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
   const [selectedRepository, setSelectedRepository] =
     useState<RepositoryResponse | null>(null)
   const [isSelectingRepository, setIsSelectingRepository] = useState(false)
+  const [publicRepoUrl, setPublicRepoUrl] = useState('')
+  const [parsedPublicRepo, setParsedPublicRepo] = useState<{ owner: string; name: string } | null>(null)
 
   // Unified form for all git settings
   const form = useForm<GitSettingsFormValues>({
@@ -116,6 +331,12 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
       directory: project?.directory || '',
       dockerfilePath:
         (project?.preset_config as any)?.dockerfilePath || 'Dockerfile',
+      composePath:
+        (project?.preset_config as any)?.composePath || 'docker-compose.yml',
+      composeOverride:
+        (project?.preset_config as any)?.composeOverride || '',
+      publicPorts:
+        (project?.preset_config as any)?.publicPorts || [],
     },
   })
 
@@ -128,6 +349,12 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
         directory: project.directory || '',
         dockerfilePath:
           (project?.preset_config as any)?.dockerfilePath || 'Dockerfile',
+        composePath:
+          (project?.preset_config as any)?.composePath || 'docker-compose.yml',
+        composeOverride:
+          (project?.preset_config as any)?.composeOverride || '',
+        publicPorts:
+          (project?.preset_config as any)?.publicPorts || [],
       })
     }
   }, [project, form])
@@ -261,7 +488,7 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
       !!project?.git_provider_connection_id,
   })
 
-  // Get live preset detection for the repository
+  // Get live preset detection for authenticated repos
   const presetQuery = useQuery({
     ...getRepositoryPresetLiveOptions({
       path: { repository_id: repositoryData?.id || 0 },
@@ -269,25 +496,65 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
     enabled: !!repositoryData?.id,
   })
 
+  // Get preset detection for public repos (no git connection = public)
+  const isPublicRepo = !project?.git_provider_connection_id
+  const publicPresetQuery = useQuery({
+    ...detectPublicPresetsOptions({
+      path: {
+        provider: 'github',
+        owner: project?.repo_owner || '',
+        repo: project?.repo_name || '',
+      },
+    }),
+    enabled: isPublicRepo && !!project?.repo_owner && !!project?.repo_name,
+  })
+
+  // Transform public preset data to match FrameworkSelector format (camelCase)
+  const publicPresetData = useMemo(() => {
+    if (!publicPresetQuery.data?.presets?.length) return null
+    return {
+      presets: publicPresetQuery.data.presets.map((p: any) => ({
+        preset: p.preset,
+        presetLabel: p.preset_label,
+        exposedPort: p.exposed_port,
+        iconUrl: p.icon_url,
+        projectType: p.project_type,
+        path: p.path,
+        composeFiles: p.compose_files,
+      })),
+    }
+  }, [publicPresetQuery.data])
+
+  // Combined preset data: authenticated or public
+  const effectivePresetData = presetQuery.data || publicPresetData
+  const effectivePresetLoading = presetQuery.isLoading || publicPresetQuery.isLoading || publicPresetQuery.isFetching
+
   const presets = useMemo(() => {
-    if (presetQuery.data?.presets && presetQuery.data.presets.length > 0) {
-      // Map live preset data from presets array (new schema)
-      const projectPresets = presetQuery.data.presets.map((preset: any) => ({
+    if (effectivePresetData?.presets && effectivePresetData.presets.length > 0) {
+      return effectivePresetData.presets.map((preset: any) => ({
         value: preset.preset,
-        label: preset.preset_label || preset.preset,
+        label: preset.presetLabel || preset.preset_label || preset.preset,
         directory: preset.path || './',
       }))
-
-      return projectPresets
     }
 
-    // Fallback to default presets if no live data
+    // Fallback to all available presets if no detection data
     return [
+      { value: 'docker-compose', label: 'Docker Compose', directory: './' },
+      { value: 'dockerfile', label: 'Dockerfile', directory: './' },
       { value: 'nextjs', label: 'Next.js', directory: './' },
       { value: 'vite', label: 'Vite', directory: './' },
       { value: 'rsbuild', label: 'RSBuild', directory: './' },
+      { value: 'astro', label: 'Astro', directory: './' },
+      { value: 'nuxt', label: 'Nuxt', directory: './' },
+      { value: 'remix', label: 'Remix', directory: './' },
+      { value: 'python', label: 'Python', directory: './' },
+      { value: 'go', label: 'Go', directory: './' },
+      { value: 'rust', label: 'Rust', directory: './' },
+      { value: 'nodejs', label: 'Node.js', directory: './' },
+      { value: 'static', label: 'Static', directory: './' },
     ]
-  }, [presetQuery.data])
+  }, [effectivePresetData])
 
   // Unified handler for all git settings
   const handleUpdateSettings = async (values: GitSettingsFormValues) => {
@@ -295,25 +562,45 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
       // Extract just the preset name from "preset::path" format for backend
       const [presetName] = values.preset?.split('::') || ['']
 
-      // Build preset_config for presets that support it (e.g., Dockerfile)
+      // Build preset_config for presets that support it
+      const isComposePreset = presetName === 'docker-compose' || presetName === 'dockercompose'
       const presetConfig =
         presetName === 'dockerfile' && values.dockerfilePath
-          ? { dockerfilePath: values.dockerfilePath }
-          : undefined
+          ? { preset: 'dockerfile', dockerfilePath: values.dockerfilePath }
+          : isComposePreset
+            ? {
+                preset: 'docker-compose',
+                composePath: values.composePath || 'docker-compose.yml',
+                composeOverride: values.composeOverride || undefined,
+                publicPorts: values.publicPorts?.length ? values.publicPorts : undefined,
+              }
+            : undefined
+
+      // Backend normalizes "dockercompose" -> "docker-compose" via FromStr
+      const backendPreset = isComposePreset ? 'docker-compose' : presetName
+
+      const updateBody: Record<string, unknown> = {
+        main_branch: values.branch,
+        preset: backendPreset,
+        directory: values.directory!,
+        repo_owner: project.repo_owner!,
+        repo_name: project.repo_name!,
+        preset_config: presetConfig,
+      }
+
+      if (isPublicRepo) {
+        updateBody.git_url = project.git_url || `https://github.com/${project.repo_owner}/${project.repo_name}`
+        updateBody.is_public_repo = true
+        updateBody.git_provider_connection_id = null
+      } else {
+        updateBody.git_provider_connection_id =
+          selectedConnectionId ??
+          project.git_provider_connection_id ??
+          null
+      }
 
       await updateGithubRepo.mutateAsync({
-        body: {
-          main_branch: values.branch,
-          preset: presetName,
-          directory: values.directory!,
-          repo_owner: project.repo_owner!,
-          repo_name: project.repo_name!,
-          git_provider_connection_id:
-            selectedConnectionId ??
-            project.git_provider_connection_id ??
-            null,
-          preset_config: presetConfig,
-        },
+        body: updateBody as any,
         path: { project_id: project.id },
       })
       toast.success('Git settings updated successfully')
@@ -339,20 +626,29 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
       const formPreset = form.getValues('preset')
       const [presetName] = formPreset?.split('::') || ['']
 
-      // Update repository information including the git provider connection
+      // Build the update body — public repos use git_url, private repos use connection_id
+      const body: Record<string, unknown> = {
+        repo_owner: repo.owner,
+        repo_name: repo.name,
+        directory: form.getValues('directory') || './',
+        preset: presetName,
+        main_branch:
+          form.getValues('branch') || repo.default_branch || 'main',
+      }
+
+      if (isPublicRepo) {
+        body.git_url = `https://github.com/${repo.owner}/${repo.name}`
+        body.is_public_repo = true
+        body.git_provider_connection_id = null
+      } else {
+        body.git_provider_connection_id =
+          selectedConnectionId ??
+          project.git_provider_connection_id ??
+          null
+      }
+
       await updateGithubRepo.mutateAsync({
-        body: {
-          repo_owner: repo.owner,
-          repo_name: repo.name,
-          directory: form.getValues('directory') || './',
-          preset: presetName,
-          main_branch:
-            form.getValues('branch') || repo.default_branch || 'main',
-          git_provider_connection_id:
-            selectedConnectionId ??
-            project.git_provider_connection_id ??
-            null,
-        },
+        body: body as any,
         path: { project_id: project.id },
       })
 
@@ -439,78 +735,130 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                     </div>
                     {isSelectingRepository && isEditingSettings ? (
                       <div className="space-y-4">
-                        {/* Git Provider Connection Selection */}
-                        <div className="space-y-2">
-                          <Label htmlFor="change-connection">
-                            Git Provider Connection
-                          </Label>
-                          <Select
-                            value={
-                              selectedConnectionId?.toString() ||
-                              project.git_provider_connection_id?.toString()
-                            }
-                            onValueChange={(value) => {
-                              setSelectedConnectionId(Number(value))
-                              setSelectedRepository(null)
-                            }}
-                          >
-                            <SelectTrigger id="change-connection">
-                              <SelectValue placeholder="Select a git connection" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {(
-                                connectionsData?.connections ?? []
-                              ).map((conn) => {
-                                const provider = providers.find(
-                                  (p) => p.id === conn.provider_id
-                                )
-                                return (
-                                  <SelectItem
-                                    key={conn.id}
-                                    value={conn.id.toString()}
-                                  >
-                                    <div className="flex items-center gap-2">
-                                      {provider?.provider_type === 'github' ||
-                                      provider?.provider_type ===
-                                        'github_app' ? (
-                                        <GithubIcon className="h-4 w-4" />
-                                      ) : (
-                                        <GitBranchIcon className="h-4 w-4" />
-                                      )}
-                                      {conn.account_name}
-                                      {provider && (
-                                        <Badge
-                                          variant="secondary"
-                                          className="ml-1 text-xs"
-                                        >
-                                          {provider.name}
-                                        </Badge>
-                                      )}
-                                    </div>
-                                  </SelectItem>
-                                )
-                              })}
-                            </SelectContent>
-                          </Select>
-                        </div>
+                        {isPublicRepo ? (
+                          /* Public repo: show URL input */
+                          <div className="space-y-2">
+                            <Label htmlFor="public-repo-url">
+                              Public Repository URL
+                            </Label>
+                            <Input
+                              id="public-repo-url"
+                              placeholder="https://github.com/owner/repo"
+                              value={publicRepoUrl || `https://github.com/${project.repo_owner}/${project.repo_name}`}
+                              onChange={(e) => {
+                                const url = e.target.value
+                                setPublicRepoUrl(url)
+                                // Parse GitHub/GitLab URL to extract owner/repo
+                                // Handles: https://github.com/owner/repo, https://github.com/owner/repo.git,
+                                // https://github.com/owner/repo/tree/branch/path, etc.
+                                const match = url.trim().match(/(?:github\.com|gitlab\.com)[/:]([^/\s]+)\/([^/\s.]+)/)
+                                if (match) {
+                                  const [, owner, repo] = match
+                                  setParsedPublicRepo({ owner, name: repo.replace(/\.git$/, '') })
+                                } else {
+                                  setParsedPublicRepo(null)
+                                }
+                              }}
+                            />
+                            <p className="text-xs text-muted-foreground">
+                              Enter the full URL of a public GitHub or GitLab repository.
+                            </p>
+                            {parsedPublicRepo && (
+                              <div className="flex items-center gap-2">
+                                <p className="text-sm text-muted-foreground">
+                                  Detected: <span className="font-mono font-medium text-foreground">{parsedPublicRepo.owner}/{parsedPublicRepo.name}</span>
+                                </p>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  onClick={async () => {
+                                    await handleRepositorySelect({ owner: parsedPublicRepo.owner, name: parsedPublicRepo.name } as RepositoryResponse)
+                                    setIsSelectingRepository(false)
+                                    setPublicRepoUrl('')
+                                    setParsedPublicRepo(null)
+                                  }}
+                                >
+                                  Update Repository
+                                </Button>
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          /* Private repo: show git provider connection selector */
+                          <>
+                            <div className="space-y-2">
+                              <Label htmlFor="change-connection">
+                                Git Provider Connection
+                              </Label>
+                              <Select
+                                value={
+                                  selectedConnectionId?.toString() ||
+                                  project.git_provider_connection_id?.toString()
+                                }
+                                onValueChange={(value) => {
+                                  setSelectedConnectionId(Number(value))
+                                  setSelectedRepository(null)
+                                }}
+                              >
+                                <SelectTrigger id="change-connection">
+                                  <SelectValue placeholder="Select a git connection" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {(
+                                    connectionsData?.connections ?? []
+                                  ).map((conn) => {
+                                    const provider = providers.find(
+                                      (p) => p.id === conn.provider_id
+                                    )
+                                    return (
+                                      <SelectItem
+                                        key={conn.id}
+                                        value={conn.id.toString()}
+                                      >
+                                        <div className="flex items-center gap-2">
+                                          {provider?.provider_type === 'github' ||
+                                          provider?.provider_type ===
+                                            'github_app' ? (
+                                            <GithubIcon className="h-4 w-4" />
+                                          ) : (
+                                            <GitBranchIcon className="h-4 w-4" />
+                                          )}
+                                          {conn.account_name}
+                                          {provider && (
+                                            <Badge
+                                              variant="secondary"
+                                              className="ml-1 text-xs"
+                                            >
+                                              {provider.name}
+                                            </Badge>
+                                          )}
+                                        </div>
+                                      </SelectItem>
+                                    )
+                                  })}
+                                </SelectContent>
+                              </Select>
+                            </div>
 
-                        {/* Repository Selection */}
-                        {(selectedConnectionId ||
-                          project.git_provider_connection_id) && (
-                          <RepositorySelector
-                            connectionId={
-                              selectedConnectionId ||
-                              project.git_provider_connection_id!
-                            }
-                            onSelect={(repo) => {
-                              handleRepositorySelect(repo)
-                              setIsSelectingRepository(false)
-                            }}
-                            selectedRepository={selectedRepository}
-                            title="Select New Repository"
-                            description="Choose a repository from your connected git provider"
-                            showAsCard={false}
-                          />
+                            {/* Repository Selection */}
+                            {(selectedConnectionId ||
+                              project.git_provider_connection_id) && (
+                              <RepositorySelector
+                                connectionId={
+                                  selectedConnectionId ||
+                                  project.git_provider_connection_id!
+                                }
+                                onSelect={(repo) => {
+                                  handleRepositorySelect(repo)
+                                  setIsSelectingRepository(false)
+                                }}
+                                selectedRepository={selectedRepository}
+                                title="Select New Repository"
+                                description="Choose a repository from your connected git provider"
+                                showAsCard={false}
+                              />
+                            )}
+                          </>
                         )}
 
                         <Button
@@ -530,7 +878,7 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                         <div className="flex items-center gap-2 p-4 rounded-lg border bg-muted/50">
                           <GithubIcon className="h-5 w-5" />
                           <a
-                            href={getGithubRepoUrl(
+                            href={project.git_url || getGithubRepoUrl(
                               project.repo_owner,
                               project.repo_name
                             )}
@@ -538,18 +886,25 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                             rel="noopener noreferrer"
                             className="font-medium hover:underline"
                           >
-                            {project.repo_owner}/{project.repo_name}
+                            {isPublicRepo
+                              ? (project.git_url || `https://github.com/${project.repo_owner}/${project.repo_name}`)
+                              : `${project.repo_owner}/${project.repo_name}`}
                           </a>
+                          {isPublicRepo && (
+                            <Badge variant="secondary" className="text-xs">Public</Badge>
+                          )}
                         </div>
                         <p className="text-xs text-muted-foreground">
-                          Seamlessly create Deployments for any commits pushed
-                          to your Git repository.
+                          {isPublicRepo
+                            ? 'Public repository cloned directly via HTTPS.'
+                            : 'Seamlessly create Deployments for any commits pushed to your Git repository.'}
                         </p>
                       </>
                     )}
                   </div>
 
-                  {/* Git Connection Info */}
+                  {/* Git Connection Info — hide for public repos */}
+                  {!!project?.git_provider_connection_id && (
                   <div className="space-y-2">
                     <Label>Git Provider Connection</Label>
                     {currentConnection ? (
@@ -588,6 +943,7 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                       The git provider connection used for this project.
                     </p>
                   </div>
+                  )}
 
                   {isEditingSettings ? (
                     <>
@@ -732,8 +1088,9 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                               normalizeDir(currentDirectory)
 
                             // Find matching preset by both name AND path
+                            const allPresets = effectivePresetData?.presets || []
                             const matchingPreset =
-                              presetQuery.data?.presets?.find((p: any) => {
+                              allPresets.find((p: any) => {
                                 const normalizedPresetPath = normalizeDir(
                                   p.path
                                 )
@@ -749,15 +1106,15 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
 
                             // Fallback: if no exact match, find by preset name only
                             const fallbackPreset =
-                              presetQuery.data?.presets?.find(
+                              allPresets.find(
                                 (p: any) => p.preset === field.value
                               )
                             if (fallbackPreset) {
                               return `${fallbackPreset.preset}::${normalizeDir(fallbackPreset.path)}`
                             }
 
-                            // Return just the slug if not found in detected presets
-                            return field.value
+                            // Fallback: construct value from slug + current directory
+                            return `${field.value}::${normalizedCurrentDir}`
                           }
 
                           const selectValue = getSelectValue()
@@ -766,8 +1123,8 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                             <FormItem>
                               <FormControl>
                                 <FrameworkSelector
-                                  presetData={presetQuery.data}
-                                  isLoading={presetQuery.isLoading}
+                                  presetData={effectivePresetData as any}
+                                  isLoading={effectivePresetLoading}
                                   error={presetQuery.error}
                                   selectedPreset={selectValue}
                                   onSelectPreset={(value) => {
@@ -920,6 +1277,60 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                           )}
                         />
                       )}
+
+                      {/* Compose settings - only shown when Docker Compose preset is selected */}
+                      {(currentPreset?.split('::')[0]?.replace('-', '')?.toLowerCase()?.includes('dockercompose') ||
+                        currentPreset?.split('::')[0] === 'docker-compose' ||
+                        project?.preset === 'docker-compose' ||
+                        project?.preset === 'dockercompose') && (
+                        <>
+                          <FormField
+                            control={form.control}
+                            name="composePath"
+                            render={({ field }) => (
+                              <FormItem>
+                                <FormLabel>Compose File Path</FormLabel>
+                                <FormControl>
+                                  <Input
+                                    {...field}
+                                    placeholder="docker-compose.yml"
+                                  />
+                                </FormControl>
+                                <FormDescription>
+                                  Path to your Docker Compose file relative to the
+                                  root directory
+                                </FormDescription>
+                                <FormMessage />
+                              </FormItem>
+                            )}
+                          />
+
+                          <FormField
+                            control={form.control}
+                            name="composeOverride"
+                            render={({ field }) => (
+                              <FormItem>
+                                <FormLabel>Compose Override (optional)</FormLabel>
+                                <FormControl>
+                                  <textarea
+                                    {...field}
+                                    className="flex min-h-[120px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                                    placeholder={`# Override ports, volumes, etc.\nservices:\n  clickhouse:\n    ports:\n      - "18123:8123"`}
+                                  />
+                                </FormControl>
+                                <FormDescription>
+                                  YAML override merged with the compose file at deploy time.
+                                  Use to remap ports, add volumes, change commands, etc.
+                                  without modifying the original compose file.
+                                </FormDescription>
+                                <FormMessage />
+                              </FormItem>
+                            )}
+                          />
+
+                          <PublicPortsField form={form} />
+                        </>
+                      )}
                     </>
                   ) : (
                     <>
@@ -970,6 +1381,52 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                               </span>
                             </div>
                           </div>
+                        )}
+
+                        {(project.preset === 'docker-compose' || project.preset === 'dockercompose') && (
+                          <>
+                            <div className="space-y-2">
+                              <Label>Compose File Path</Label>
+                              <div className="flex items-center gap-2 p-3 rounded-lg border bg-muted/50">
+                                <FileIcon className="h-4 w-4 text-muted-foreground" />
+                                <span className="font-mono text-sm">
+                                  {(project.preset_config as any)
+                                    ?.composePath || (project.preset_config as any)?.compose_path || 'docker-compose.yml'}
+                                </span>
+                              </div>
+                            </div>
+                            <div className="space-y-2">
+                              <Label>Public Ports</Label>
+                              {((project.preset_config as any)?.publicPorts?.length > 0 || (project.preset_config as any)?.public_ports?.length > 0) ? (
+                                <div className="flex flex-wrap gap-1.5">
+                                  {((project.preset_config as any)?.publicPorts || (project.preset_config as any)?.public_ports || []).map(
+                                    (pp: { service: string; port: number }) => (
+                                      <Badge
+                                        key={`${pp.service}:${pp.port}`}
+                                        variant="secondary"
+                                        className="font-mono text-xs"
+                                      >
+                                        {pp.service}:{pp.port}
+                                      </Badge>
+                                    )
+                                  )}
+                                </div>
+                              ) : (
+                                <p className="text-sm text-muted-foreground italic">
+                                  No public ports — all services are private
+                                </p>
+                              )}
+                            </div>
+
+                            {(project.preset_config as any)?.composeOverride && (
+                              <div className="space-y-2">
+                                <Label>Compose Override</Label>
+                                <pre className="p-3 rounded-lg border bg-muted/50 text-xs font-mono whitespace-pre-wrap overflow-x-auto">
+                                  {(project.preset_config as any)?.composeOverride}
+                                </pre>
+                              </div>
+                            )}
+                          </>
                         )}
                       </div>
                     </>
@@ -1034,7 +1491,7 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                 </Alert>
               </CardContent>
               <CardFooter>
-                <Button onClick={() => navigate('/git-providers/add')}>
+                <Button onClick={() => navigate('/settings/git-providers/add')}>
                   <Plus className="mr-2 h-4 w-4" />
                   Add Git Provider
                 </Button>
@@ -1162,8 +1619,9 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                             normalizeDir(currentDirectory)
 
                           // Find matching preset by both name AND path
+                          const allPresets2 = effectivePresetData?.presets || []
                           const matchingPreset =
-                            presetQuery.data?.presets?.find((p: any) => {
+                            allPresets2.find((p: any) => {
                               const normalizedPresetPath = normalizeDir(p.path)
                               return (
                                 p.preset === field.value &&
@@ -1177,15 +1635,15 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
 
                           // Fallback: if no exact match, find by preset name only
                           const fallbackPreset =
-                            presetQuery.data?.presets?.find(
+                            allPresets2.find(
                               (p: any) => p.preset === field.value
                             )
                           if (fallbackPreset) {
                             return `${fallbackPreset.preset}::${normalizeDir(fallbackPreset.path)}`
                           }
 
-                          // Return just the slug if not found in detected presets
-                          return field.value
+                          // Fallback: construct value from slug + current directory
+                          return `${field.value}::${normalizedCurrentDir}`
                         }
 
                         const selectValue = getSelectValue()
@@ -1194,8 +1652,8 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                           <FormItem>
                             <FormControl>
                               <FrameworkSelector
-                                presetData={presetQuery.data}
-                                isLoading={presetQuery.isLoading}
+                                presetData={effectivePresetData as any}
+                                isLoading={effectivePresetLoading}
                                 error={presetQuery.error}
                                 selectedPreset={selectValue}
                                 onSelectPreset={(value) => {
