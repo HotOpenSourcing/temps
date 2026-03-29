@@ -193,8 +193,9 @@ impl DownloadRepoJob {
     }
 
     /// Create temporary directory for repository
-    /// Uses unix epoch timestamp to avoid conflicts when reinstalling temps with reused deployment IDs
-    fn create_temp_dir(&self, _context: &WorkflowContext) -> Result<PathBuf, WorkflowError> {
+    /// Uses deployment ID + timestamp to guarantee uniqueness across concurrent deployments
+    /// and across reinstalls with reused deployment IDs
+    fn create_temp_dir(&self, context: &WorkflowContext) -> Result<PathBuf, WorkflowError> {
         use std::time::SystemTime;
 
         let unix_epoch = SystemTime::now()
@@ -202,8 +203,10 @@ impl DownloadRepoJob {
             .map_err(|e| WorkflowError::Other(format!("Failed to get unix timestamp: {}", e)))?
             .as_secs();
 
-        let temp_dir = std::path::PathBuf::from("/tmp/temps-deployments")
-            .join(format!("deployment-{}", unix_epoch));
+        let temp_dir = std::path::PathBuf::from("/tmp/temps-deployments").join(format!(
+            "deployment-{}-{}",
+            context.deployment_id, unix_epoch
+        ));
         std::fs::create_dir_all(&temp_dir).map_err(WorkflowError::IoError)?;
         Ok(temp_dir)
     }
@@ -886,5 +889,49 @@ mod tests {
         // Verify tag has highest priority
         let context = crate::test_utils::create_test_context("test".to_string(), 1, 1, 1);
         assert_eq!(job.get_checkout_ref(&context), "v2.0.0");
+    }
+
+    #[test]
+    fn test_create_temp_dir_unique_per_deployment() {
+        let git_manager: Arc<dyn GitProviderManagerTrait> = Arc::new(MockGitProviderManager);
+
+        let job = DownloadRepoJob::new(
+            "test".to_string(),
+            "owner".to_string(),
+            "repo".to_string(),
+            1,
+            git_manager,
+        );
+
+        // Two contexts with different deployment IDs
+        let ctx_a = crate::test_utils::create_test_context("wf-a".to_string(), 100, 1, 1);
+        let ctx_b = crate::test_utils::create_test_context("wf-b".to_string(), 200, 1, 1);
+
+        let dir_a = job.create_temp_dir(&ctx_a).unwrap();
+        let dir_b = job.create_temp_dir(&ctx_b).unwrap();
+
+        // Directories must be different even when created in the same second
+        assert_ne!(
+            dir_a, dir_b,
+            "Different deployment IDs must produce different paths"
+        );
+
+        // Both should contain their deployment ID
+        let dir_a_str = dir_a.to_string_lossy();
+        let dir_b_str = dir_b.to_string_lossy();
+        assert!(
+            dir_a_str.contains("deployment-100-"),
+            "Path should contain deployment ID: {}",
+            dir_a_str
+        );
+        assert!(
+            dir_b_str.contains("deployment-200-"),
+            "Path should contain deployment ID: {}",
+            dir_b_str
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&dir_a);
+        let _ = std::fs::remove_dir_all(&dir_b);
     }
 }

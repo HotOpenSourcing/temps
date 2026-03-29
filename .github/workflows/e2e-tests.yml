@@ -15,7 +15,6 @@ jobs:
   e2e-test:
     name: E2E Deployment Tests
     runs-on: ubuntu-latest
-    # Run after the test build job from rust-tests.yml to reuse its Rust cache
     needs: []
     timeout-minutes: 60
 
@@ -40,7 +39,7 @@ jobs:
       TEMPS_DATA_DIR: /tmp/temps-data
       ADMIN_EMAIL: admin@localho.st
       ADMIN_PASSWORD: E2eTestPass123!
-      API_BASE: http://localhost:3000
+      API_BASE: http://localhost:8081/api
 
     steps:
       - name: Free up disk space
@@ -60,12 +59,11 @@ jobs:
         with:
           bun-version: latest
 
-      # Reuse the same Rust dependency cache as rust-tests.yml build-tests job
-      - name: Restore Rust cache
+      - name: Rust cache (release build)
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: test-build
-          save-if: false
+          shared-key: e2e-release
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Cache Bun dependencies
         uses: actions/cache@v4
@@ -75,12 +73,21 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-bun-
 
+      - name: Cache wasm-pack binary
+        id: wasm-pack-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/wasm-pack
+          key: ${{ runner.os }}-wasm-pack-0.13
+
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Install wasm-pack and build WASM
         run: |
-          cargo install wasm-pack
+          if [ ! -f ~/.cargo/bin/wasm-pack ]; then
+            cargo install wasm-pack
+          fi
           cd crates/temps-captcha-wasm
           bun install
           bun run build
@@ -96,6 +103,13 @@ jobs:
         env:
           FORCE_WEB_BUILD: 1
           CARGO_INCREMENTAL: 0
+
+      - name: Generate self-signed localho.st certificate
+        run: |
+          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+            -keyout localho.st.key -out localho.st.crt \
+            -days 1 -nodes -subj "/CN=localho.st" \
+            -addext "subjectAltName=DNS:localho.st,DNS:*.localho.st"
 
       - name: Install localho.st certificate into trust store
         run: |
@@ -128,6 +142,13 @@ jobs:
             --skip-geolite2-download \
             --output-format json
 
+      - name: Prepare temps runtime files
+        run: |
+          # Sync encryption key to working directory (temps serve reads from cwd)
+          cp "$TEMPS_DATA_DIR/encryption_key" ./encryption_key 2>/dev/null || true
+          # Symlink GeoLite2 to working directory
+          ln -sf "$TEMPS_DATA_DIR/GeoLite2-City.mmdb" ./GeoLite2-City.mmdb 2>/dev/null || true
+
       - name: Start temps serve
         run: |
           ./target/release/temps serve \
@@ -135,58 +156,45 @@ jobs:
             --data-dir "$TEMPS_DATA_DIR" \
             --address 0.0.0.0:3000 \
             --tls-address 0.0.0.0:3443 \
+            --console-address 0.0.0.0:8081 \
             --disable-https-redirect \
-            --screenshot-provider noop &
+            --screenshot-provider noop \
+            > /tmp/temps.log 2>&1 &
           echo $! > /tmp/temps.pid
           echo "Temps server started with PID $(cat /tmp/temps.pid)"
+          # Give it a moment to either start or crash
+          sleep 3
+          if ! kill -0 $(cat /tmp/temps.pid) 2>/dev/null; then
+            echo "ERROR: Temps server died immediately. Logs:"
+            cat /tmp/temps.log
+            exit 1
+          fi
 
       - name: Wait for platform health
         run: |
           echo "Waiting for Temps to become healthy..."
-          timeout 120 bash -c 'until curl -sf http://localhost:3000/health > /dev/null 2>&1; do sleep 2; done'
+          timeout 120 bash -c 'until curl -sf http://localhost:8081/ > /dev/null 2>&1; do sleep 2; done'
           echo "Platform is healthy"
-          curl -s http://localhost:3000/health | head -c 200
+          curl -s -o /dev/null -w "Console HTTP %{http_code}" http://localhost:8081/
           echo ""
 
-      - name: Authenticate and create API key
+      - name: Create API key via CLI
         id: auth
         run: |
-          # Login to get session cookie
-          LOGIN_RESPONSE=$(curl -s -w "\n%{http_code}" -c /tmp/cookies.txt \
-            -X POST "$API_BASE/auth/login" \
-            -H "Content-Type: application/json" \
-            -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASSWORD\"}")
+          API_OUTPUT=$(./target/release/temps api-key \
+            --database-url "$DATABASE_URL" \
+            --name "e2e-test" \
+            --role admin \
+            --output-format json 2>&1)
+          echo "CLI output: $API_OUTPUT"
 
-          HTTP_CODE=$(echo "$LOGIN_RESPONSE" | tail -1)
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "Login failed with HTTP $HTTP_CODE"
-            echo "$LOGIN_RESPONSE" | head -n -1
-            exit 1
-          fi
-          echo "Login successful"
-
-          # Create API key using session cookie
-          APIKEY_RESPONSE=$(curl -s -w "\n%{http_code}" -b /tmp/cookies.txt \
-            -X POST "$API_BASE/api-keys" \
-            -H "Content-Type: application/json" \
-            -d '{"name":"e2e-test","role_type":"admin"}')
-
-          HTTP_CODE=$(echo "$APIKEY_RESPONSE" | tail -1)
-          APIKEY_BODY=$(echo "$APIKEY_RESPONSE" | head -n -1)
-          if [ "$HTTP_CODE" != "201" ] && [ "$HTTP_CODE" != "200" ]; then
-            echo "API key creation failed with HTTP $HTTP_CODE"
-            echo "$APIKEY_BODY"
+          API_KEY=$(echo "$API_OUTPUT" | jq -r '.api_key // empty' 2>/dev/null)
+          if [ -z "$API_KEY" ]; then
+            echo "Failed to extract API key from CLI output"
             exit 1
           fi
 
-          API_KEY=$(echo "$APIKEY_BODY" | jq -r '.api_key')
-          if [ -z "$API_KEY" ] || [ "$API_KEY" = "null" ]; then
-            echo "Failed to extract API key from response"
-            echo "$APIKEY_BODY"
-            exit 1
-          fi
-
-          echo "API key created successfully"
+          echo "API key created: ${API_KEY:0:12}..."
           echo "api_key=$API_KEY" >> $GITHUB_OUTPUT
 
       - name: Deploy example applications
@@ -249,14 +257,21 @@ jobs:
               continue
             fi
 
-            PROJECT_ID=$(echo "$CREATE_BODY" | jq -r '.id')
+            PROJECT_ID=$(echo "$CREATE_BODY" | jq -r '.id' 2>/dev/null || true)
+            if [ -z "$PROJECT_ID" ] || [ "$PROJECT_ID" = "null" ]; then
+              echo "FAIL: Could not parse project ID from response"
+              echo "$CREATE_BODY"
+              RESULTS+=("$APP_NAME: FAIL (parse project ID)")
+              FAILED=$((FAILED + 1))
+              continue
+            fi
             echo "Project created: id=$PROJECT_ID"
 
             # --- Get production environment ID ---
             ENV_RESPONSE=$(curl -s \
               -H "Authorization: Bearer $API_KEY" \
-              "$API_BASE/projects/$PROJECT_ID")
-            ENV_ID=$(echo "$ENV_RESPONSE" | jq -r '.environments[0].id // empty')
+              "$API_BASE/projects/$PROJECT_ID/environments")
+            ENV_ID=$(echo "$ENV_RESPONSE" | jq -r '.[0].id // .environments[0].id // empty' 2>/dev/null || true)
 
             if [ -z "$ENV_ID" ]; then
               echo "FAIL: Could not find environment for project $PROJECT_ID"
@@ -296,8 +311,8 @@ jobs:
                 -H "Authorization: Bearer $API_KEY" \
                 "$API_BASE/projects/$PROJECT_ID/deployments?per_page=1")
 
-              DEPLOY_STATE=$(echo "$DEPLOY_LIST" | jq -r '.deployments[0].status // "pending"')
-              DEPLOY_ID=$(echo "$DEPLOY_LIST" | jq -r '.deployments[0].id // empty')
+              DEPLOY_STATE=$(echo "$DEPLOY_LIST" | jq -r '.deployments[0].status // "pending"' 2>/dev/null || echo "pending")
+              DEPLOY_ID=$(echo "$DEPLOY_LIST" | jq -r '.deployments[0].id // empty' 2>/dev/null || true)
 
               if [ "$DEPLOY_STATE" = "running" ] || [ "$DEPLOY_STATE" = "deployed" ] || [ "$DEPLOY_STATE" = "completed" ]; then
                 echo "Deployment $DEPLOY_ID reached state: $DEPLOY_STATE"
@@ -371,6 +386,14 @@ jobs:
         if: failure()
         run: |
           echo "=== Temps server logs (last 100 lines) ==="
+          if [ -f /tmp/temps.log ]; then
+            tail -100 /tmp/temps.log
+          else
+            echo "No temps log file found"
+          fi
+
+          echo ""
+          echo "=== Temps process status ==="
           if [ -f /tmp/temps.pid ]; then
             PID=$(cat /tmp/temps.pid)
             echo "Temps PID: $PID"
