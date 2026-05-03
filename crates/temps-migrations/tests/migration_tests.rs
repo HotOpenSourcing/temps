@@ -951,3 +951,449 @@ async fn connect_with_retries(db_url: &str) -> anyhow::Result<DatabaseConnection
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Regression test: m20260502_000001_add_observe_correlation must succeed even
+// when proxy_logs has compressed chunks.
+//
+// The v1 of that migration ran plain `ALTER TABLE … ADD COLUMN` against
+// `proxy_logs`, which on prod-style installs is a TimescaleDB hypertable with
+// a 7-day compression policy from `m20260225_000001_add_proxy_logs_retention`.
+// Once a chunk compresses, the ALTER fails with `chunk not found` and leaves
+// the schema half-applied — observed in production with no clean way forward
+// short of manual SQL recovery.
+//
+// Local dev never caught it because local DBs typically have no rows older
+// than 7 days, so no chunk has compressed yet. This test reproduces the
+// failure mode by forcing compression on a backfilled chunk before running
+// the migrator.
+//
+// The current migration removes the policy, decompresses every chunk, runs
+// the ALTERs, then restores the policy. This test pins that contract.
+#[tokio::test]
+async fn test_observe_correlation_migration_handles_compressed_proxy_logs() -> anyhow::Result<()> {
+    if std::env::var("TEMPS_TEST_DATABASE_URL").is_ok() {
+        println!(
+            "⏭️  Skipping test_observe_correlation_migration_handles_compressed_proxy_logs: \
+             external database in use"
+        );
+        return Ok(());
+    }
+
+    let container = GenericImage::new("timescale/timescaledb-ha", "pg18")
+        .with_env_var("POSTGRES_DB", "postgres")
+        .with_env_var("POSTGRES_USER", "postgres")
+        .with_env_var("POSTGRES_PASSWORD", "postgres")
+        .with_env_var("POSTGRES_HOST_AUTH_METHOD", "trust")
+        .start()
+        .await
+        .expect("Failed to start TimescaleDB container");
+    let port = container.get_host_port_ipv4(5432).await?;
+    let db_url = format!("postgresql://postgres:postgres@localhost:{}/postgres", port);
+    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+    let db = connect_with_retries(&db_url).await?;
+
+    // ── 1. Apply every migration EXCEPT our target so we land on the same
+    //       schema state prod was in just before the v1 migration ran. ──────
+    let target = "m20260502_000001_add_observe_correlation";
+    let pre_target_count = Migrator::migrations()
+        .iter()
+        .position(|m| m.name() == target)
+        .unwrap_or_else(|| panic!("migration {} not found in Migrator", target));
+    Migrator::up(&db, Some(pre_target_count as u32)).await?;
+
+    // Sanity: target migration should NOT be applied yet.
+    let pre_state = db
+        .query_one(sea_orm::Statement::from_string(
+            sea_orm::DatabaseBackend::Postgres,
+            format!(
+                "SELECT EXISTS (SELECT 1 FROM seaql_migrations WHERE version = '{}') AS applied",
+                target
+            ),
+        ))
+        .await?
+        .expect("query returns one row");
+    let applied: bool = pre_state.try_get("", "applied")?;
+    assert!(
+        !applied,
+        "target migration {} should not be applied yet — adjust pre-target count",
+        target
+    );
+
+    // ── 2. Backfill proxy_logs with rows older than the 7-day compression
+    //       window so the resulting chunks are eligible for compression.
+    //       The schema needs to match what `m20250101_000001_initial_schema`
+    //       defined; we only set the columns required by the NOT NULL
+    //       constraints and let the rest default. ──────────────────────────
+    db.execute_unprepared(
+        "INSERT INTO proxy_logs ( \
+             timestamp, method, path, host, status_code, request_source, \
+             is_system_request, routing_status, request_id, created_date \
+         ) \
+         SELECT \
+             now() - INTERVAL '10 days' - (s * INTERVAL '1 minute'), \
+             'GET', '/api/old/' || s, 'example.test', 200, 'proxy', \
+             false, 'routed', 'req-' || s, \
+             (now() - INTERVAL '10 days' - (s * INTERVAL '1 minute'))::date \
+         FROM generate_series(1, 30) s",
+    )
+    .await?;
+
+    // ── 3. Force compression on every chunk that's eligible. This mimics
+    //       what TimescaleDB's background compression worker does on prod
+    //       when chunks age past the 7-day window. ──────────────────────────
+    db.execute_unprepared(
+        "SELECT compress_chunk(c, if_not_compressed => TRUE) \
+         FROM show_chunks('proxy_logs', older_than => now() - INTERVAL '7 days') c",
+    )
+    .await?;
+
+    let pre = db
+        .query_one(sea_orm::Statement::from_string(
+            sea_orm::DatabaseBackend::Postgres,
+            "SELECT count(*) FILTER (WHERE is_compressed) AS compressed, count(*) AS total \
+             FROM timescaledb_information.chunks WHERE hypertable_name = 'proxy_logs'"
+                .to_string(),
+        ))
+        .await?
+        .expect("chunk count");
+    let compressed_before: i64 = pre.try_get("", "compressed")?;
+    let total_before: i64 = pre.try_get("", "total")?;
+    assert!(
+        compressed_before > 0,
+        "test setup must produce at least one compressed chunk \
+         (got {} compressed / {} total) — \
+         without that the regression isn't reproducible",
+        compressed_before,
+        total_before
+    );
+
+    // ── 4. Apply the target migration. With v1 this would have errored on
+    //       the second ALTER; with the current code it must succeed. ───────
+    Migrator::up(&db, None).await?;
+
+    // ── 5. Verify the schema landed correctly. ─────────────────────────────
+    for (table, col) in [
+        ("proxy_logs", "trace_id"),
+        ("proxy_logs", "error_group_id"),
+        ("revenue_events", "deployment_id"),
+        ("revenue_events", "environment_id"),
+        ("revenue_events", "trace_id"),
+        ("error_events", "trace_id_indexed"),
+    ] {
+        let row = db
+            .query_one(sea_orm::Statement::from_string(
+                sea_orm::DatabaseBackend::Postgres,
+                format!(
+                    "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
+                     WHERE table_name = '{}' AND column_name = '{}') AS present",
+                    table, col
+                ),
+            ))
+            .await?
+            .expect("col query returns one row");
+        let present: bool = row.try_get("", "present")?;
+        assert!(present, "{}.{} must exist after migration", table, col);
+    }
+
+    for index in [
+        "idx_proxy_logs_project_trace",
+        "idx_proxy_logs_error_group",
+        "idx_revenue_events_project_occurred",
+        "idx_error_events_project_trace",
+    ] {
+        let row = db
+            .query_one(sea_orm::Statement::from_string(
+                sea_orm::DatabaseBackend::Postgres,
+                format!(
+                    "SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = '{}') AS present",
+                    index
+                ),
+            ))
+            .await?
+            .expect("index query returns one row");
+        let present: bool = row.try_get("", "present")?;
+        assert!(present, "index {} must exist after migration", index);
+    }
+
+    // ── 6. The migration must have decompressed every chunk (not just
+    //       relied on TimescaleDB's lenient mode for ALTER on compressed
+    //       chunks). Older Timescale versions in prod don't support that
+    //       lenient path; this assertion pins the contract that the
+    //       migration is doing the explicit decompress dance. ──────────────
+    let post = db
+        .query_one(sea_orm::Statement::from_string(
+            sea_orm::DatabaseBackend::Postgres,
+            "SELECT count(*) FILTER (WHERE is_compressed) AS compressed \
+             FROM timescaledb_information.chunks WHERE hypertable_name = 'proxy_logs'"
+                .to_string(),
+        ))
+        .await?
+        .expect("post chunk count");
+    let compressed_after: i64 = post.try_get("", "compressed")?;
+    assert_eq!(
+        compressed_after, 0,
+        "migration must decompress every chunk before ALTER (got {} still compressed)",
+        compressed_after
+    );
+
+    // ── 7. Compression policy must be restored. ────────────────────────────
+    let policy_row = db
+        .query_one(sea_orm::Statement::from_string(
+            sea_orm::DatabaseBackend::Postgres,
+            "SELECT count(*) AS n FROM timescaledb_information.jobs \
+             WHERE hypertable_name = 'proxy_logs' AND application_name LIKE 'Columnstore%'"
+                .to_string(),
+        ))
+        .await?
+        .expect("policy count");
+    let policy_count: i64 = policy_row.try_get("", "n")?;
+    assert_eq!(
+        policy_count, 1,
+        "compression policy must be re-added after migration (got {})",
+        policy_count
+    );
+
+    // ── 8. Data must be intact. ────────────────────────────────────────────
+    let row = db
+        .query_one(sea_orm::Statement::from_string(
+            sea_orm::DatabaseBackend::Postgres,
+            "SELECT count(*) AS n FROM proxy_logs".to_string(),
+        ))
+        .await?
+        .expect("row count");
+    let row_count: i64 = row.try_get("", "n")?;
+    assert_eq!(
+        row_count, 30,
+        "all 30 backfilled rows must survive the decompress-alter-recompress cycle"
+    );
+
+    println!(
+        "✅ observe correlation migration succeeded with {} compressed chunks before",
+        compressed_before
+    );
+    Ok(())
+}
+
+/// Idempotency guard: re-running the observe correlation migration on an
+/// already-migrated DB must succeed silently. Catches regressions where
+/// someone replaces an `IF NOT EXISTS` with a plain ALTER.
+#[tokio::test]
+async fn test_observe_correlation_migration_is_idempotent() -> anyhow::Result<()> {
+    if std::env::var("TEMPS_TEST_DATABASE_URL").is_ok() {
+        println!(
+            "⏭️  Skipping test_observe_correlation_migration_is_idempotent: \
+             external database in use"
+        );
+        return Ok(());
+    }
+
+    let container = GenericImage::new("timescale/timescaledb-ha", "pg18")
+        .with_env_var("POSTGRES_DB", "postgres")
+        .with_env_var("POSTGRES_USER", "postgres")
+        .with_env_var("POSTGRES_PASSWORD", "postgres")
+        .with_env_var("POSTGRES_HOST_AUTH_METHOD", "trust")
+        .start()
+        .await
+        .expect("Failed to start TimescaleDB container");
+    let port = container.get_host_port_ipv4(5432).await?;
+    let db_url = format!("postgresql://postgres:postgres@localhost:{}/postgres", port);
+    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+    let db = connect_with_retries(&db_url).await?;
+
+    Migrator::up(&db, None).await?;
+
+    // Strip the recorded migration row so Sea-ORM thinks it needs to run
+    // again; the migration body itself must still be a no-op.
+    db.execute_unprepared(
+        "DELETE FROM seaql_migrations WHERE version = 'm20260502_000001_add_observe_correlation'",
+    )
+    .await?;
+
+    // Should succeed without error — every step uses IF NOT EXISTS / if_exists.
+    Migrator::up(&db, None).await?;
+
+    println!("✅ observe correlation migration is idempotent");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Reproduction: the actual prod failure. The original "chunk not found" error
+// comes from a race between two concurrent operations on the same hypertable
+// — typically the migration's `decompress_chunk(c)` enumerated via
+// `show_chunks()` racing with the background retention worker that drops
+// chunks older than 30 days. By the time `decompress_chunk(stale_oid)`
+// runs, the chunk has already been dropped, and TimescaleDB throws.
+//
+// This test reconstructs the race deterministically by running retention in
+// a tight loop in a background tokio task while the migration executes in
+// the foreground. The fixed migration must complete cleanly even though
+// retention is constantly mutating chunk metadata.
+//
+// To verify this test catches the regression, replace the v4 migration's
+// `alter_job(scheduled => false)` with a no-op — the test must then fail.
+#[tokio::test]
+async fn test_observe_correlation_migration_survives_concurrent_retention() -> anyhow::Result<()> {
+    if std::env::var("TEMPS_TEST_DATABASE_URL").is_ok() {
+        println!(
+            "⏭️  Skipping test_observe_correlation_migration_survives_concurrent_retention: \
+             external database in use"
+        );
+        return Ok(());
+    }
+
+    let container = GenericImage::new("timescale/timescaledb-ha", "pg18")
+        .with_env_var("POSTGRES_DB", "postgres")
+        .with_env_var("POSTGRES_USER", "postgres")
+        .with_env_var("POSTGRES_PASSWORD", "postgres")
+        .with_env_var("POSTGRES_HOST_AUTH_METHOD", "trust")
+        .start()
+        .await
+        .expect("Failed to start TimescaleDB container");
+    let port = container.get_host_port_ipv4(5432).await?;
+    let db_url = format!("postgresql://postgres:postgres@localhost:{}/postgres", port);
+    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+    let db = connect_with_retries(&db_url).await?;
+
+    // Bring schema up to but not including the target migration.
+    let target = "m20260502_000001_add_observe_correlation";
+    let pre_target_count = Migrator::migrations()
+        .iter()
+        .position(|m| m.name() == target)
+        .unwrap_or_else(|| panic!("migration {} not found in Migrator", target));
+    Migrator::up(&db, Some(pre_target_count as u32)).await?;
+
+    // Backfill `proxy_logs` with rows spanning 1d → 35d so retention can
+    // actually drop something on each run, AND so we have plenty of
+    // compressed chunks the migration must decompress.
+    db.execute_unprepared(
+        "INSERT INTO proxy_logs ( \
+             timestamp, method, path, host, status_code, request_source, \
+             is_system_request, routing_status, request_id, created_date \
+         ) \
+         SELECT \
+             now() - (s * INTERVAL '1 day') - (i * INTERVAL '1 hour'), \
+             'GET', '/api/r/' || s || '/' || i, 'example.test', 200, 'proxy', \
+             false, 'routed', 'r-' || s || '-' || i, \
+             (now() - (s * INTERVAL '1 day') - (i * INTERVAL '1 hour'))::date \
+         FROM generate_series(1, 35) s, generate_series(1, 4) i",
+    )
+    .await?;
+    db.execute_unprepared(
+        "SELECT compress_chunk(c, if_not_compressed => TRUE) \
+         FROM show_chunks('proxy_logs', older_than => now() - INTERVAL '7 days') c",
+    )
+    .await?;
+
+    let pre = db
+        .query_one(sea_orm::Statement::from_string(
+            sea_orm::DatabaseBackend::Postgres,
+            "SELECT count(*) FILTER (WHERE is_compressed) AS compressed, count(*) AS total \
+             FROM timescaledb_information.chunks WHERE hypertable_name = 'proxy_logs'"
+                .to_string(),
+        ))
+        .await?
+        .expect("chunk count");
+    let compressed_before: i64 = pre.try_get("", "compressed")?;
+    let total_before: i64 = pre.try_get("", "total")?;
+    assert!(
+        compressed_before > 0 && total_before > 5,
+        "test setup must produce both compressed and uncompressed chunks \
+         (got {} compressed / {} total) — race surface is too small otherwise",
+        compressed_before,
+        total_before
+    );
+
+    // Spawn a background task that hammers retention. We need a separate
+    // connection because the main connection will hold an exclusive lock
+    // on `proxy_logs` while the migration runs. The retention CALL will
+    // block on that lock — exactly what we want.
+    let bg_url = db_url.clone();
+    let bg_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let bg_stop_clone = bg_stop.clone();
+    let bg_handle = tokio::spawn(async move {
+        let bg_db = sea_orm::Database::connect(&bg_url).await?;
+        // Find the retention job id once.
+        let row = bg_db
+            .query_one(sea_orm::Statement::from_string(
+                sea_orm::DatabaseBackend::Postgres,
+                "SELECT job_id FROM timescaledb_information.jobs \
+                 WHERE hypertable_name = 'proxy_logs' \
+                   AND proc_name = 'policy_retention' LIMIT 1"
+                    .to_string(),
+            ))
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("retention job not found"))?;
+        let job_id: i32 = row.try_get("", "job_id")?;
+        let call_sql = format!("CALL run_job({})", job_id);
+
+        while !bg_stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
+            // We don't care about the result — the worker may legitimately
+            // fail when the migration has it locked or when the job_id was
+            // briefly removed during alter_job. We're only here to maximize
+            // the chance of a race.
+            let _ = bg_db.execute_unprepared(&call_sql).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+        }
+        Ok::<(), anyhow::Error>(())
+    });
+
+    // Now run the migration. Must succeed despite the retention worker
+    // hammering the same hypertable.
+    let migration_result = Migrator::up(&db, None).await;
+
+    // Stop and join the retention thrasher.
+    bg_stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = bg_handle.await;
+
+    migration_result?;
+
+    // Schema must be intact post-race.
+    for (table, col) in [
+        ("proxy_logs", "trace_id"),
+        ("proxy_logs", "error_group_id"),
+        ("revenue_events", "deployment_id"),
+        ("error_events", "trace_id_indexed"),
+    ] {
+        let row = db
+            .query_one(sea_orm::Statement::from_string(
+                sea_orm::DatabaseBackend::Postgres,
+                format!(
+                    "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
+                     WHERE table_name = '{}' AND column_name = '{}') AS present",
+                    table, col
+                ),
+            ))
+            .await?
+            .expect("col query returns one row");
+        let present: bool = row.try_get("", "present")?;
+        assert!(present, "{}.{} must exist after migration", table, col);
+    }
+
+    // Background jobs must be re-enabled — the migration paused them and
+    // forgetting to restore would silently disable compression / retention
+    // on prod.
+    let jobs_row = db
+        .query_one(sea_orm::Statement::from_string(
+            sea_orm::DatabaseBackend::Postgres,
+            "SELECT count(*) FILTER (WHERE scheduled) AS active, count(*) AS total \
+             FROM timescaledb_information.jobs WHERE hypertable_name = 'proxy_logs'"
+                .to_string(),
+        ))
+        .await?
+        .expect("jobs query");
+    let active: i64 = jobs_row.try_get("", "active")?;
+    let total_jobs: i64 = jobs_row.try_get("", "total")?;
+    assert_eq!(
+        active, total_jobs,
+        "every TimescaleDB job that was active before the migration must be \
+         active after (got {} active / {} total)",
+        active, total_jobs
+    );
+
+    println!(
+        "✅ migration survived concurrent retention (started with {} compressed / {} total chunks)",
+        compressed_before, total_before
+    );
+    Ok(())
+}

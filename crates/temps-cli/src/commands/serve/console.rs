@@ -50,6 +50,7 @@ use temps_monitoring::{
     OutageDetectionService,
 };
 use temps_notifications::NotificationsPlugin;
+use temps_observability::ObservabilityPlugin;
 use temps_otel::plugin::OtelPlugin;
 use temps_projects::ProjectsPlugin;
 use temps_providers::ProvidersPlugin;
@@ -877,6 +878,13 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
     debug!("Registering RevenuePlugin");
     let revenue_plugin = Box::new(RevenuePlugin::new());
     plugin_manager.register_plugin(revenue_plugin);
+
+    // 11b. ObservabilityPlugin - unified Observe page (merges runtime logs,
+    // requests, spans, errors, revenue into one event stream). Read-only,
+    // no outbound calls; depends on the database only.
+    debug!("Registering ObservabilityPlugin");
+    let observability_plugin = Box::new(ObservabilityPlugin::new());
+    plugin_manager.register_plugin(observability_plugin);
 
     // AI Gateway Plugin - provides AI provider key management and OpenAI-compatible API
     debug!("Registering AiGatewayPlugin");
