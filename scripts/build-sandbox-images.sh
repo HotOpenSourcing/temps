@@ -1,10 +1,33 @@
 #!/usr/bin/env bash
-# Build and push all sandbox images to Docker Hub (gotempsh/).
-# Requires: docker buildx, logged in to Docker Hub as gotempsh.
-# Usage: ./scripts/build-sandbox-images.sh [runtime...]
+# Build and push all sandbox images to GHCR (ghcr.io/gotempsh/).
+# Requires: docker buildx, logged in to GHCR (`docker login ghcr.io`).
+# Usage:   ./scripts/build-sandbox-images.sh [runtime...]
+# Channel: SANDBOX_CHANNEL=stable|beta (default: beta)
+#
 # If no runtimes specified, builds all: node bun python rust go full
+#
+# Image version is read from SANDBOX_IMAGE_VERSION in
+# crates/temps-agents/src/sandbox/docker.rs so the script and the runtime
+# stay in lock-step. The release workflow runs the same logic in CI.
+#
+# Channel rules (matches .github/workflows/release.yml):
+#   stable -> :<ver>, :<ver>-stable, :latest, :stable
+#   beta   -> :<ver>-beta, :beta  (never the unsuffixed canonical tag)
+#
+# Default is `beta` so an accidental local push cannot poison the stable
+# `:<ver>` ref. Set SANDBOX_CHANNEL=stable explicitly when promoting.
 
 set -euo pipefail
+
+CHANNEL="${SANDBOX_CHANNEL:-beta}"
+case "$CHANNEL" in
+    stable|beta) ;;
+    *)
+        echo "error: SANDBOX_CHANNEL must be 'stable' or 'beta' (got: $CHANNEL)" >&2
+        exit 1
+        ;;
+esac
+echo "Release channel: $CHANNEL"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -14,6 +37,17 @@ if [ $# -eq 0 ]; then
 else
     RUNTIMES=("$@")
 fi
+
+# Extract the pinned image version from the Rust source so we never publish
+# under the wrong tag. Single source of truth for the version string.
+IMAGE_VERSION=$(grep -E '^pub const SANDBOX_IMAGE_VERSION' \
+    "$REPO_ROOT/crates/temps-agents/src/sandbox/docker.rs" \
+    | sed -E 's/.*"([^"]+)".*/\1/')
+if [ -z "$IMAGE_VERSION" ]; then
+    echo "error: failed to extract SANDBOX_IMAGE_VERSION from docker.rs" >&2
+    exit 1
+fi
+echo "Publishing sandbox images at version: $IMAGE_VERSION"
 
 PRINT_DOCKERFILE="$REPO_ROOT/target/debug/examples/print_dockerfile"
 
@@ -41,24 +75,42 @@ TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
 for runtime in "${RUNTIMES[@]}"; do
-    IMAGE="gotempsh/temps-sandbox-${runtime}"
-    echo ""
-    echo "=========================================="
-    echo "Building and pushing: $IMAGE"
-    echo "=========================================="
-
+    IMAGE="ghcr.io/gotempsh/temps-sandbox-${runtime}"
     BUILD_DIR="$TMPDIR/$runtime"
     mkdir -p "$BUILD_DIR"
 
     "$PRINT_DOCKERFILE" "$runtime" > "$BUILD_DIR/Dockerfile"
 
+    # Stable owns the canonical `:<ver>` ref; beta only publishes suffixed
+    # refs so it can never overwrite a stable image at the same version.
+    if [ "$CHANNEL" = "stable" ]; then
+        TAG_ARGS=(
+            --tag "$IMAGE:$IMAGE_VERSION"
+            --tag "$IMAGE:$IMAGE_VERSION-stable"
+            --tag "$IMAGE:latest"
+            --tag "$IMAGE:stable"
+        )
+        TAG_LIST="$IMAGE:$IMAGE_VERSION, :$IMAGE_VERSION-stable, :latest, :stable"
+    else
+        TAG_ARGS=(
+            --tag "$IMAGE:$IMAGE_VERSION-beta"
+            --tag "$IMAGE:beta"
+        )
+        TAG_LIST="$IMAGE:$IMAGE_VERSION-beta, :beta"
+    fi
+
+    echo ""
+    echo "=========================================="
+    echo "Building and pushing ($CHANNEL): $TAG_LIST"
+    echo "=========================================="
+
     docker buildx build \
         --platform linux/amd64,linux/arm64 \
-        --tag "$IMAGE:latest" \
+        "${TAG_ARGS[@]}" \
         --push \
         "$BUILD_DIR"
 
-    echo "✓ $IMAGE:latest pushed"
+    echo "✓ $TAG_LIST pushed"
 done
 
 echo ""
