@@ -210,7 +210,7 @@ impl LogSearchService {
         // Process chunks newest-first so the bounded heap converges quickly:
         // the first chunks we read already hold the most recent lines, and
         // the heap rejects older lines once full.
-        chunks.sort_by(|a, b| b.ended_at.cmp(&a.ended_at));
+        chunks.sort_by_key(|c| Reverse(c.ended_at));
 
         debug!(
             project_id = %filter.project_id,
@@ -336,7 +336,7 @@ impl LogSearchService {
         // can render terminal-style with newest at the bottom.
         let mut newest_first: Vec<LogSearchLine> =
             heap.into_iter().map(|Reverse(e)| e.line).collect();
-        newest_first.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        newest_first.sort_by_key(|l| Reverse(l.timestamp));
 
         let has_more = newest_first.len() > page_size as usize;
         newest_first.truncate(page_size as usize);
