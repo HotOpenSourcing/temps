@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-beta.7] - 2026-05-09
+
 ### Added
 - **Custom date range in Log History**: the time-range select gains a `Custom range…` option that opens the shared `DateRangePicker` with HH:MM precision. Picking it seeds the calendar from the previously-active preset for a smooth handoff (no empty starting state). Custom ranges feed `start_time` / `end_time` directly to `/api/logs/search`; the `filterKey` includes the picked window so the auto-loading rope resets when the range changes. The full-text search box auto-disables (with a tooltip) when the active range exceeds the server's `MAX_FULLTEXT_HOURS = 24` cap — covers both the new 7d/30d presets and any custom range over a day, and prevents silent 400s
 - **`Last 7 days` and `Last 30 days` time-range presets in Log History**: complement the existing 15m/1h/6h/24h presets for forensic search. Server-side full-text search still capped at 24h via `MAX_FULLTEXT_HOURS`; the UI surfaces this as a disabled search box with tooltip rather than letting the request 400
