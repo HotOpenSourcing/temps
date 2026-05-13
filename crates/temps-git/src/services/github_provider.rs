@@ -337,6 +337,12 @@ impl GitHubProvider {
                 let app_id_param = octocrab::models::AppId(*app_id as u64);
                 let key = jsonwebtoken::EncodingKey::from_rsa_pem(private_key.as_bytes()).map_err(
                     |e| {
+                        error!(
+                            installation_id,
+                            app_id = *app_id,
+                            error = %e,
+                            "GitHub App scoped token mint failed: invalid private key"
+                        );
                         GitProviderError::InvalidConfiguration(format!(
                             "Invalid private key: {}",
                             e
@@ -345,6 +351,12 @@ impl GitHubProvider {
                 )?;
 
                 let jwt = octocrab::auth::create_jwt(app_id_param, &key).map_err(|e| {
+                    error!(
+                        installation_id,
+                        app_id = *app_id,
+                        error = %e,
+                        "GitHub App scoped token mint failed: JWT creation error"
+                    );
                     GitProviderError::ApiError(format!("Failed to create JWT: {}", e))
                 })?;
 
@@ -353,6 +365,12 @@ impl GitHubProvider {
                     .personal_token(jwt)
                     .build()
                     .map_err(|e| {
+                        error!(
+                            installation_id,
+                            app_id = *app_id,
+                            error = %e,
+                            "GitHub App scoped token mint failed: octocrab client build error"
+                        );
                         GitProviderError::ApiError(format!(
                             "Failed to create GitHub App client: {}",
                             e
@@ -365,17 +383,37 @@ impl GitHubProvider {
                     .installation(octocrab::models::InstallationId(installation_id as u64))
                     .await
                     .map_err(|e| {
+                        error!(
+                            installation_id,
+                            app_id = *app_id,
+                            error = %e,
+                            "GitHub App scoped token mint failed: cannot fetch installation \
+                             (check that app_id matches installation_id and the App is still \
+                             installed)"
+                        );
                         GitProviderError::ApiError(format!("Failed to get installation: {}", e))
                     })?;
 
                 let gh_access_tokens_url = reqwest::Url::parse(
                     installation.access_tokens_url.as_ref().ok_or_else(|| {
+                        error!(
+                            installation_id,
+                            app_id = *app_id,
+                            "GitHub App scoped token mint failed: installation response had no \
+                             access_tokens_url"
+                        );
                         GitProviderError::ApiError(
                             "No access_tokens_url in installation".to_string(),
                         )
                     })?,
                 )
                 .map_err(|e| {
+                    error!(
+                        installation_id,
+                        app_id = *app_id,
+                        error = %e,
+                        "GitHub App scoped token mint failed: malformed access_tokens_url"
+                    );
                     GitProviderError::ApiError(format!("Failed to parse access_tokens_url: {}", e))
                 })?;
 
@@ -387,6 +425,16 @@ impl GitHubProvider {
                     .post(gh_access_tokens_url.path(), Some(request))
                     .await
                     .map_err(|e| {
+                        error!(
+                            installation_id,
+                            app_id = *app_id,
+                            repos = ?request.repositories,
+                            perms = ?request.permissions,
+                            error = %e,
+                            "GitHub App scoped token mint failed: GitHub rejected access_tokens \
+                             request (common causes: requested repo not selected on the \
+                             installation, or App lacks the requested permission)"
+                        );
                         GitProviderError::ApiError(format!(
                             "Failed to create installation token: {}",
                             e
