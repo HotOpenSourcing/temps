@@ -118,6 +118,11 @@ pub struct EnvironmentResponse {
     pub name: String,
     pub slug: String,
     pub main_url: String,
+    /// The host label stored for this environment (e.g.
+    /// `myproject-production`). This is the prefix that is combined with the
+    /// platform's preview domain at request time to produce `main_url`. Edit
+    /// this via the rename-subdomain endpoint, not the full URL.
+    pub subdomain: String,
     pub current_deployment_id: Option<i32>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -168,7 +173,8 @@ impl From<temps_entities::environments::Model> for EnvironmentResponse {
             project_id: env.project_id,
             name: env.name,
             slug: env.slug,
-            main_url: env.subdomain,
+            main_url: env.subdomain.clone(),
+            subdomain: env.subdomain,
             current_deployment_id: env.current_deployment_id,
             created_at: env.created_at.timestamp_millis(),
             updated_at: env.updated_at.timestamp_millis(),

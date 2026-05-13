@@ -99,16 +99,6 @@ type SegmentFilters = {
   filter_city?: string
   filter_channel?: string
   filter_referrer?: string
-  filter_event?: string
-  filter_browser?: string
-  filter_os?: string
-  filter_device?: string
-  filter_language?: string
-  filter_utm_source?: string
-  filter_utm_medium?: string
-  filter_utm_campaign?: string
-  filter_utm_term?: string
-  filter_utm_content?: string
 }
 
 type SegmentFilterKey = keyof SegmentFilters
@@ -119,24 +109,14 @@ const FILTER_LABELS: Record<SegmentFilterKey, string> = {
   filter_city: 'City',
   filter_channel: 'Channel',
   filter_referrer: 'Referrer',
-  filter_event: 'Event',
-  filter_browser: 'Browser',
-  filter_os: 'OS',
-  filter_device: 'Device',
-  filter_language: 'Language',
-  filter_utm_source: 'UTM source',
-  filter_utm_medium: 'UTM medium',
-  filter_utm_campaign: 'UTM campaign',
-  filter_utm_term: 'UTM term',
-  filter_utm_content: 'UTM content',
 }
 
-/** Filter groups rendered inline. `advanced: true` groups stay hidden behind
- *  the "More filters" toggle so the default state is compact. */
+/** Filter groups rendered inline. Only visitor-row dimensions are supported
+ *  — see analytics service: event-row filters were dropped to keep the page
+ *  fast at high event volume. */
 const FILTER_GROUPS: {
   title: string
   keys: SegmentFilterKey[]
-  advanced?: boolean
 }[] = [
   {
     title: 'Location',
@@ -144,23 +124,7 @@ const FILTER_GROUPS: {
   },
   {
     title: 'Acquisition',
-    keys: ['filter_channel', 'filter_referrer', 'filter_event'],
-  },
-  {
-    title: 'Device',
-    keys: ['filter_browser', 'filter_os', 'filter_device', 'filter_language'],
-    advanced: true,
-  },
-  {
-    title: 'UTM',
-    keys: [
-      'filter_utm_source',
-      'filter_utm_medium',
-      'filter_utm_campaign',
-      'filter_utm_term',
-      'filter_utm_content',
-    ],
-    advanced: true,
+    keys: ['filter_channel', 'filter_referrer'],
   },
 ]
 
@@ -174,16 +138,6 @@ const FILTER_TO_FACET: Record<SegmentFilterKey, string> = {
   filter_city: 'city',
   filter_channel: 'channel',
   filter_referrer: 'referrer',
-  filter_event: 'event',
-  filter_browser: 'browser',
-  filter_os: 'os',
-  filter_device: 'device',
-  filter_language: 'language',
-  filter_utm_source: 'utm_source',
-  filter_utm_medium: 'utm_medium',
-  filter_utm_campaign: 'utm_campaign',
-  filter_utm_term: 'utm_term',
-  filter_utm_content: 'utm_content',
 }
 
 function activeFilterEntries(filters: SegmentFilters) {
@@ -202,7 +156,6 @@ export function VisitorsList({ project }: VisitorsListProps) {
   const [hideGhostVisitors, setHideGhostVisitors] = React.useState(true)
   const [filters, setFilters] = React.useState<SegmentFilters>({})
   const [filtersExpanded, setFiltersExpanded] = React.useState(false)
-  const [showAdvanced, setShowAdvanced] = React.useState(false)
 
   const updateFilter = React.useCallback(
     (key: SegmentFilterKey, value: string | undefined) => {
@@ -229,15 +182,6 @@ export function VisitorsList({ project }: VisitorsListProps) {
     () => activeFilterEntries(filters),
     [filters]
   )
-
-  // If any advanced filter is set, auto-show the advanced section.
-  React.useEffect(() => {
-    if (showAdvanced) return
-    const advancedKeys = FILTER_GROUPS.filter((g) => g.advanced).flatMap(
-      (g) => g.keys
-    )
-    if (advancedKeys.some((k) => filters[k])) setShowAdvanced(true)
-  }, [filters, showAdvanced])
 
   // Default date range: last 30 days
   const endDate = React.useMemo(() => {
@@ -431,41 +375,26 @@ export function VisitorsList({ project }: VisitorsListProps) {
                 )}
               </div>
 
-              {FILTER_GROUPS.filter((g) => !g.advanced || showAdvanced).map(
-                (group) => (
-                  <div key={group.title} className="mb-4 last:mb-0">
-                    <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-1.5">
-                      {group.title}
-                    </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2">
-                      {group.keys.map((key) => (
-                        <FacetCombobox
-                          key={key}
-                          label={FILTER_LABELS[key]}
-                          value={filters[key]}
-                          options={getFacetOptions(key)}
-                          onChange={(next) => updateFilter(key, next)}
-                          withFlag={FLAG_FILTERS.has(key)}
-                          loading={facetsLoading}
-                        />
-                      ))}
-                    </div>
+              {FILTER_GROUPS.map((group) => (
+                <div key={group.title} className="mb-4 last:mb-0">
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-1.5">
+                    {group.title}
                   </div>
-                )
-              )}
-
-              <button
-                type="button"
-                onClick={() => setShowAdvanced((v) => !v)}
-                className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
-              >
-                <ChevronDown
-                  className={`h-3 w-3 transition-transform ${
-                    showAdvanced ? 'rotate-180' : ''
-                  }`}
-                />
-                {showAdvanced ? 'Show fewer filters' : 'Show device + UTM filters'}
-              </button>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2">
+                    {group.keys.map((key) => (
+                      <FacetCombobox
+                        key={key}
+                        label={FILTER_LABELS[key]}
+                        value={filters[key]}
+                        options={getFacetOptions(key)}
+                        onChange={(next) => updateFilter(key, next)}
+                        withFlag={FLAG_FILTERS.has(key)}
+                        loading={facetsLoading}
+                      />
+                    ))}
+                  </div>
+                </div>
+              ))}
             </div>
           )}
           {isLoading ? (

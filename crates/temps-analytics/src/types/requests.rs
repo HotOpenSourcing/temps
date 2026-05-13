@@ -113,8 +113,9 @@ pub enum EventBreakdown {
 
 /// Optional segment filters for [`VisitorsListQuery`]. Each filter narrows the
 /// result set to visitors who match the given dimension value within the date
-/// range. Visitor-row filters resolve against `visitor` / `ip_geolocations`;
-/// event-row filters resolve via `EXISTS (SELECT 1 FROM events e …)`.
+/// range. All filters resolve against `visitor` / `ip_geolocations` — by
+/// design we never touch the events hypertable here so filtering stays fast
+/// regardless of event volume.
 #[derive(Debug, Deserialize, Clone, Default, ToSchema)]
 pub struct VisitorSegmentFilters {
     /// Geolocation country (matches `ip_geolocations.country`)
@@ -127,26 +128,6 @@ pub struct VisitorSegmentFilters {
     pub filter_channel: Option<String>,
     /// First-touch referrer hostname (matches `visitor.first_referrer_hostname`)
     pub filter_referrer: Option<String>,
-    /// Visitors who triggered this event_name in the range
-    pub filter_event: Option<String>,
-    /// Visitors with at least one event from this browser
-    pub filter_browser: Option<String>,
-    /// Visitors with at least one event from this operating system
-    pub filter_os: Option<String>,
-    /// Visitors with at least one event from this device type
-    pub filter_device: Option<String>,
-    /// Visitors with at least one event in this language
-    pub filter_language: Option<String>,
-    /// Visitors with at least one event from this UTM source
-    pub filter_utm_source: Option<String>,
-    /// Visitors with at least one event from this UTM medium
-    pub filter_utm_medium: Option<String>,
-    /// Visitors with at least one event from this UTM campaign
-    pub filter_utm_campaign: Option<String>,
-    /// Visitors with at least one event from this UTM term
-    pub filter_utm_term: Option<String>,
-    /// Visitors with at least one event from this UTM content
-    pub filter_utm_content: Option<String>,
 }
 
 #[derive(Deserialize, Clone, ToSchema)]

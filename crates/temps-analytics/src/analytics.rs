@@ -94,66 +94,6 @@ impl AnalyticsService {
             }
         }
 
-        let mut event_conditions: Vec<String> = Vec::new();
-        if let Some(event_name) = &segment.filter_event {
-            event_conditions.push(format!(
-                "COALESCE(e.event_name, e.event_type) = ${}",
-                param_index
-            ));
-            values.push(event_name.clone().into());
-            param_index += 1;
-        }
-        if let Some(browser) = &segment.filter_browser {
-            event_conditions.push(format!("e.browser = ${}", param_index));
-            values.push(browser.clone().into());
-            param_index += 1;
-        }
-        if let Some(os) = &segment.filter_os {
-            event_conditions.push(format!("e.operating_system = ${}", param_index));
-            values.push(os.clone().into());
-            param_index += 1;
-        }
-        if let Some(device) = &segment.filter_device {
-            event_conditions.push(format!("e.device_type = ${}", param_index));
-            values.push(device.clone().into());
-            param_index += 1;
-        }
-        if let Some(language) = &segment.filter_language {
-            event_conditions.push(format!("e.language = ${}", param_index));
-            values.push(language.clone().into());
-            param_index += 1;
-        }
-        for (column, value) in [
-            ("utm_source", &segment.filter_utm_source),
-            ("utm_medium", &segment.filter_utm_medium),
-            ("utm_campaign", &segment.filter_utm_campaign),
-            ("utm_term", &segment.filter_utm_term),
-            ("utm_content", &segment.filter_utm_content),
-        ] {
-            if let Some(v) = value {
-                event_conditions.push(format!("e.{} = ${}", column, param_index));
-                values.push(v.clone().into());
-                param_index += 1;
-            }
-        }
-
-        if !event_conditions.is_empty() {
-            event_conditions.push(format!("e.timestamp >= ${}", param_index));
-            values.push(start_date.into());
-            param_index += 1;
-            event_conditions.push(format!("e.timestamp <= ${}", param_index));
-            values.push(end_date.into());
-            param_index += 1;
-
-            where_conditions.push(format!(
-                "EXISTS (SELECT 1 FROM events e \
-                 WHERE e.visitor_id = v.id \
-                 AND e.project_id = v.project_id \
-                 AND {})",
-                event_conditions.join(" AND ")
-            ));
-        }
-
         (
             where_conditions.join(" AND "),
             values,
@@ -271,90 +211,6 @@ impl AnalyticsService {
                 })
                 .collect())
         }
-    }
-
-    /// Aggregate an event-row dimension (browser/os/device/language/event/utm_*).
-    /// Counts distinct visitor IDs from the events hypertable joined to the
-    /// (filtered) visitor pool.
-    async fn facet_event_dimension(
-        &self,
-        value_expr: &str,
-        scope: &FacetScope<'_>,
-        segment: &crate::types::requests::VisitorSegmentFilters,
-    ) -> Result<Vec<VisitorFacetValue>, AnalyticsError> {
-        let (where_clause, mut values, next_index, needs_geo_join) =
-            Self::build_visitor_segment_predicates(
-                scope.start_date,
-                scope.end_date,
-                scope.project_id,
-                scope.environment_id,
-                scope.include_crawlers,
-                scope.has_activity_only,
-                segment,
-            );
-
-        let geo_join = if needs_geo_join {
-            "LEFT JOIN ip_geolocations ig ON v.ip_address_id = ig.id"
-        } else {
-            ""
-        };
-
-        // Bind start/end again for the events constraint.
-        let event_start_idx = next_index;
-        values.push(scope.start_date.into());
-        let event_end_idx = next_index + 1;
-        values.push(scope.end_date.into());
-        let limit_idx = next_index + 2;
-        values.push((scope.limit as i64).into());
-
-        let sql = format!(
-            r#"
-            SELECT {value} AS value, COUNT(DISTINCT e.visitor_id) AS count
-            FROM events e
-            JOIN visitor v ON v.id = e.visitor_id
-            {geo_join}
-            WHERE {where_clause}
-              AND e.project_id = v.project_id
-              AND e.timestamp >= ${event_start_idx}
-              AND e.timestamp <= ${event_end_idx}
-              AND {value} IS NOT NULL
-              AND {value} <> ''
-            GROUP BY {value}
-            ORDER BY count DESC, value ASC
-            LIMIT ${limit_idx}
-            "#,
-            value = value_expr,
-            geo_join = geo_join,
-            where_clause = where_clause,
-            event_start_idx = event_start_idx,
-            event_end_idx = event_end_idx,
-            limit_idx = limit_idx,
-        );
-
-        #[derive(FromQueryResult)]
-        struct Row {
-            value: Option<String>,
-            count: i64,
-        }
-
-        let rows = Row::find_by_statement(Statement::from_sql_and_values(
-            DatabaseBackend::Postgres,
-            &sql,
-            values,
-        ))
-        .all(self.db.as_ref())
-        .await?;
-
-        Ok(rows
-            .into_iter()
-            .filter_map(|r| {
-                r.value.map(|v| VisitorFacetValue {
-                    value: v,
-                    code: None,
-                    count: r.count,
-                })
-            })
-            .collect())
     }
 }
 
@@ -663,74 +519,6 @@ impl Analytics for AnalyticsService {
             }
         }
 
-        // Event-side filters bundled into one EXISTS subquery so we touch the
-        // events hypertable once per visitor row (uses idx_events_visitor_*).
-        let mut event_conditions: Vec<String> = Vec::new();
-        if let Some(event_name) = &segment.filter_event {
-            event_conditions.push(format!(
-                "COALESCE(e.event_name, e.event_type) = ${}",
-                param_index
-            ));
-            values.push(event_name.clone().into());
-            param_index += 1;
-        }
-        if let Some(browser) = &segment.filter_browser {
-            event_conditions.push(format!("e.browser = ${}", param_index));
-            values.push(browser.clone().into());
-            param_index += 1;
-        }
-        if let Some(os) = &segment.filter_os {
-            event_conditions.push(format!("e.operating_system = ${}", param_index));
-            values.push(os.clone().into());
-            param_index += 1;
-        }
-        if let Some(device) = &segment.filter_device {
-            event_conditions.push(format!("e.device_type = ${}", param_index));
-            values.push(device.clone().into());
-            param_index += 1;
-        }
-        if let Some(language) = &segment.filter_language {
-            event_conditions.push(format!("e.language = ${}", param_index));
-            values.push(language.clone().into());
-            param_index += 1;
-        }
-        for (column, value) in [
-            ("utm_source", &segment.filter_utm_source),
-            ("utm_medium", &segment.filter_utm_medium),
-            ("utm_campaign", &segment.filter_utm_campaign),
-            ("utm_term", &segment.filter_utm_term),
-            ("utm_content", &segment.filter_utm_content),
-        ] {
-            if let Some(v) = value {
-                event_conditions.push(format!("e.{} = ${}", column, param_index));
-                values.push(v.clone().into());
-                param_index += 1;
-            }
-        }
-
-        if !event_conditions.is_empty() {
-            // Constrain the EXISTS to the same date window so a visitor only
-            // qualifies if they had a matching event in the chosen range.
-            event_conditions.push(format!("e.timestamp >= ${}", param_index));
-            values.push(start_date.into());
-            param_index += 1;
-            event_conditions.push(format!("e.timestamp <= ${}", param_index));
-            values.push(end_date.into());
-            param_index += 1;
-
-            // Including `e.project_id = v.project_id` lets the planner prune
-            // hypertable chunks by project before the visitor-id seek, and
-            // short-circuits via the events composite indexes on
-            // (project_id, visitor_id, timestamp).
-            where_conditions.push(format!(
-                "EXISTS (SELECT 1 FROM events e \
-                 WHERE e.visitor_id = v.id \
-                 AND e.project_id = v.project_id \
-                 AND {})",
-                event_conditions.join(" AND ")
-            ));
-        }
-
         let limit_val = limit.unwrap_or(50).min(100);
         let offset_val = offset.unwrap_or(0);
 
@@ -909,18 +697,15 @@ impl Analytics for AnalyticsService {
     ) -> Result<VisitorFacets, AnalyticsError> {
         let per_facet_limit = per_facet_limit.unwrap_or(50).clamp(1, 200);
 
-        // We compute each dimension by running an aggregation query against
-        // the visitor pool filtered by *all other* segment filters. That keeps
-        // a selected dimension from collapsing its own dropdown to one option.
+        // Every dimension aggregates the visitor pool with all *other*
+        // segment filters applied, so a selected dimension doesn't collapse
+        // its own dropdown to a single option.
         //
-        // Two query shapes:
-        //   - Visitor-row dimensions (country/region/city/channel/referrer)
-        //     aggregate directly off `visitor` + `ip_geolocations` and apply
-        //     event-side filters via an EXISTS subquery.
-        //   - Event-row dimensions (browser/os/device/language/event/utm_*)
-        //     aggregate distinct visitor counts from `events` itself,
-        //     constrained to the same date window and project, with the
-        //     visitor-row filters applied via a JOIN against `visitor`.
+        // Only visitor-row dimensions (country/region/city/channel/referrer)
+        // are supported on purpose: they aggregate directly off `visitor` +
+        // `ip_geolocations`, which are small relative to events and have
+        // proper indexes. Adding event-row dimensions would pull in the
+        // events hypertable and reintroduce 100+ ms of per-query cost.
 
         macro_rules! without {
             ($field:ident) => {{
@@ -941,109 +726,56 @@ impl Analytics for AnalyticsService {
             _marker: std::marker::PhantomData,
         };
 
-        let mut facets = VisitorFacets {
-            country: self
-                .facet_visitor_dimension(
-                    "ig.country",
-                    Some("ig.country_code"),
-                    FacetGeoMode::Always,
-                    &scope,
-                    &without!(filter_country),
-                )
-                .await?,
-            region: self
-                .facet_visitor_dimension(
-                    "ig.region",
-                    None,
-                    FacetGeoMode::Always,
-                    &scope,
-                    &without!(filter_region),
-                )
-                .await?,
-            city: self
-                .facet_visitor_dimension(
-                    "ig.city",
-                    None,
-                    FacetGeoMode::Always,
-                    &scope,
-                    &without!(filter_city),
-                )
-                .await?,
-            channel: self
-                .facet_visitor_dimension(
-                    "v.first_channel",
-                    None,
-                    FacetGeoMode::IfFiltered,
-                    &scope,
-                    &without!(filter_channel),
-                )
-                .await?,
-            // Referrer: store NULL as the literal "Direct" so the UI doesn't
-            // have to special-case empty rows.
-            referrer: self
-                .facet_visitor_dimension(
-                    "COALESCE(v.first_referrer_hostname, 'Direct')",
-                    None,
-                    FacetGeoMode::IfFiltered,
-                    &scope,
-                    &without!(filter_referrer),
-                )
-                .await?,
-            event: self
-                .facet_event_dimension(
-                    "COALESCE(e.event_name, e.event_type)",
-                    &scope,
-                    &without!(filter_event),
-                )
-                .await?,
-            browser: self
-                .facet_event_dimension("e.browser", &scope, &without!(filter_browser))
-                .await?,
-            os: self
-                .facet_event_dimension("e.operating_system", &scope, &without!(filter_os))
-                .await?,
-            device: self
-                .facet_event_dimension("e.device_type", &scope, &without!(filter_device))
-                .await?,
-            language: self
-                .facet_event_dimension("e.language", &scope, &without!(filter_language))
-                .await?,
-            ..Default::default()
-        };
+        // Fan the 5 visitor-row queries out concurrently — each is fast
+        // (~5–15 ms) but running them in parallel still meaningfully cuts
+        // wall-clock vs awaiting sequentially.
+        let seg_country = without!(filter_country);
+        let seg_region = without!(filter_region);
+        let seg_city = without!(filter_city);
+        let seg_channel = without!(filter_channel);
+        let seg_referrer = without!(filter_referrer);
 
-        for (column, target, segment_excluded) in [
-            (
-                "e.utm_source",
-                &mut facets.utm_source,
-                without!(filter_utm_source),
+        let (country, region, city, channel, referrer) = tokio::try_join!(
+            self.facet_visitor_dimension(
+                "ig.country",
+                Some("ig.country_code"),
+                FacetGeoMode::Always,
+                &scope,
+                &seg_country,
             ),
-            (
-                "e.utm_medium",
-                &mut facets.utm_medium,
-                without!(filter_utm_medium),
+            self.facet_visitor_dimension(
+                "ig.region",
+                None,
+                FacetGeoMode::Always,
+                &scope,
+                &seg_region,
             ),
-            (
-                "e.utm_campaign",
-                &mut facets.utm_campaign,
-                without!(filter_utm_campaign),
+            self.facet_visitor_dimension("ig.city", None, FacetGeoMode::Always, &scope, &seg_city,),
+            self.facet_visitor_dimension(
+                "v.first_channel",
+                None,
+                FacetGeoMode::IfFiltered,
+                &scope,
+                &seg_channel,
             ),
-            (
-                "e.utm_term",
-                &mut facets.utm_term,
-                without!(filter_utm_term),
+            // Referrer: NULL means "Direct" — the SQL collapses it to that
+            // literal so the UI doesn't have to special-case empty rows.
+            self.facet_visitor_dimension(
+                "COALESCE(v.first_referrer_hostname, 'Direct')",
+                None,
+                FacetGeoMode::IfFiltered,
+                &scope,
+                &seg_referrer,
             ),
-            (
-                "e.utm_content",
-                &mut facets.utm_content,
-                without!(filter_utm_content),
-            ),
-        ] {
-            *target = self
-                .facet_event_dimension(column, &scope, &segment_excluded)
-                .await?;
-        }
+        )?;
 
-        Ok(facets)
+        Ok(VisitorFacets {
+            country,
+            region,
+            city,
+            channel,
+            referrer,
+        })
     }
 
     /// Get visitor basic info from database

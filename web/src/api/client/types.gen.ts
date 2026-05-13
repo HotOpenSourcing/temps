@@ -4203,6 +4203,13 @@ export type EnvironmentResponse = {
      */
     sleeping: boolean;
     slug: string;
+    /**
+     * The host label stored for this environment (e.g.
+     * `myproject-production`). This is the prefix that is combined with the
+     * platform's preview domain at request time to produce `main_url`. Edit
+     * this via the rename-subdomain endpoint, not the full URL.
+     */
+    subdomain: string;
     updated_at: number;
 };
 
@@ -13428,21 +13435,11 @@ export type VisitorFacetValue = {
  * alternatives when a value is already selected).
  */
 export type VisitorFacets = {
-    browser: Array<VisitorFacetValue>;
     channel: Array<VisitorFacetValue>;
     city: Array<VisitorFacetValue>;
     country: Array<VisitorFacetValue>;
-    device: Array<VisitorFacetValue>;
-    event: Array<VisitorFacetValue>;
-    language: Array<VisitorFacetValue>;
-    os: Array<VisitorFacetValue>;
     referrer: Array<VisitorFacetValue>;
     region: Array<VisitorFacetValue>;
-    utm_campaign: Array<VisitorFacetValue>;
-    utm_content: Array<VisitorFacetValue>;
-    utm_medium: Array<VisitorFacetValue>;
-    utm_source: Array<VisitorFacetValue>;
-    utm_term: Array<VisitorFacetValue>;
 };
 
 /**
@@ -13550,14 +13547,11 @@ export type VisitorRecord = {
 /**
  * Optional segment filters for [`VisitorsListQuery`]. Each filter narrows the
  * result set to visitors who match the given dimension value within the date
- * range. Visitor-row filters resolve against `visitor` / `ip_geolocations`;
- * event-row filters resolve via `EXISTS (SELECT 1 FROM events e …)`.
+ * range. All filters resolve against `visitor` / `ip_geolocations` — by
+ * design we never touch the events hypertable here so filtering stays fast
+ * regardless of event volume.
  */
 export type VisitorSegmentFilters = {
-    /**
-     * Visitors with at least one event from this browser
-     */
-    filter_browser?: string | null;
     /**
      * First-touch marketing channel (matches `visitor.first_channel`)
      */
@@ -13571,22 +13565,6 @@ export type VisitorSegmentFilters = {
      */
     filter_country?: string | null;
     /**
-     * Visitors with at least one event from this device type
-     */
-    filter_device?: string | null;
-    /**
-     * Visitors who triggered this event_name in the range
-     */
-    filter_event?: string | null;
-    /**
-     * Visitors with at least one event in this language
-     */
-    filter_language?: string | null;
-    /**
-     * Visitors with at least one event from this operating system
-     */
-    filter_os?: string | null;
-    /**
      * First-touch referrer hostname (matches `visitor.first_referrer_hostname`)
      */
     filter_referrer?: string | null;
@@ -13594,26 +13572,6 @@ export type VisitorSegmentFilters = {
      * Geolocation region (matches `ip_geolocations.region`)
      */
     filter_region?: string | null;
-    /**
-     * Visitors with at least one event from this UTM campaign
-     */
-    filter_utm_campaign?: string | null;
-    /**
-     * Visitors with at least one event from this UTM content
-     */
-    filter_utm_content?: string | null;
-    /**
-     * Visitors with at least one event from this UTM medium
-     */
-    filter_utm_medium?: string | null;
-    /**
-     * Visitors with at least one event from this UTM source
-     */
-    filter_utm_source?: string | null;
-    /**
-     * Visitors with at least one event from this UTM term
-     */
-    filter_utm_term?: string | null;
 };
 
 export type VisitorSessionsQuery = {
@@ -16069,46 +16027,6 @@ export type GetVisitorFacetsData = {
          * First-touch referrer hostname (use 'Direct' for null)
          */
         filter_referrer?: string;
-        /**
-         * Event name
-         */
-        filter_event?: string;
-        /**
-         * Event-side browser
-         */
-        filter_browser?: string;
-        /**
-         * Event-side operating system
-         */
-        filter_os?: string;
-        /**
-         * Event-side device type
-         */
-        filter_device?: string;
-        /**
-         * Event-side language
-         */
-        filter_language?: string;
-        /**
-         * Event-side UTM source
-         */
-        filter_utm_source?: string;
-        /**
-         * Event-side UTM medium
-         */
-        filter_utm_medium?: string;
-        /**
-         * Event-side UTM campaign
-         */
-        filter_utm_campaign?: string;
-        /**
-         * Event-side UTM term
-         */
-        filter_utm_term?: string;
-        /**
-         * Event-side UTM content
-         */
-        filter_utm_content?: string;
     };
     url: '/analytics/visitor-facets';
 };
@@ -16189,46 +16107,6 @@ export type GetVisitorsData = {
          * First-touch referrer hostname (use 'Direct' for null)
          */
         filter_referrer?: string;
-        /**
-         * Event name (custom or system)
-         */
-        filter_event?: string;
-        /**
-         * Event-side browser
-         */
-        filter_browser?: string;
-        /**
-         * Event-side operating system
-         */
-        filter_os?: string;
-        /**
-         * Event-side device type
-         */
-        filter_device?: string;
-        /**
-         * Event-side language
-         */
-        filter_language?: string;
-        /**
-         * Event-side UTM source
-         */
-        filter_utm_source?: string;
-        /**
-         * Event-side UTM medium
-         */
-        filter_utm_medium?: string;
-        /**
-         * Event-side UTM campaign
-         */
-        filter_utm_campaign?: string;
-        /**
-         * Event-side UTM term
-         */
-        filter_utm_term?: string;
-        /**
-         * Event-side UTM content
-         */
-        filter_utm_content?: string;
     };
     url: '/analytics/visitors';
 };
