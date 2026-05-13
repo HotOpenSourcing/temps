@@ -385,3 +385,22 @@ pub struct PageFlowQuery {
     /// Minimum views for drop-off analysis (default: 5)
     pub min_views_for_dropoff: Option<i32>,
 }
+
+/// Query parameters for the visitor-facets endpoint. Mirrors the shape of
+/// `VisitorsListQuery` so the same segment filters apply — facet counts are
+/// always computed against the *currently filtered* visitor pool, minus the
+/// dimension being aggregated.
+#[derive(Deserialize, Clone, ToSchema)]
+pub struct VisitorFacetsQuery {
+    pub start_date: DateTime,
+    pub end_date: DateTime,
+    pub project_id: i32,
+    pub environment_id: Option<i32>,
+    pub include_crawlers: Option<bool>,
+    pub has_activity_only: Option<bool>,
+    /// Maximum number of values returned per dimension (default: 50, max: 200).
+    pub per_facet_limit: Option<i32>,
+
+    #[serde(flatten)]
+    pub segment: VisitorSegmentFilters,
+}

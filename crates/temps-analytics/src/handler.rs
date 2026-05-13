@@ -28,6 +28,7 @@ pub struct AppState {
         get_event_detail,
         get_event_visitors,
         get_visitors,
+        get_visitor_facets,
         get_visitor_details,
         get_visitor_info,
         get_visitor_stats,
@@ -105,6 +106,9 @@ pub struct AppState {
         EventsCountQuery,
         VisitorsListQuery,
         VisitorSegmentFilters,
+        VisitorFacetsQuery,
+        VisitorFacets,
+        VisitorFacetValue,
         VisitorSessionsQuery,
         SessionDetailsQuery,
         SessionEventsQuery,
@@ -172,6 +176,7 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         .route("/analytics/event-detail", get(get_event_detail))
         .route("/analytics/event-visitors", get(get_event_visitors))
         .route("/analytics/visitors", get(get_visitors))
+        .route("/analytics/visitor-facets", get(get_visitor_facets))
         .route("/analytics/visitors/{visitor_id}", get(get_visitor_details))
         .route(
             "/analytics/visitors/{visitor_id}/info",
@@ -343,6 +348,73 @@ pub async fn get_visitors(
         .await
     {
         Ok(visitors) => Ok(Json(visitors)),
+        Err(e) => Err(handle_analytics_error(e)),
+    }
+}
+
+/// Get filter dropdown contents for the visitors page. Returns the top
+/// values per dimension with distinct visitor counts so the UI can render
+/// "Country — 1,234 visitors" rows. Each dimension is computed against the
+/// segment minus its own filter, so a selected value never collapses its
+/// own dropdown.
+#[utoipa::path(
+    tag = "Analytics",
+    get,
+    path = "/analytics/visitor-facets",
+    params(
+        ("start_date" = String, Query, description = "Start date in format YYYY-MM-DD HH:MM:SS"),
+        ("end_date" = String, Query, description = "End date in format YYYY-MM-DD HH:MM:SS"),
+        ("project_id" = i32, Query, description = "Project ID or slug"),
+        ("environment_id" = Option<i32>, Query, description = "Environment ID (optional)"),
+        ("include_crawlers" = Option<bool>, Query, description = "Include crawlers (default: false)"),
+        ("has_activity_only" = Option<bool>, Query, description = "Hide ghost visitors (default: true)"),
+        ("per_facet_limit" = Option<i32>, Query, description = "Top N values per dimension (default: 50, max: 200)"),
+        ("filter_country" = Option<String>, Query, description = "Geolocation country"),
+        ("filter_region" = Option<String>, Query, description = "Geolocation region"),
+        ("filter_city" = Option<String>, Query, description = "Geolocation city"),
+        ("filter_channel" = Option<String>, Query, description = "First-touch channel"),
+        ("filter_referrer" = Option<String>, Query, description = "First-touch referrer hostname (use 'Direct' for null)"),
+        ("filter_event" = Option<String>, Query, description = "Event name"),
+        ("filter_browser" = Option<String>, Query, description = "Event-side browser"),
+        ("filter_os" = Option<String>, Query, description = "Event-side operating system"),
+        ("filter_device" = Option<String>, Query, description = "Event-side device type"),
+        ("filter_language" = Option<String>, Query, description = "Event-side language"),
+        ("filter_utm_source" = Option<String>, Query, description = "Event-side UTM source"),
+        ("filter_utm_medium" = Option<String>, Query, description = "Event-side UTM medium"),
+        ("filter_utm_campaign" = Option<String>, Query, description = "Event-side UTM campaign"),
+        ("filter_utm_term" = Option<String>, Query, description = "Event-side UTM term"),
+        ("filter_utm_content" = Option<String>, Query, description = "Event-side UTM content"),
+    ),
+    responses(
+        (status = 200, description = "Top values per dimension", body = VisitorFacets),
+        (status = 400, description = "Invalid date format or project not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn get_visitor_facets(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    Query(query): Query<VisitorFacetsQuery>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, AnalyticsRead);
+    let project_id = query.project_id;
+
+    match app_state
+        .analytics_service
+        .get_visitor_facets(
+            query.start_date.into(),
+            query.end_date.into(),
+            project_id,
+            query.environment_id,
+            query.include_crawlers,
+            Some(query.has_activity_only.unwrap_or(true)),
+            query.per_facet_limit,
+            query.segment,
+        )
+        .await
+    {
+        Ok(facets) => Ok(Json(facets)),
         Err(e) => Err(handle_analytics_error(e)),
     }
 }

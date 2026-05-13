@@ -12620,6 +12620,23 @@ export type UpdateEnvironmentSettingsRequest = {
     wake_timeout_seconds?: number | null;
 };
 
+/**
+ * Request to rename an environment's auto-managed subdomain.
+ *
+ * The subdomain is the host label inserted in front of the platform's
+ * preview domain (e.g. `myapp` in `myapp.preview.temps.sh`). Renaming
+ * replaces the previous subdomain entirely — the old hostname stops
+ * resolving immediately after this request succeeds.
+ */
+export type UpdateEnvironmentSubdomainRequest = {
+    /**
+     * New subdomain label. Must be a DNS-safe slug (lowercase letters,
+     * digits, and hyphens, 1-63 characters). The value is slugified
+     * server-side, so casing and disallowed characters are normalized.
+     */
+    subdomain: string;
+};
+
 export type UpdateEnvironmentVariableRequest = {
     environment_ids: Array<number>;
     include_in_preview?: boolean;
@@ -13379,6 +13396,72 @@ export type VisitorDetails = {
     timezone?: string | null;
     user_agent?: string | null;
     visitor_id: string;
+};
+
+/**
+ * A single facet value with its visitor count. Used to populate filter
+ * dropdowns on the visitors page (e.g. "Germany — 1,234 visitors").
+ */
+export type VisitorFacetValue = {
+    /**
+     * Optional secondary code for the value. Currently only populated for
+     * the `country` facet, where it carries the 2-letter ISO country code
+     * so the UI can render a flag without re-mapping.
+     */
+    code?: string | null;
+    /**
+     * Distinct visitor count matching this value in the current segment.
+     */
+    count: number;
+    /**
+     * The dimension value (e.g. "United States", "Chrome", "google.com").
+     * `None` is encoded as the literal string "Direct" for referrer and as
+     * the empty string for the rest.
+     */
+    value: string;
+};
+
+/**
+ * All filter dropdown contents in one response. Each list is the top N
+ * values for that dimension within the current date range and segment
+ * (excluding the dimension being queried so the dropdown still shows
+ * alternatives when a value is already selected).
+ */
+export type VisitorFacets = {
+    browser: Array<VisitorFacetValue>;
+    channel: Array<VisitorFacetValue>;
+    city: Array<VisitorFacetValue>;
+    country: Array<VisitorFacetValue>;
+    device: Array<VisitorFacetValue>;
+    event: Array<VisitorFacetValue>;
+    language: Array<VisitorFacetValue>;
+    os: Array<VisitorFacetValue>;
+    referrer: Array<VisitorFacetValue>;
+    region: Array<VisitorFacetValue>;
+    utm_campaign: Array<VisitorFacetValue>;
+    utm_content: Array<VisitorFacetValue>;
+    utm_medium: Array<VisitorFacetValue>;
+    utm_source: Array<VisitorFacetValue>;
+    utm_term: Array<VisitorFacetValue>;
+};
+
+/**
+ * Query parameters for the visitor-facets endpoint. Mirrors the shape of
+ * `VisitorsListQuery` so the same segment filters apply — facet counts are
+ * always computed against the *currently filtered* visitor pool, minus the
+ * dimension being aggregated.
+ */
+export type VisitorFacetsQuery = VisitorSegmentFilters & {
+    end_date: string;
+    environment_id?: number | null;
+    has_activity_only?: boolean | null;
+    include_crawlers?: boolean | null;
+    /**
+     * Maximum number of values returned per dimension (default: 50, max: 200).
+     */
+    per_facet_limit?: number | null;
+    project_id: number;
+    start_date: string;
 };
 
 export type VisitorInfo = {
@@ -15933,6 +16016,122 @@ export type GetSessionLogsResponses = {
 };
 
 export type GetSessionLogsResponse = GetSessionLogsResponses[keyof GetSessionLogsResponses];
+
+export type GetVisitorFacetsData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Start date in format YYYY-MM-DD HH:MM:SS
+         */
+        start_date: string;
+        /**
+         * End date in format YYYY-MM-DD HH:MM:SS
+         */
+        end_date: string;
+        /**
+         * Project ID or slug
+         */
+        project_id: number;
+        /**
+         * Environment ID (optional)
+         */
+        environment_id?: number;
+        /**
+         * Include crawlers (default: false)
+         */
+        include_crawlers?: boolean;
+        /**
+         * Hide ghost visitors (default: true)
+         */
+        has_activity_only?: boolean;
+        /**
+         * Top N values per dimension (default: 50, max: 200)
+         */
+        per_facet_limit?: number;
+        /**
+         * Geolocation country
+         */
+        filter_country?: string;
+        /**
+         * Geolocation region
+         */
+        filter_region?: string;
+        /**
+         * Geolocation city
+         */
+        filter_city?: string;
+        /**
+         * First-touch channel
+         */
+        filter_channel?: string;
+        /**
+         * First-touch referrer hostname (use 'Direct' for null)
+         */
+        filter_referrer?: string;
+        /**
+         * Event name
+         */
+        filter_event?: string;
+        /**
+         * Event-side browser
+         */
+        filter_browser?: string;
+        /**
+         * Event-side operating system
+         */
+        filter_os?: string;
+        /**
+         * Event-side device type
+         */
+        filter_device?: string;
+        /**
+         * Event-side language
+         */
+        filter_language?: string;
+        /**
+         * Event-side UTM source
+         */
+        filter_utm_source?: string;
+        /**
+         * Event-side UTM medium
+         */
+        filter_utm_medium?: string;
+        /**
+         * Event-side UTM campaign
+         */
+        filter_utm_campaign?: string;
+        /**
+         * Event-side UTM term
+         */
+        filter_utm_term?: string;
+        /**
+         * Event-side UTM content
+         */
+        filter_utm_content?: string;
+    };
+    url: '/analytics/visitor-facets';
+};
+
+export type GetVisitorFacetsErrors = {
+    /**
+     * Invalid date format or project not found
+     */
+    400: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GetVisitorFacetsResponses = {
+    /**
+     * Top values per dimension
+     */
+    200: VisitorFacets;
+};
+
+export type GetVisitorFacetsResponse = GetVisitorFacetsResponses[keyof GetVisitorFacetsResponses];
 
 export type GetVisitorsData = {
     body?: never;
@@ -29994,6 +30193,46 @@ export type SleepEnvironmentResponses = {
 };
 
 export type SleepEnvironmentResponse = SleepEnvironmentResponses[keyof SleepEnvironmentResponses];
+
+export type UpdateEnvironmentSubdomainData = {
+    body: UpdateEnvironmentSubdomainRequest;
+    path: {
+        /**
+         * Project ID or slug
+         */
+        project_id: number;
+        /**
+         * Environment ID or slug
+         */
+        env_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/environments/{env_id}/subdomain';
+};
+
+export type UpdateEnvironmentSubdomainErrors = {
+    /**
+     * Invalid subdomain or conflict with another environment
+     */
+    400: unknown;
+    /**
+     * Project or environment not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type UpdateEnvironmentSubdomainResponses = {
+    /**
+     * Subdomain updated successfully
+     */
+    200: EnvironmentResponse;
+};
+
+export type UpdateEnvironmentSubdomainResponse = UpdateEnvironmentSubdomainResponses[keyof UpdateEnvironmentSubdomainResponses];
 
 export type TeardownEnvironmentData = {
     body?: never;

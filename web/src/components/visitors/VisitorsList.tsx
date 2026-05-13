@@ -1,4 +1,7 @@
-import { getVisitorsOptions } from '@/api/client/@tanstack/react-query.gen'
+import {
+  getVisitorFacetsOptions,
+  getVisitorsOptions,
+} from '@/api/client/@tanstack/react-query.gen'
 import { ProjectResponse, VisitorInfo } from '@/api/client/types.gen'
 import { Button } from '@/components/ui/button'
 import {
@@ -40,11 +43,15 @@ import {
   User,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
   ExternalLink,
+  SlidersHorizontal,
+  X,
 } from 'lucide-react'
 import * as React from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Skeleton } from '@/components/ui/skeleton'
+import { FacetCombobox, type FacetOption } from './FacetCombobox'
 
 interface VisitorsListProps {
   project: ProjectResponse
@@ -57,14 +64,6 @@ function countryCodeToFlag(countryCode: string | null | undefined): string {
     .split('')
     .map((char) => 127397 + char.charCodeAt(0))
   return String.fromCodePoint(...codePoints)
-}
-
-function formatLocation(visitor: VisitorInfo): string {
-  const parts: string[] = []
-  if (visitor.city) parts.push(visitor.city)
-  if (visitor.region && visitor.region !== visitor.city) parts.push(visitor.region)
-  if (visitor.country) parts.push(visitor.country)
-  return parts.join(', ') || 'Unknown'
 }
 
 function getBrowserInfo(userAgent: string): { name: string; icon: string } {
@@ -94,6 +93,105 @@ function getOSName(userAgent: string): string {
   return 'Unknown'
 }
 
+type SegmentFilters = {
+  filter_country?: string
+  filter_region?: string
+  filter_city?: string
+  filter_channel?: string
+  filter_referrer?: string
+  filter_event?: string
+  filter_browser?: string
+  filter_os?: string
+  filter_device?: string
+  filter_language?: string
+  filter_utm_source?: string
+  filter_utm_medium?: string
+  filter_utm_campaign?: string
+  filter_utm_term?: string
+  filter_utm_content?: string
+}
+
+type SegmentFilterKey = keyof SegmentFilters
+
+const FILTER_LABELS: Record<SegmentFilterKey, string> = {
+  filter_country: 'Country',
+  filter_region: 'Region',
+  filter_city: 'City',
+  filter_channel: 'Channel',
+  filter_referrer: 'Referrer',
+  filter_event: 'Event',
+  filter_browser: 'Browser',
+  filter_os: 'OS',
+  filter_device: 'Device',
+  filter_language: 'Language',
+  filter_utm_source: 'UTM source',
+  filter_utm_medium: 'UTM medium',
+  filter_utm_campaign: 'UTM campaign',
+  filter_utm_term: 'UTM term',
+  filter_utm_content: 'UTM content',
+}
+
+/** Filter groups rendered inline. `advanced: true` groups stay hidden behind
+ *  the "More filters" toggle so the default state is compact. */
+const FILTER_GROUPS: {
+  title: string
+  keys: SegmentFilterKey[]
+  advanced?: boolean
+}[] = [
+  {
+    title: 'Location',
+    keys: ['filter_country', 'filter_region', 'filter_city'],
+  },
+  {
+    title: 'Acquisition',
+    keys: ['filter_channel', 'filter_referrer', 'filter_event'],
+  },
+  {
+    title: 'Device',
+    keys: ['filter_browser', 'filter_os', 'filter_device', 'filter_language'],
+    advanced: true,
+  },
+  {
+    title: 'UTM',
+    keys: [
+      'filter_utm_source',
+      'filter_utm_medium',
+      'filter_utm_campaign',
+      'filter_utm_term',
+      'filter_utm_content',
+    ],
+    advanced: true,
+  },
+]
+
+/** Filters that should render a country flag next to each option. */
+const FLAG_FILTERS = new Set<SegmentFilterKey>(['filter_country'])
+
+/** Map each filter key to the facet response field on the API. */
+const FILTER_TO_FACET: Record<SegmentFilterKey, string> = {
+  filter_country: 'country',
+  filter_region: 'region',
+  filter_city: 'city',
+  filter_channel: 'channel',
+  filter_referrer: 'referrer',
+  filter_event: 'event',
+  filter_browser: 'browser',
+  filter_os: 'os',
+  filter_device: 'device',
+  filter_language: 'language',
+  filter_utm_source: 'utm_source',
+  filter_utm_medium: 'utm_medium',
+  filter_utm_campaign: 'utm_campaign',
+  filter_utm_term: 'utm_term',
+  filter_utm_content: 'utm_content',
+}
+
+function activeFilterEntries(filters: SegmentFilters) {
+  return (Object.entries(filters) as [SegmentFilterKey, string | undefined][])
+    .filter(([, value]) => value && value.trim() !== '')
+    .map(([key, value]) => [key, value as string] as const)
+}
+
 export function VisitorsList({ project }: VisitorsListProps) {
   const navigate = useNavigate()
   const [page, setPage] = React.useState(1)
@@ -102,6 +200,44 @@ export function VisitorsList({ project }: VisitorsListProps) {
     'all' | 'humans' | 'crawlers'
   >('all')
   const [hideGhostVisitors, setHideGhostVisitors] = React.useState(true)
+  const [filters, setFilters] = React.useState<SegmentFilters>({})
+  const [filtersExpanded, setFiltersExpanded] = React.useState(false)
+  const [showAdvanced, setShowAdvanced] = React.useState(false)
+
+  const updateFilter = React.useCallback(
+    (key: SegmentFilterKey, value: string | undefined) => {
+      setPage(1)
+      setFilters((prev) => {
+        const next = { ...prev }
+        if (!value || value.trim() === '') {
+          delete next[key]
+        } else {
+          next[key] = value.trim()
+        }
+        return next
+      })
+    },
+    []
+  )
+
+  const clearFilters = React.useCallback(() => {
+    setPage(1)
+    setFilters({})
+  }, [])
+
+  const activeFilters = React.useMemo(
+    () => activeFilterEntries(filters),
+    [filters]
+  )
+
+  // If any advanced filter is set, auto-show the advanced section.
+  React.useEffect(() => {
+    if (showAdvanced) return
+    const advancedKeys = FILTER_GROUPS.filter((g) => g.advanced).flatMap(
+      (g) => g.keys
+    )
+    if (advancedKeys.some((k) => filters[k])) setShowAdvanced(true)
+  }, [filters, showAdvanced])
 
   // Default date range: last 30 days
   const endDate = React.useMemo(() => {
@@ -116,6 +252,46 @@ export function VisitorsList({ project }: VisitorsListProps) {
     date.setHours(0, 0, 0, 0)
     return date
   }, [])
+
+  // Populate filter dropdowns with real values + visitor counts. The query is
+  // re-issued when any filter changes so each dropdown reflects the *other*
+  // filters' narrowed pool — the backend handles excluding the dimension
+  // being aggregated from its own filter.
+  const { data: facetsData, isLoading: facetsLoading } = useQuery({
+    ...getVisitorFacetsOptions({
+      query: {
+        project_id: project.id,
+        start_date: startDate.toISOString(),
+        end_date: endDate.toISOString(),
+        include_crawlers:
+          crawlerFilter === 'all'
+            ? undefined
+            : crawlerFilter === 'crawlers'
+              ? true
+              : false,
+        has_activity_only: hideGhostVisitors ? undefined : false,
+        per_facet_limit: 50,
+        ...filters,
+      },
+    }),
+    // Only fetch facets once the user has expanded the filter section.
+    enabled: filtersExpanded || activeFilters.length > 0,
+  })
+
+  const getFacetOptions = React.useCallback(
+    (key: SegmentFilterKey): FacetOption[] => {
+      if (!facetsData) return []
+      const field = FILTER_TO_FACET[key]
+      const list = (facetsData as Record<string, unknown>)[field]
+      if (!Array.isArray(list)) return []
+      return list.map((row) => ({
+        value: String((row as { value: unknown }).value ?? ''),
+        count: Number((row as { count: unknown }).count ?? 0),
+        code: (row as { code?: string | null }).code ?? null,
+      }))
+    },
+    [facetsData]
+  )
 
   const { data, isLoading, error, refetch } = useQuery({
     ...getVisitorsOptions({
@@ -132,6 +308,7 @@ export function VisitorsList({ project }: VisitorsListProps) {
               ? true
               : false,
         has_activity_only: hideGhostVisitors ? undefined : false,
+        ...filters,
       },
     }),
   })
@@ -168,6 +345,30 @@ export function VisitorsList({ project }: VisitorsListProps) {
                   Hide ghost visitors
                 </Label>
               </div>
+              <Button
+                variant={filtersExpanded ? 'secondary' : 'outline'}
+                size="sm"
+                onClick={() => setFiltersExpanded((v) => !v)}
+                className="gap-1.5 whitespace-nowrap"
+                aria-expanded={filtersExpanded}
+                aria-controls="visitors-filter-panel"
+              >
+                <SlidersHorizontal className="h-3.5 w-3.5" />
+                Filters
+                {activeFilters.length > 0 && (
+                  <Badge
+                    variant="secondary"
+                    className="ml-0.5 h-4 min-w-[16px] px-1 text-[10px]"
+                  >
+                    {activeFilters.length}
+                  </Badge>
+                )}
+                <ChevronDown
+                  className={`h-3.5 w-3.5 transition-transform ${
+                    filtersExpanded ? 'rotate-180' : ''
+                  }`}
+                />
+              </Button>
               <Select
                 value={crawlerFilter}
                 onValueChange={(value: 'all' | 'humans' | 'crawlers') =>
@@ -201,6 +402,72 @@ export function VisitorsList({ project }: VisitorsListProps) {
           </div>
         </CardHeader>
         <CardContent>
+          {filtersExpanded && (
+            <div
+              id="visitors-filter-panel"
+              className="mb-5 rounded-lg border bg-muted/20 p-3 sm:p-4"
+            >
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium">Filters</span>
+                  {activeFilters.length > 0 && (
+                    <Badge
+                      variant="secondary"
+                      className="h-5 px-1.5 text-[10px]"
+                    >
+                      {activeFilters.length} active
+                    </Badge>
+                  )}
+                </div>
+                {activeFilters.length > 0 && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 px-2 text-xs gap-1"
+                    onClick={clearFilters}
+                  >
+                    <X className="h-3 w-3" /> Clear all
+                  </Button>
+                )}
+              </div>
+
+              {FILTER_GROUPS.filter((g) => !g.advanced || showAdvanced).map(
+                (group) => (
+                  <div key={group.title} className="mb-4 last:mb-0">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-1.5">
+                      {group.title}
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2">
+                      {group.keys.map((key) => (
+                        <FacetCombobox
+                          key={key}
+                          label={FILTER_LABELS[key]}
+                          value={filters[key]}
+                          options={getFacetOptions(key)}
+                          onChange={(next) => updateFilter(key, next)}
+                          withFlag={FLAG_FILTERS.has(key)}
+                          loading={facetsLoading}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                )
+              )}
+
+              <button
+                type="button"
+                onClick={() => setShowAdvanced((v) => !v)}
+                className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+              >
+                <ChevronDown
+                  className={`h-3 w-3 transition-transform ${
+                    showAdvanced ? 'rotate-180' : ''
+                  }`}
+                />
+                {showAdvanced ? 'Show fewer filters' : 'Show device + UTM filters'}
+              </button>
+            </div>
+          )}
           {isLoading ? (
             <div className="space-y-2">
               {[...Array(8)].map((_, i) => (
@@ -246,6 +513,8 @@ export function VisitorsList({ project }: VisitorsListProps) {
                             `/projects/${project.slug}/analytics/visitors/${visitor.id}`
                           )
                         }
+                        onFilter={updateFilter}
+                        activeFilters={filters}
                       />
                     ))}
                   </TableBody>
@@ -318,17 +587,33 @@ export function VisitorsList({ project }: VisitorsListProps) {
 interface VisitorRowProps {
   visitor: VisitorInfo
   onClick: () => void
+  onFilter: (key: SegmentFilterKey, value: string | undefined) => void
+  activeFilters: SegmentFilters
 }
 
-function VisitorRow({ visitor, onClick }: VisitorRowProps) {
+function VisitorRow({
+  visitor,
+  onClick,
+  onFilter,
+  activeFilters,
+}: VisitorRowProps) {
   const browserInfo = visitor.user_agent
     ? getBrowserInfo(visitor.user_agent)
     : null
   const osName = visitor.user_agent ? getOSName(visitor.user_agent) : null
-  const location = formatLocation(visitor)
   const flag = countryCodeToFlag(visitor.country_code)
   const lastSeenDate = new Date(visitor.last_seen)
   const firstSeenDate = new Date(visitor.first_seen)
+
+  const handleFilter = (
+    e: React.MouseEvent,
+    key: SegmentFilterKey,
+    value: string | null | undefined
+  ) => {
+    if (!value) return
+    e.stopPropagation()
+    onFilter(key, activeFilters[key] === value ? undefined : value)
+  }
 
   return (
     <TableRow
@@ -371,13 +656,68 @@ function VisitorRow({ visitor, onClick }: VisitorRowProps) {
 
       {/* Location */}
       <TableCell>
-        <div className="flex items-center gap-2">
-          {flag ? (
-            <span className="text-base leading-none">{flag}</span>
+        <div className="flex items-center gap-2 min-w-0">
+          {visitor.country ? (
+            <button
+              type="button"
+              onClick={(e) => handleFilter(e, 'filter_country', visitor.country)}
+              title={`Filter by ${visitor.country}`}
+              className="text-base leading-none hover:scale-110 transition-transform"
+            >
+              {flag || <Globe className="h-4 w-4 text-muted-foreground" />}
+            </button>
           ) : (
             <Globe className="h-4 w-4 text-muted-foreground flex-shrink-0" />
           )}
-          <span className="text-sm truncate max-w-[200px]">{location}</span>
+          <div className="flex items-center gap-1 text-sm truncate max-w-[220px]">
+            {visitor.city && (
+              <>
+                <button
+                  type="button"
+                  onClick={(e) => handleFilter(e, 'filter_city', visitor.city)}
+                  className="hover:underline truncate"
+                  title={`Filter by ${visitor.city}`}
+                >
+                  {visitor.city}
+                </button>
+                {(visitor.region || visitor.country) && (
+                  <span className="text-muted-foreground">,</span>
+                )}
+              </>
+            )}
+            {visitor.region && visitor.region !== visitor.city && (
+              <>
+                <button
+                  type="button"
+                  onClick={(e) =>
+                    handleFilter(e, 'filter_region', visitor.region)
+                  }
+                  className="hover:underline truncate"
+                  title={`Filter by ${visitor.region}`}
+                >
+                  {visitor.region}
+                </button>
+                {visitor.country && (
+                  <span className="text-muted-foreground">,</span>
+                )}
+              </>
+            )}
+            {visitor.country && (
+              <button
+                type="button"
+                onClick={(e) =>
+                  handleFilter(e, 'filter_country', visitor.country)
+                }
+                className="hover:underline truncate"
+                title={`Filter by ${visitor.country}`}
+              >
+                {visitor.country}
+              </button>
+            )}
+            {!visitor.city && !visitor.region && !visitor.country && (
+              <span className="text-muted-foreground">Unknown</span>
+            )}
+          </div>
           {visitor.is_eu && (
             <Badge variant="outline" className="text-[10px] px-1.5 py-0">
               EU

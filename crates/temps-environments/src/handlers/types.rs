@@ -316,6 +316,21 @@ pub struct UpdateEnvironmentSettingsRequest {
     pub password: Option<String>,
 }
 
+/// Request to rename an environment's auto-managed subdomain.
+///
+/// The subdomain is the host label inserted in front of the platform's
+/// preview domain (e.g. `myapp` in `myapp.preview.temps.sh`). Renaming
+/// replaces the previous subdomain entirely — the old hostname stops
+/// resolving immediately after this request succeeds.
+#[derive(Serialize, Deserialize, Clone, ToSchema)]
+pub struct UpdateEnvironmentSubdomainRequest {
+    /// New subdomain label. Must be a DNS-safe slug (lowercase letters,
+    /// digits, and hyphens, 1-63 characters). The value is slugified
+    /// server-side, so casing and disallowed characters are normalized.
+    #[schema(example = "myapp")]
+    pub subdomain: String,
+}
+
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct CreateEnvironmentRequest {
     pub name: String,

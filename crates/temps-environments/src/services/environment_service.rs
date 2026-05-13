@@ -680,6 +680,126 @@ impl EnvironmentService {
         Ok(updated_environment)
     }
 
+    /// Rename the environment's auto-managed subdomain.
+    ///
+    /// Replaces both `environments.subdomain` and the matching row in
+    /// `environment_domains` (the one created at environment-creation time)
+    /// inside a single transaction. The old hostname stops resolving once
+    /// the proxy reloads its route table.
+    ///
+    /// Returns `InvalidInput` if the slugified value is empty, exceeds the
+    /// DNS label length limit, or collides with another environment in the
+    /// same project.
+    pub async fn update_environment_subdomain(
+        &self,
+        project_id: i32,
+        env_id: i32,
+        new_subdomain: String,
+    ) -> Result<environments::Model, EnvironmentError> {
+        let environment = self.get_environment(project_id, env_id).await?;
+
+        let normalized = slugify(&new_subdomain);
+        if normalized.is_empty() {
+            return Err(EnvironmentError::InvalidInput(format!(
+                "Subdomain '{}' is empty after normalization; use lowercase letters, digits, or hyphens",
+                new_subdomain
+            )));
+        }
+        if normalized.len() > 63 {
+            return Err(EnvironmentError::InvalidInput(format!(
+                "Subdomain '{}' is {} characters; DNS labels must be 63 characters or fewer",
+                normalized,
+                normalized.len()
+            )));
+        }
+
+        if normalized == environment.subdomain {
+            return Ok(environment);
+        }
+
+        // Reject collisions with any other environment in the same project.
+        let conflict = environments::Entity::find()
+            .filter(environments::Column::ProjectId.eq(project_id))
+            .filter(environments::Column::Subdomain.eq(&normalized))
+            .filter(environments::Column::Id.ne(env_id))
+            .filter(environments::Column::DeletedAt.is_null())
+            .one(self.db.as_ref())
+            .await?;
+        if let Some(other) = conflict {
+            return Err(EnvironmentError::InvalidInput(format!(
+                "Subdomain '{}' is already used by environment '{}' in this project",
+                normalized, other.name
+            )));
+        }
+
+        let previous_subdomain = environment.subdomain.clone();
+
+        let txn = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| EnvironmentError::DatabaseConnectionError(e.to_string()))?;
+
+        let mut active_model: environments::ActiveModel = environment.clone().into();
+        active_model.subdomain = Set(normalized.clone());
+        active_model.updated_at = Set(chrono::Utc::now());
+        let updated = active_model
+            .update(&txn)
+            .await
+            .map_err(|e| EnvironmentError::DatabaseConnectionError(e.to_string()))?;
+
+        // Replace the auto-managed environment_domains row (the one whose
+        // value matched the previous subdomain). Custom domains stay intact.
+        let existing_domain = environment_domains::Entity::find()
+            .filter(environment_domains::Column::EnvironmentId.eq(env_id))
+            .filter(environment_domains::Column::Domain.eq(&previous_subdomain))
+            .one(&txn)
+            .await?;
+
+        if let Some(existing) = existing_domain {
+            let mut active_domain: environment_domains::ActiveModel = existing.into();
+            active_domain.domain = Set(normalized.clone());
+            active_domain
+                .update(&txn)
+                .await
+                .map_err(|e| EnvironmentError::DatabaseConnectionError(e.to_string()))?;
+        } else {
+            // Defensive: if the auto row was previously deleted, recreate it
+            // so the new subdomain still routes to this environment.
+            let new_domain = environment_domains::ActiveModel {
+                environment_id: Set(env_id),
+                domain: Set(normalized.clone()),
+                created_at: Set(chrono::Utc::now()),
+                ..Default::default()
+            };
+            new_domain
+                .insert(&txn)
+                .await
+                .map_err(|e| EnvironmentError::DatabaseConnectionError(e.to_string()))?;
+        }
+
+        txn.commit()
+            .await
+            .map_err(|e| EnvironmentError::DatabaseConnectionError(e.to_string()))?;
+
+        if let Err(e) = self
+            .db
+            .execute(sea_orm::Statement::from_string(
+                sea_orm::DatabaseBackend::Postgres,
+                "NOTIFY route_table_changes".to_string(),
+            ))
+            .await
+        {
+            tracing::error!(
+                error = %e,
+                environment_id = env_id,
+                "Failed to send route_table_changes NOTIFY after subdomain rename"
+            );
+        }
+
+        Ok(updated)
+    }
+
     /// Set the sleeping state of an environment (for on-demand scale-to-zero).
     /// Uses atomic CAS (UPDATE WHERE) to prevent race conditions between
     /// concurrent API calls and proxy-initiated state transitions.
@@ -1158,6 +1278,114 @@ mod tests {
 
         assert!(result.is_ok());
         assert!(result.unwrap().sleeping, "Should still be sleeping");
+    }
+
+    #[tokio::test]
+    async fn test_update_subdomain_rejects_empty_normalized_value() {
+        let env = make_env_model(false, false);
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![env]])
+            .into_connection();
+        let svc = make_service(db);
+
+        let result = svc
+            .update_environment_subdomain(10, 1, "!!!".to_string())
+            .await;
+
+        match result {
+            Err(EnvironmentError::InvalidInput(msg)) => {
+                assert!(
+                    msg.contains("empty"),
+                    "Error should mention empty normalization: {}",
+                    msg
+                );
+            }
+            other => panic!("Expected InvalidInput, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_update_subdomain_rejects_too_long_label() {
+        let env = make_env_model(false, false);
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![env]])
+            .into_connection();
+        let svc = make_service(db);
+
+        // 64 chars after slugify — exceeds DNS label limit.
+        let too_long = "a".repeat(64);
+        let result = svc.update_environment_subdomain(10, 1, too_long).await;
+
+        match result {
+            Err(EnvironmentError::InvalidInput(msg)) => {
+                assert!(
+                    msg.contains("63"),
+                    "Error should mention DNS label limit: {}",
+                    msg
+                );
+            }
+            other => panic!("Expected InvalidInput, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_update_subdomain_noop_when_unchanged() {
+        let env = make_env_model(false, false);
+        // env.subdomain is "my-project-staging" — slugifying that is identical
+        let target = env.subdomain.clone();
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // Only the get_environment query — no conflict check or update
+            .append_query_results(vec![vec![env.clone()]])
+            .into_connection();
+        let svc = make_service(db);
+
+        let result = svc
+            .update_environment_subdomain(10, 1, target.clone())
+            .await;
+
+        assert!(result.is_ok(), "Expected Ok, got {:?}", result.err());
+        assert_eq!(result.unwrap().subdomain, target);
+    }
+
+    #[tokio::test]
+    async fn test_update_subdomain_rejects_conflict_with_sibling() {
+        let env = make_env_model(false, false);
+        let conflict = environments::Model {
+            id: 2,
+            name: "production".to_string(),
+            slug: "production".to_string(),
+            subdomain: "myapp".to_string(),
+            ..make_env_model(false, false)
+        };
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // 1. get_environment
+            .append_query_results(vec![vec![env]])
+            // 2. conflict check returns the sibling env
+            .append_query_results(vec![vec![conflict]])
+            .into_connection();
+        let svc = make_service(db);
+
+        let result = svc
+            .update_environment_subdomain(10, 1, "myapp".to_string())
+            .await;
+
+        match result {
+            Err(EnvironmentError::InvalidInput(msg)) => {
+                assert!(
+                    msg.contains("already used"),
+                    "Error should describe conflict: {}",
+                    msg
+                );
+                assert!(
+                    msg.contains("production"),
+                    "Error should name the conflicting env: {}",
+                    msg
+                );
+            }
+            other => panic!("Expected InvalidInput, got {:?}", other),
+        }
     }
 
     #[tokio::test]
