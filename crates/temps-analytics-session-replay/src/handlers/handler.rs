@@ -793,6 +793,7 @@ pub async fn add_session_replay_events(
     }
 }
 
+/// Admin routes for session replay (dashboard queries / management).
 pub fn configure_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/session-replays", get(get_project_session_replays))
@@ -812,6 +813,11 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
             "/visitors/{visitor_id}/session-replays/{session_id}/duration",
             post(update_session_duration),
         )
+}
+
+/// Public ingest routes for session replay — called directly by browser SDKs.
+pub fn configure_public_routes() -> Router<Arc<AppState>> {
+    Router::new()
         .route("/_temps/session-replay/init", post(init_session_replay))
         .route(
             "/_temps/session-replay/events",

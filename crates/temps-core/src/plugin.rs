@@ -429,6 +429,18 @@ impl PluginRoutes {
     }
 }
 
+/// Two-listener router split produced by [`PluginManager::build_split_application`].
+///
+/// - `public` is mounted on the public-facing console listener and contains
+///   only endpoints that are safe to expose to the internet without an
+///   admin-network gate (event ingestion, AI gateway, sentry DSN ingest, etc.).
+/// - `admin` is mounted on the admin listener and contains every other
+///   route (dashboard queries, CRUD management, settings).
+pub struct SplitApplication {
+    pub public: Router,
+    pub admin: Router,
+}
+
 /// Type-safe service registry for dependency injection
 pub struct ServiceRegistry {
     services: RwLock<HashMap<TypeId, Box<dyn Any + Send + Sync>>>,
@@ -694,19 +706,40 @@ impl PluginManager {
         Ok(())
     }
 
-    /// Build the complete application with routes, middleware, and OpenAPI
+    /// Build the complete application with routes, middleware, and OpenAPI as
+    /// a single combined router. Used in single-listener (backwards-compat)
+    /// mode where every route binds to the same address.
     pub fn build_application(&self) -> Result<Router, PluginError> {
-        debug!("Building application with {} plugins", self.plugins.len());
+        let split = self.build_split_application()?;
+        let app = Router::new()
+            .nest("/api", split.public)
+            .nest("/api", split.admin);
+        Ok(app)
+    }
+
+    /// Build the application as separate public and admin routers, ready to
+    /// be mounted on different listeners. Neither router has the `/api`
+    /// prefix applied yet — the caller is responsible for `.nest("/api", ...)`
+    /// (or any other base path) when wiring them into `axum::serve`.
+    ///
+    /// - The admin router has plugin middleware applied (auth, audit, etc.).
+    /// - The public router has no middleware — public ingest endpoints
+    ///   authenticate themselves via API key / DSN tokens / Host header
+    ///   lookups inside their handlers.
+    pub fn build_split_application(&self) -> Result<SplitApplication, PluginError> {
+        debug!(
+            "Building split application with {} plugins",
+            self.plugins.len()
+        );
 
         let plugin_context = self.context.create_plugin_context();
-        let mut api_router = Router::new();
+        let mut admin_router = Router::new();
         let mut public_router = Router::new();
 
-        // Collect routes from all plugins
         for plugin in &self.plugins {
             if let Some(plugin_routes) = plugin.configure_routes(&plugin_context) {
-                debug!("Adding routes for plugin: {}", plugin.name());
-                api_router = api_router.merge(plugin_routes.router);
+                debug!("Adding admin routes for plugin: {}", plugin.name());
+                admin_router = admin_router.merge(plugin_routes.router);
             }
             if let Some(public_routes) = plugin.configure_public_routes(&plugin_context) {
                 debug!("Adding public routes for plugin: {}", plugin.name());
@@ -714,21 +747,13 @@ impl PluginManager {
             }
         }
 
-        // Collect and apply middleware from all plugins
         let middleware = self.collect_middleware(&plugin_context);
-        api_router = self.apply_middleware_to_router(api_router, middleware);
+        admin_router = self.apply_middleware_to_router(admin_router, middleware);
 
-        // Build unified OpenAPI documentation
-        let _openapi_schema = self.build_unified_openapi()?;
-        let docs_router = Router::new();
-
-        // Combine everything: public routes under /api (no auth), then authenticated routes
-        let app = Router::new()
-            .nest("/api", public_router)
-            .nest("/api", api_router)
-            .merge(docs_router);
-
-        Ok(app)
+        Ok(SplitApplication {
+            public: public_router,
+            admin: admin_router,
+        })
     }
 
     /// Get the unified OpenAPI schema from all plugins
@@ -1078,5 +1103,91 @@ pub mod middleware_helpers {
         }
 
         layer
+    }
+}
+
+#[cfg(test)]
+mod split_application_tests {
+    use super::*;
+    use axum::routing::get;
+    use std::future::Future;
+    use std::pin::Pin;
+
+    /// Plugin that registers a known admin handler under `/admin-marker` and
+    /// a known public handler under `/public-marker`. Used to assert routes
+    /// land on the correct side of [`PluginManager::build_split_application`].
+    struct MarkerPlugin;
+
+    impl TempsPlugin for MarkerPlugin {
+        fn name(&self) -> &'static str {
+            "marker"
+        }
+
+        fn register_services<'a>(
+            &'a self,
+            _ctx: &'a ServiceRegistrationContext,
+        ) -> Pin<Box<dyn Future<Output = Result<(), PluginError>> + Send + 'a>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn configure_routes(&self, _ctx: &PluginContext) -> Option<PluginRoutes> {
+            let router = Router::new().route("/admin-marker", get(|| async { "admin" }));
+            Some(PluginRoutes::new(router))
+        }
+
+        fn configure_public_routes(&self, _ctx: &PluginContext) -> Option<PluginRoutes> {
+            let router = Router::new().route("/public-marker", get(|| async { "public" }));
+            Some(PluginRoutes::new(router))
+        }
+    }
+
+    /// Probe an axum::Router with an in-memory oneshot request and return the
+    /// response status. Avoids spinning up a real listener.
+    async fn probe_status(router: Router, path: &str) -> axum::http::StatusCode {
+        use tower::ServiceExt;
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(path)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        response.status()
+    }
+
+    #[tokio::test]
+    async fn split_application_routes_admin_only_to_admin() {
+        let mut manager = PluginManager::default();
+        manager.register_plugin(Box::new(MarkerPlugin));
+
+        let split = manager.build_split_application().unwrap();
+
+        assert_eq!(
+            probe_status(split.admin.clone(), "/admin-marker").await,
+            axum::http::StatusCode::OK
+        );
+        assert_eq!(
+            probe_status(split.public.clone(), "/admin-marker").await,
+            axum::http::StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn split_application_routes_public_only_to_public() {
+        let mut manager = PluginManager::default();
+        manager.register_plugin(Box::new(MarkerPlugin));
+
+        let split = manager.build_split_application().unwrap();
+
+        assert_eq!(
+            probe_status(split.public.clone(), "/public-marker").await,
+            axum::http::StatusCode::OK
+        );
+        assert_eq!(
+            probe_status(split.admin.clone(), "/public-marker").await,
+            axum::http::StatusCode::NOT_FOUND
+        );
     }
 }

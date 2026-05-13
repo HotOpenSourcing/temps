@@ -70,11 +70,21 @@ impl TempsPlugin for AiGatewayPlugin {
     fn configure_routes(&self, context: &PluginContext) -> Option<PluginRoutes> {
         let app_state = context.require_service::<AiGatewayAppState>();
 
-        let routes = handlers::configure_gateway_routes()
-            .merge(handlers::configure_admin_routes())
+        // Admin: provider key management, usage analytics, pricing dashboard.
+        let routes = handlers::configure_admin_routes()
             .merge(handlers::configure_usage_routes())
             .merge(handlers::configure_pricing_routes())
             .with_state(app_state);
+
+        Some(PluginRoutes { router: routes })
+    }
+
+    fn configure_public_routes(&self, context: &PluginContext) -> Option<PluginRoutes> {
+        let app_state = context.require_service::<AiGatewayAppState>();
+
+        // Public: the OpenAI-compatible gateway endpoints. Auth is via API key
+        // tokens issued to deployed apps (handled inside the handlers).
+        let routes = handlers::configure_gateway_routes().with_state(app_state);
 
         Some(PluginRoutes { router: routes })
     }

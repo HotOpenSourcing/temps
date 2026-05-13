@@ -1030,7 +1030,7 @@ pub async fn get_dashboard_projects_analytics(
     Ok(Json(result))
 }
 
-/// Configure routes for events
+/// Configure admin routes for events (authenticated queries / management).
 pub fn configure_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route(
@@ -1079,7 +1079,14 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
             post(record_console_event),
         )
         .route("/sessions/{session_id}/events", get(get_session_events))
-        .route("/_temps/event", post(record_event_metrics))
+}
+
+/// Configure public ingest routes for events.
+///
+/// These are called by browser SDKs on customer sites and must be reachable
+/// without authentication — the project is resolved from the Host header.
+pub fn configure_public_routes() -> Router<Arc<AppState>> {
+    Router::new().route("/_temps/event", post(record_event_metrics))
 }
 
 #[derive(utoipa::OpenApi)]

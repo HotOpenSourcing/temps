@@ -88,7 +88,15 @@ impl temps_core::plugin::TempsPlugin for EmailTrackingPlugin {
     fn configure_routes(&self, context: &PluginContext) -> Option<PluginRoutes> {
         let tracking_state = context.get_service::<TrackingState>()?;
 
-        let routes = handlers::configure_routes().with_state(tracking_state);
+        let routes = handlers::api_routes().with_state(tracking_state);
+
+        Some(PluginRoutes::new(routes))
+    }
+
+    fn configure_public_routes(&self, context: &PluginContext) -> Option<PluginRoutes> {
+        let tracking_state = context.get_service::<TrackingState>()?;
+
+        let routes = handlers::public_routes().with_state(tracking_state);
 
         Some(PluginRoutes::new(routes))
     }

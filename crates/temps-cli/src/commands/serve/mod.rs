@@ -1,3 +1,4 @@
+mod admin_gate;
 pub mod console;
 mod proxy;
 mod shutdown;
@@ -28,9 +29,22 @@ pub struct ServeCommand {
     #[arg(long, env = "TEMPS_DATA_DIR")]
     pub data_dir: Option<PathBuf>,
 
-    /// Console/Admin address (defaults to random port on localhost)
+    /// Console/Admin address (defaults to random port on localhost).
+    ///
+    /// When `--console-admin-address` is unset, this address serves both public
+    /// ingest endpoints (event tracking, AI gateway, etc.) and admin routes.
+    /// When the admin address is set, this listener only serves public routes.
     #[arg(long, env = "TEMPS_CONSOLE_ADDRESS")]
     pub console_address: Option<String>,
+
+    /// Optional dedicated address for admin/management routes. When set, the
+    /// `--console-address` listener only serves public ingest routes and the
+    /// admin/UI surface (auth, projects, settings, dashboard) binds here.
+    ///
+    /// Combine with `--admin-allowed-ips` / `--admin-allowed-hosts` to add a
+    /// defense-in-depth allowlist on top of the network-layer isolation.
+    #[arg(long, env = "TEMPS_CONSOLE_ADMIN_ADDRESS")]
+    pub console_admin_address: Option<String>,
 
     /// Screenshot provider to use: "local" (headless Chrome), "remote", or "noop" (disabled)
     /// Use "noop" on servers without Chrome installed to skip screenshot functionality
@@ -64,6 +78,12 @@ impl ServeCommand {
         if let Some(ref provider) = self.screenshot_provider {
             std::env::set_var("TEMPS_SCREENSHOT_PROVIDER", provider);
             debug!("Screenshot provider set to '{}' from CLI flag", provider);
+        }
+
+        // Bridge the optional CLI flag into the env var so ServerConfig::new
+        // picks it up regardless of which path the operator used.
+        if let Some(ref admin) = self.console_admin_address {
+            std::env::set_var("TEMPS_CONSOLE_ADMIN_ADDRESS", admin);
         }
 
         let serve_config = Arc::new(temps_config::ServerConfig::new(

@@ -1206,49 +1206,121 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
     let route_sync_routes =
         temps_routes::route_sync::configure_routes().with_state(route_sync_state);
 
-    let app = plugin_manager
-        .build_application()
-        .map_err(|e| anyhow::anyhow!("Failed to build application: {}", e))?
-        .merge(create_swagger_router(&plugin_manager)?)
-        .nest("/api", node_routes)
-        .nest("/api", route_sync_routes);
+    // Build the split application: public routes (event ingest, AI gateway,
+    // session replay ingest, etc.) and admin routes (auth, dashboard, CRUD).
+    let split = plugin_manager
+        .build_split_application()
+        .map_err(|e| anyhow::anyhow!("Failed to build application: {}", e))?;
 
-    let app = app.fallback(serve_static_file);
+    // Agent-facing node + route-sync routes are public (workers anywhere on
+    // the internet POST to them with bearer tokens).
+    let public_router = split.public.merge(node_routes).merge(route_sync_routes);
+
+    // Swagger UI + the embedded SPA only live on the admin surface.
+    let admin_router = split.admin.merge(create_swagger_router(&plugin_manager)?);
+
+    // Wrap each surface in /api like the original single-router did, except
+    // for the SPA fallback which serves the dashboard at the document root.
+    let public_app = Router::new().nest("/api", public_router);
+    let admin_app = Router::new()
+        .nest("/api", admin_router)
+        .fallback(serve_static_file);
+
+    // Optional defense-in-depth gate for the admin listener.
+    let admin_gate = super::admin_gate::AdminGateConfig::from_env(
+        &config.admin_allowed_ips,
+        &config.admin_allowed_hosts,
+        config.admin_trust_forwarded_for,
+    )
+    .map_err(|e| anyhow::anyhow!("Invalid admin gate config: {}", e))?;
+    let admin_app = if admin_gate.is_noop() {
+        admin_app
+    } else {
+        info!(
+            allowed_ips = ?config.admin_allowed_ips,
+            allowed_hosts = ?config.admin_allowed_hosts,
+            trust_forwarded_for = config.admin_trust_forwarded_for,
+            "Admin gate enabled"
+        );
+        admin_app.layer(axum::middleware::from_fn_with_state(
+            admin_gate,
+            super::admin_gate::admin_gate,
+        ))
+    };
 
     info!("Plugin system initialized successfully with static file serving");
 
-    // Start the HTTP server
-    let listener = TcpListener::bind(&config.console_address).await?;
-    info!("Console API server listening on {}", config.console_address);
-
-    // Signal that the console API is ready
-    if let Some(signal) = ready_signal {
-        let _ = signal.send(());
-        debug!("Console API ready signal sent");
-    }
-
-    // Graceful shutdown: listen for Ctrl+C, then shut down external plugins before exiting.
-    // Note: The proxy server has its own CtrlCShutdownSignal. The console API server
-    // shuts down external plugins when it receives the same signal.
     let external_plugins_service = plugin_manager
         .service_context()
         .get_service::<temps_external_plugins::ExternalPluginsService>();
-    // Use into_make_service_with_connect_info so handlers/middleware can read
-    // the immediate peer SocketAddr — required by rate-limiter to decide if
-    // X-Forwarded-For headers should be trusted (only from loopback proxies).
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .with_graceful_shutdown(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        info!("Console API received shutdown signal, stopping external plugins...");
-        if let Some(service) = external_plugins_service {
-            service.shutdown_all().await;
-            info!("External plugins shut down");
+
+    let shutdown_signal = {
+        let svc = external_plugins_service.clone();
+        async move {
+            let _ = tokio::signal::ctrl_c().await;
+            info!("Console API received shutdown signal, stopping external plugins...");
+            if let Some(service) = svc {
+                service.shutdown_all().await;
+                info!("External plugins shut down");
+            }
         }
-    })
-    .await?;
+        .shared()
+    };
+
+    match config.console_admin_address.as_deref() {
+        Some(admin_addr) if !admin_addr.is_empty() => {
+            // Two-listener mode: public + admin on separate addresses.
+            let public_listener = TcpListener::bind(&config.console_address).await?;
+            info!(
+                "Console PUBLIC API server listening on {}",
+                config.console_address
+            );
+            let admin_listener = TcpListener::bind(admin_addr).await?;
+            info!("Console ADMIN API server listening on {}", admin_addr);
+
+            if let Some(signal) = ready_signal {
+                let _ = signal.send(());
+                debug!("Console API ready signal sent");
+            }
+
+            let public_fut = axum::serve(
+                public_listener,
+                public_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .with_graceful_shutdown(shutdown_signal.clone());
+
+            let admin_fut = axum::serve(
+                admin_listener,
+                admin_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .with_graceful_shutdown(shutdown_signal);
+
+            tokio::try_join!(public_fut, admin_fut)?;
+        }
+        _ => {
+            // Single-listener mode (backwards compatible): merge public + admin
+            // and serve from `console_address`. Admin gate still applies if
+            // configured, but it now gates the merged surface — operators who
+            // want network-layer isolation should set TEMPS_CONSOLE_ADMIN_ADDRESS.
+            let merged = Router::new().merge(public_app).merge(admin_app);
+
+            let listener = TcpListener::bind(&config.console_address).await?;
+            info!("Console API server listening on {}", config.console_address);
+
+            if let Some(signal) = ready_signal {
+                let _ = signal.send(());
+                debug!("Console API ready signal sent");
+            }
+
+            axum::serve(
+                listener,
+                merged.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .with_graceful_shutdown(shutdown_signal)
+            .await?;
+        }
+    }
+
     info!("Console API server exited");
     Ok(())
 }
