@@ -491,7 +491,7 @@ pub async fn get_resolved_environment_variables(
     // plugin).
     let integrations = match state.integration_env_provider.as_ref() {
         Some(provider) => provider
-            .get_project_integration_env_vars(project_id)
+            .get_project_integration_env_vars(project_id, params.environment_id)
             .await
             .map_err(|e| {
                 error!("Failed to load integration env vars: {}", e);
@@ -651,7 +651,7 @@ pub async fn get_resolved_environment_variable_value(
     })?;
 
     let services = provider
-        .get_project_integration_env_vars(project_id)
+        .get_project_integration_env_vars(project_id, params.environment_id)
         .await
         .map_err(|e| {
             error!("Failed to load integration env vars: {}", e);

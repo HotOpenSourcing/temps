@@ -37,6 +37,16 @@ import { Link, useParams } from 'react-router-dom'
 
 type BackupState = 'completed' | 'failed' | 'running' | (string & {})
 
+/** Extends the generated BackupResponse with the `external_service` field
+ * that was added in the May 2026 hardening PR. The generated types will
+ * include this automatically once `openapi-ts` is re-run against the updated
+ * schema — this local extension keeps the UI working in the interim. */
+interface ExternalServiceSummary {
+  id: number
+  name: string
+  service_type: string
+}
+
 function formatDuration(ms: number): string {
   if (!Number.isFinite(ms) || ms <= 0) return '—'
   const seconds = Math.floor(ms / 1000)
@@ -231,6 +241,9 @@ export function BackupDetail() {
   }
 
   const state = backup.state as BackupState
+  // Cast to include the extended field. Remove this cast once `openapi-ts` is
+  // re-run after the May 2026 hardening PR adds ExternalServiceSummary to the schema.
+  const backupEx = backup as typeof backup & { external_service?: ExternalServiceSummary }
   const startedAt = new Date(backup.started_at)
   const completedAt = backup.completed_at
     ? new Date(backup.completed_at)
@@ -432,6 +445,19 @@ export function BackupDetail() {
                   </Link>{' '}
                   <span className="text-muted-foreground">
                     ({source.bucket_name})
+                  </span>
+                </Detail>
+              ) : null}
+              {backupEx.external_service ? (
+                <Detail label="Service">
+                  <Link
+                    to={`/services/${backupEx.external_service.id}`}
+                    className="text-foreground hover:underline"
+                  >
+                    {backupEx.external_service.name}
+                  </Link>{' '}
+                  <span className="text-muted-foreground capitalize">
+                    ({backupEx.external_service.service_type})
                   </span>
                 </Detail>
               ) : null}

@@ -2,17 +2,27 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use temps_backup_core::{BackupRunner, RunnerConfig};
 use temps_core::plugin::{
     PluginContext, PluginError, PluginRoutes, ServiceRegistrationContext, TempsPlugin,
 };
 use tracing;
-use tracing::error;
+use tracing::{error, info};
 use utoipa::openapi::OpenApi;
 use utoipa::OpenApi as OpenApiTrait;
 
 use crate::{
+    engines::{
+        control_plane::{ControlPlaneDeps, ControlPlaneEngine},
+        mongodb::{MongodbDeps, MongodbEngine},
+        postgres_cluster::{PostgresClusterDeps, PostgresClusterEngine},
+        postgres_pgdump::{PostgresPgDumpDeps, PostgresPgDumpEngine},
+        postgres_walg::{PostgresWalgDeps, PostgresWalgEngine},
+        redis::{RedisDeps, RedisEngine},
+        s3_mirror::{S3MirrorDeps, S3MirrorEngine},
+    },
     handlers::{self, create_backup_app_state, BackupAppState},
-    services::{reconcile_orphan_backups, BackupService, RestoreService},
+    services::{reconcile_orphan_backups, sweep_stalled_backups, BackupService, RestoreService},
 };
 use temps_providers::externalsvc::postgres_upgrade::{
     PostgresContainerLifecycle, PreUpgradeBackupProvider,
@@ -92,23 +102,102 @@ impl TempsPlugin for BackupPlugin {
                 ));
             let pg_upgrade_service = Arc::new(PostgresUpgradeService::new(
                 db.clone(),
-                docker,
+                docker.clone(),
                 backup_provider,
                 lifecycle,
                 log_service,
             ));
             context.register_service(pg_upgrade_service.clone());
 
-            // Create BackupAppState for handlers
-            let backup_app_state = create_backup_app_state(
+            // ── ADR-014 Phase 5: BackupRunner is always constructed ───────────
+            // The legacy synchronous backup path has been removed. Every manual
+            // backup trigger and every scheduled backup goes through the runner.
+            // There is no feature flag — the runner is always on.
+            let instance_id = std::env::var("TEMPS_BACKUP_RUNNER_INSTANCE_ID")
+                .or_else(|_| std::env::var("HOSTNAME"))
+                .unwrap_or_else(|_| "temps-server".to_string());
+
+            let max_concurrent = std::env::var("TEMPS_BACKUP_RUNNER_MAX_CONCURRENT")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(4);
+
+            let runner_config = RunnerConfig {
+                instance_id,
+                max_concurrent,
+                ..RunnerConfig::default()
+            };
+
+            // Register all engines (ADR-014 Phase 1–4).
+            let mut runner = BackupRunner::new(db.clone(), runner_config);
+
+            // Phase 1: control-plane backup.
+            runner.register_engine(Arc::new(ControlPlaneEngine::new(ControlPlaneDeps {
+                db: db.clone(),
+                encryption_service: encryption_service.clone(),
+                config_service: config_service.clone(),
+            })));
+
+            // Phase 2: Redis.
+            runner.register_engine(Arc::new(RedisEngine::new(RedisDeps {
+                db: db.clone(),
+                encryption_service: encryption_service.clone(),
+                docker: docker.as_ref().clone(),
+            })));
+
+            // Phase 3: Postgres (pg_dump fallback, WAL-G, cluster).
+            runner.register_engine(Arc::new(PostgresPgDumpEngine::new(PostgresPgDumpDeps {
+                db: db.clone(),
+                encryption_service: encryption_service.clone(),
+                docker: docker.as_ref().clone(),
+            })));
+
+            runner.register_engine(Arc::new(PostgresWalgEngine::new(PostgresWalgDeps {
+                db: db.clone(),
+                encryption_service: encryption_service.clone(),
+                docker: docker.as_ref().clone(),
+            })));
+
+            runner.register_engine(Arc::new(PostgresClusterEngine::new(PostgresClusterDeps {
+                db: db.clone(),
+                encryption_service: encryption_service.clone(),
+                docker: docker.as_ref().clone(),
+            })));
+
+            // Phase 4: MongoDB.
+            runner.register_engine(Arc::new(MongodbEngine::new(MongodbDeps {
+                db: db.clone(),
+                encryption_service: encryption_service.clone(),
+                docker: docker.as_ref().clone(),
+            })));
+
+            // Phase 4: S3 mirror.
+            runner.register_engine(Arc::new(S3MirrorEngine::new(S3MirrorDeps {
+                db: db.clone(),
+                encryption_service: encryption_service.clone(),
+                docker: docker.as_ref().clone(),
+            })));
+
+            info!(
+                "BackupRunner: registered 7 engines: \
+                 control_plane, redis, postgres_pgdump, postgres_walg, \
+                 postgres_cluster, mongodb, s3_mirror (ADR-014 Phase 1–4)",
+            );
+
+            let runner = Arc::new(runner);
+
+            // Create BackupAppState for handlers. The runner is required — there is
+            // no optional or deferred wiring step.
+            let backup_app_state_inner = create_backup_app_state(
                 backup_service,
                 restore_service,
                 audit_service,
                 pg_upgrade_service,
                 db.clone(),
-            )
-            .await;
-            context.register_service(backup_app_state);
+                Arc::clone(&runner),
+            );
+
+            context.register_service(backup_app_state_inner);
 
             tracing::debug!("Backup plugin services registered successfully");
             Ok(())
@@ -120,10 +209,15 @@ impl TempsPlugin for BackupPlugin {
         context: &'a PluginContext,
     ) -> Pin<Box<dyn Future<Output = Result<(), PluginError>> + Send + 'a>> {
         Box::pin(async move {
-            // Crash recovery for backups: if `temps serve` restarts mid-backup,
-            // the heartbeat task dies with it and the parent + external_service
-            // backup rows would stay in `state='running'` forever. Sweep them
-            // once at boot and mark them failed so the UI surfaces the truth.
+            // During the transition from the legacy synchronous backup path to the
+            // runner-only architecture (ADR-014 Phase 5 onward), any in-flight backup
+            // rows from a prior process are now stranded — the legacy executor no
+            // longer exists to update them. Mark them failed once at boot with a
+            // clear message so operators know to re-trigger.
+            //
+            // This is one-shot per process start; the runtime stall sweeper
+            // (`sweep_stalled_backups`) continues to catch rows that wedge during
+            // normal operation.
             let db = context.require_service::<sea_orm::DatabaseConnection>();
             if let Err(e) = reconcile_orphan_backups(db.as_ref()).await {
                 error!(
@@ -131,6 +225,27 @@ impl TempsPlugin for BackupPlugin {
                     e
                 );
             }
+
+            // Runtime stall sweeper. The boot reconcile only catches rows
+            // orphaned by the *previous* process; a backup that wedges
+            // during normal operation (runner task stuck on a slow S3
+            // upload, hung docker exec, etc.) needs continuous detection.
+            // Fires every minute, fails any row whose heartbeat is older
+            // than STALL_THRESHOLD (5 min).
+            let sweep_db = db.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                // First tick fires immediately — fine, since the boot
+                // reconcile already ran above and `sweep_stalled_backups`
+                // is idempotent.
+                loop {
+                    tick.tick().await;
+                    if let Err(e) = sweep_stalled_backups(sweep_db.as_ref()).await {
+                        error!("Backup stall sweep failed (will retry next tick): {}", e);
+                    }
+                }
+            });
 
             // Crash recovery: if `temps serve` restarts while an upgrade is
             // mid-flight, the tokio task driving it is gone. Rows stay in
@@ -176,6 +291,27 @@ impl TempsPlugin for BackupPlugin {
                     }
                 }
             });
+
+            // ── ADR-014 Phase 5: BackupRunner poll loop ───────────────────────
+            // The runner was pre-constructed with all 7 engines registered
+            // during `register_services`. Retrieve it from BackupAppState and
+            // spawn the poll loop now that all services are initialised.
+            let backup_app_state = context.require_service::<BackupAppState>();
+            let runner = Arc::clone(&backup_app_state.backup_runner);
+
+            info!(
+                "BackupRunner starting poll loop with 7 engines registered (ADR-014 Phase 5, runner-only mode)",
+            );
+
+            let runner_cancel = tokio_util::sync::CancellationToken::new();
+            let runner_cancel_clone = runner_cancel.clone();
+
+            tokio::spawn(async move {
+                runner.run_forever(runner_cancel_clone).await;
+            });
+            // The cancel token runs for the lifetime of the process.
+            // Phase 5 will thread it through the plugin context for clean shutdown.
+            drop(runner_cancel);
 
             Ok(())
         })

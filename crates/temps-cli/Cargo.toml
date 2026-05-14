@@ -26,7 +26,6 @@ temps-analytics-session-replay = { path = "../temps-analytics-session-replay" }
 temps-audit = { path = "../temps-audit" }
 temps-auth = { path = "../temps-auth" }
 temps-agents = { path = "../temps-agents" }
-temps-workspace = { path = "../temps-workspace" }
 temps-sandbox = { path = "../temps-sandbox" }
 temps-backup = { path = "../temps-backup" }
 temps-revenue = { path = "../temps-revenue" }

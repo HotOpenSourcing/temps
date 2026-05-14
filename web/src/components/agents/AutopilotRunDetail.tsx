@@ -29,7 +29,6 @@ import {
   Hash,
   Loader2,
   RefreshCw,
-  SquareTerminal,
   Terminal,
   Webhook,
 } from 'lucide-react'
@@ -47,7 +46,6 @@ import {
   retryRun,
   startAnalysis,
   startFix,
-  workspaceStartSession,
 } from '@/api/client/sdk.gen'
 import { cn } from '@/lib/utils'
 import { toast } from 'sonner'
@@ -860,7 +858,6 @@ export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
   const queryClient = useQueryClient()
   const [streamLogs, setStreamLogs] = useState<AgentRunLog[]>([])
   const [isStreaming, setIsStreaming] = useState(false)
-  const [isOpeningWorkspace, setIsOpeningWorkspace] = useState(false)
   const [isRetrying, setIsRetrying] = useState(false)
   const [contextInput, setContextInput] = useState('')
   const [isSendingContext, setIsSendingContext] = useState(false)
@@ -1108,25 +1105,6 @@ export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
     }
   }
 
-  const onOpenWorkspace = async () => {
-    setIsOpeningWorkspace(true)
-    try {
-      const { data: session } = await workspaceStartSession({
-        path: { project_id: project.id },
-        body: {
-          branch_name: run.branch_name || undefined,
-          agent_run_id: run.id,
-        },
-        throwOnError: true,
-      })
-      navigate(`../workspace?session=${session.id}`)
-    } catch (e) {
-      console.error('Failed to open workspace:', e)
-    } finally {
-      setIsOpeningWorkspace(false)
-    }
-  }
-
   const onCancel = async () => {
     try {
       await fetch(`/api/projects/${project.id}/agents/runs/${run.id}/cancel`, {
@@ -1178,21 +1156,6 @@ export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
             <Hash className="h-3.5 w-3.5 mr-1.5" />
             PR #{run.pr_number}
           </a>
-        </Button>
-      )}
-      {!isActive && (
-        <Button
-          size="sm"
-          variant="outline"
-          disabled={isOpeningWorkspace}
-          onClick={onOpenWorkspace}
-        >
-          {isOpeningWorkspace ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" />
-          ) : (
-            <SquareTerminal className="h-3.5 w-3.5 mr-1.5" />
-          )}
-          Workspace
         </Button>
       )}
       {canRetry && (

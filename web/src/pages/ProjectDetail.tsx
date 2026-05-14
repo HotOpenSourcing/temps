@@ -48,8 +48,6 @@ import { AutofixRedirect } from '@/components/autofixer/AutofixRedirect'
 import { AgentDetailPage } from '@/components/agents/AgentDetailPage'
 import { AutopilotPage } from '@/components/agents/AutopilotPage'
 import { AutopilotRunDetail } from '@/components/agents/AutopilotRunDetail'
-import { WorkspacePage } from '@/components/workspace/WorkspacePage'
-import { NewSessionPage } from '@/components/workspace/NewSessionPage'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useEffect } from 'react'
 import {
@@ -420,14 +418,6 @@ export function ProjectDetail() {
               <Route
                 path="revenue"
                 element={<ProjectRevenue project={project} />}
-              />
-              <Route
-                path="workspace"
-                element={<WorkspacePage project={project} />}
-              />
-              <Route
-                path="workspace/new"
-                element={<NewSessionPage project={project} />}
               />
               <Route
                 path="agents"

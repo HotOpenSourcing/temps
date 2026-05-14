@@ -52,11 +52,9 @@ fn classify_backup_format(location: &str, engine: Option<&str>) -> Option<String
             return Some("mirror".to_string());
         }
     }
-    if location.starts_with("s3://") {
-        // WAL-G backups use `s3://bucket/.../walg` as their prefix. Every
-        // postgres WAL-G backup we produce matches this pattern.
-        return Some("walg".to_string());
-    }
+    // Extension-based classification runs first — it's unambiguous when
+    // the file suffix is present, regardless of whether the location is
+    // an s3:// URL or a bare key.
     if location.ends_with(".sql.gz") || location.ends_with(".pgdump.gz") {
         return Some("pg_dump".to_string());
     }
@@ -65,6 +63,16 @@ fn classify_backup_format(location: &str, engine: Option<&str>) -> Option<String
     }
     if location.ends_with(".bson.gz") || location.ends_with(".archive") {
         return Some("mongodump".to_string());
+    }
+    // WAL-G backups are uploaded by the wal-g binary as a *prefix*, not a
+    // single file. The orchestrator records the WAL-G root prefix
+    // (e.g. `s3://bucket/external_services/postgres/svc/walg`) as the
+    // backup's location. Match by path segment, NOT by `s3://` prefix —
+    // pg_dump / mongodump / rdb backups also live under `s3://...` and
+    // would otherwise get misclassified as walg.
+    let trimmed = location.trim_end_matches('/');
+    if trimmed.ends_with("/walg") || trimmed.contains("/walg/") {
+        return Some("walg".to_string());
     }
     None
 }
@@ -434,6 +442,7 @@ impl From<sea_orm::DbErr> for BackupError {
     }
 }
 
+#[derive(Clone)]
 pub struct BackupService {
     db: Arc<DatabaseConnection>,
     external_service_manager: Arc<ExternalServiceManager>,
@@ -3653,45 +3662,254 @@ impl BackupService {
         Ok(backups)
     }
 
-    /// Run a backup immediately for a given S3 source
-    pub async fn run_backup_for_source(
+    /// Insert a `backups` row and a `backup_jobs` row in a single transaction,
+    /// returning the `backups` model and the new job id.
+    ///
+    /// Used by the `BackupRunner` path (ADR-014). The row has no `s3_location`,
+    /// `finished_at`, or `size_bytes` yet — the runner's `mark_job_completed`
+    /// fills those in on `Done`.
+    ///
+    /// Both inserts are wrapped in one `db.begin()` transaction so that a DB
+    /// error in either insert rolls back both.  If the `backup_jobs` insert
+    /// fails (e.g., concurrency guard fires), the `backups` row is never
+    /// committed, preventing orphan pending rows that have no job to drive them.
+    pub async fn create_pending_backup_row(
         &self,
         s3_source_id: i32,
         backup_type: &str,
         created_by: i32,
-    ) -> Result<Backup, BackupError> {
-        use sea_orm::EntityTrait;
+        runner: &temps_backup_core::BackupRunner,
+        job_params: temps_backup_core::EnqueueJobParams,
+    ) -> Result<(Backup, i64), BackupError> {
+        use sea_orm::Set;
 
-        info!("Running backup for S3 source {}", s3_source_id);
-
-        // Verify S3 source exists
+        // Verify the S3 source exists before opening the transaction.
         temps_entities::s3_sources::Entity::find_by_id(s3_source_id)
             .one(self.db.as_ref())
             .await?
             .ok_or_else(|| BackupError::NotFound {
                 resource: "S3Source".to_string(),
-                detail: "S3 source not found".to_string(),
+                detail: format!("S3 source {} not found", s3_source_id),
             })?;
 
-        // Create the backup
-        let backup = self
-            .create_backup(
-                None, // No schedule associated
-                s3_source_id,
-                backup_type,
-                created_by,
-            )
+        let backup_uuid = Uuid::new_v4().to_string();
+        let now = chrono::Utc::now();
+
+        let txn = self.db.begin().await?;
+
+        let new_backup = temps_entities::backups::ActiveModel {
+            id: sea_orm::NotSet,
+            name: Set(format!("Backup {}", backup_uuid)),
+            backup_id: Set(backup_uuid.clone()),
+            schedule_id: Set(None),
+            backup_type: Set(backup_type.to_string()),
+            state: Set("pending".to_string()),
+            started_at: Set(now),
+            finished_at: Set(None),
+            s3_source_id: Set(s3_source_id),
+            s3_location: Set(String::new()),
+            compression_type: Set("gzip".to_string()),
+            created_by: Set(created_by),
+            tags: Set("[]".to_string()),
+            size_bytes: Set(None),
+            file_count: Set(None),
+            error_message: Set(None),
+            expires_at: Set(None),
+            checksum: Set(None),
+            last_heartbeat_at: Set(None),
+            metadata: Set(serde_json::json!({
+                "engine": "control_plane",
+                "async_runner": true,
+                "timestamp": now.to_rfc3339(),
+            })
+            .to_string()),
+        };
+
+        let backup = new_backup.insert(&txn).await?;
+
+        // Enqueue the job inside the same transaction. If this fails (e.g.,
+        // AlreadyInFlight or a DB error), the transaction is dropped and the
+        // `backups` row is rolled back — no orphan rows.
+        let job_params_with_id = temps_backup_core::EnqueueJobParams {
+            backup_id: backup.id,
+            ..job_params
+        };
+        let job_id = runner
+            .enqueue_job_in_txn(&txn, job_params_with_id)
             .await
-            .map_err(|e| {
-                error!("Backup failed for S3 source {}: {}", s3_source_id, e);
-                e
+            .map_err(|e| match e {
+                temps_backup_core::BackupRunnerError::AlreadyInFlight {
+                    ref engine,
+                    existing_job_id,
+                    ..
+                } => BackupError::Validation(format!(
+                    "A backup is already in progress for engine '{}' (job id {}). \
+                     Wait for it to complete before triggering another.",
+                    engine, existing_job_id
+                )),
+                other => BackupError::Internal {
+                    message: format!(
+                        "Failed to enqueue backup job for backup {}: {}",
+                        backup.id, other
+                    ),
+                },
             })?;
+
+        txn.commit().await?;
 
         info!(
-            "Successfully created backup {} for S3 source {}",
-            backup.backup_id, s3_source_id
+            backup_id = %backup.backup_id,
+            s3_source_id,
+            job_id,
+            "BackupService: created pending backup row and enqueued job atomically",
         );
-        Ok(backup)
+
+        Ok((backup, job_id))
+    }
+
+    /// Insert parent `backups` + child `external_service_backups` + `backup_jobs`
+    /// rows atomically in a single transaction, returning the child row and job id.
+    ///
+    /// Used by the `BackupRunner` path (ADR-014). All three rows are inserted in
+    /// one `db.begin()` transaction so that a failure at any step (including the
+    /// `backup_jobs` enqueue — e.g., a concurrency-guard `AlreadyInFlight` error)
+    /// rolls back the entire operation. This eliminates orphan `backups` rows that
+    /// sit in `state='pending'` with no job to drive them (the root cause of the
+    /// "Backup started successfully" / row-stuck-pending production bug).
+    ///
+    /// The runner's `mark_job_completed` fills in `s3_location`, `size_bytes`,
+    /// and `state='completed'` on `Done`.
+    pub async fn create_pending_external_service_backup_row(
+        &self,
+        service_id: i32,
+        s3_source_id: i32,
+        backup_type: &str,
+        created_by: i32,
+        runner: &temps_backup_core::BackupRunner,
+        job_params: temps_backup_core::EnqueueJobParams,
+    ) -> Result<(temps_entities::external_service_backups::Model, i64), BackupError> {
+        use sea_orm::Set;
+
+        // Verify the service exists before opening the transaction.
+        temps_entities::external_services::Entity::find_by_id(service_id)
+            .one(self.db.as_ref())
+            .await?
+            .ok_or_else(|| BackupError::NotFound {
+                resource: "ExternalService".to_string(),
+                detail: format!("External service with ID {} not found", service_id),
+            })?;
+
+        // Verify S3 source exists before opening the transaction.
+        temps_entities::s3_sources::Entity::find_by_id(s3_source_id)
+            .one(self.db.as_ref())
+            .await?
+            .ok_or_else(|| BackupError::NotFound {
+                resource: "S3Source".to_string(),
+                detail: format!("S3 source {} not found", s3_source_id),
+            })?;
+
+        let backup_uuid = Uuid::new_v4().to_string();
+        let now = chrono::Utc::now();
+
+        let txn = self.db.begin().await?;
+
+        // Insert parent `backups` row.
+        let parent = temps_entities::backups::ActiveModel {
+            id: sea_orm::NotSet,
+            name: Set(format!("Backup {}", backup_uuid)),
+            backup_id: Set(backup_uuid.clone()),
+            schedule_id: Set(None),
+            backup_type: Set(backup_type.to_string()),
+            state: Set("pending".to_string()),
+            started_at: Set(now),
+            finished_at: Set(None),
+            s3_source_id: Set(s3_source_id),
+            s3_location: Set(String::new()),
+            compression_type: Set("none".to_string()),
+            created_by: Set(created_by),
+            tags: Set("[]".to_string()),
+            size_bytes: Set(None),
+            file_count: Set(None),
+            error_message: Set(None),
+            expires_at: Set(None),
+            checksum: Set(None),
+            last_heartbeat_at: Set(None),
+            metadata: Set(serde_json::json!({
+                "external_service_id": service_id,
+                "async_runner": true,
+                "timestamp": now.to_rfc3339(),
+            })
+            .to_string()),
+        }
+        .insert(&txn)
+        .await?;
+
+        // Insert child `external_service_backups` row.
+        let child = temps_entities::external_service_backups::ActiveModel {
+            id: sea_orm::NotSet,
+            service_id: Set(service_id),
+            backup_id: Set(parent.id),
+            backup_type: Set(backup_type.to_string()),
+            state: Set("pending".to_string()),
+            started_at: Set(now),
+            finished_at: Set(None),
+            size_bytes: Set(None),
+            s3_location: Set(String::new()),
+            error_message: Set(None),
+            metadata: Set(serde_json::json!({
+                "async_runner": true,
+                "backup_uuid": backup_uuid,
+                "timestamp": now.to_rfc3339(),
+            })),
+            checksum: Set(None),
+            compression_type: Set("none".to_string()),
+            created_by: Set(created_by),
+            expires_at: Set(None),
+        }
+        .insert(&txn)
+        .await?;
+
+        // Enqueue the backup_jobs row inside the same transaction. If this fails
+        // (e.g., AlreadyInFlight, DB error), dropping `txn` rolls back both the
+        // `backups` and `external_service_backups` rows — no orphans.
+        let job_params_with_id = temps_backup_core::EnqueueJobParams {
+            backup_id: parent.id,
+            ..job_params
+        };
+        let job_id = runner
+            .enqueue_job_in_txn(&txn, job_params_with_id)
+            .await
+            .map_err(|e| match e {
+                temps_backup_core::BackupRunnerError::AlreadyInFlight {
+                    ref engine,
+                    existing_job_id,
+                    ..
+                } => BackupError::Validation(format!(
+                    "A backup is already in progress for engine '{}' (job id {}). \
+                     Wait for it to complete before triggering another.",
+                    engine, existing_job_id
+                )),
+                other => BackupError::Internal {
+                    message: format!(
+                        "Failed to enqueue backup job for external service {}: {}",
+                        service_id, other
+                    ),
+                },
+            })?;
+
+        txn.commit().await?;
+
+        info!(
+            backup_id = %backup_uuid,
+            service_id,
+            s3_source_id,
+            parent_row_id = parent.id,
+            child_row_id = child.id,
+            job_id,
+            "BackupService: created pending external service backup rows and enqueued job atomically",
+        );
+
+        Ok((child, job_id))
     }
 
     /// Update an S3 source
@@ -3923,17 +4141,58 @@ impl BackupService {
         let mut seen_locations: std::collections::HashSet<String> =
             std::collections::HashSet::new();
 
+        // Cache for external_services lookups so we don't refetch the same
+        // row N times within a single listing. Keyed by external_services.id.
+        let mut ext_service_cache: std::collections::HashMap<i32, Option<(String, String)>> =
+            std::collections::HashMap::new();
+
         for backup in db_rows {
             let metadata: serde_json::Value =
                 serde_json::from_str(&backup.metadata).unwrap_or(serde_json::Value::Null);
-            let service_name = metadata
+            let mut service_name = metadata
                 .get("service_name")
                 .and_then(|v| v.as_str())
                 .map(String::from);
-            let service_type = metadata
+            let mut service_type = metadata
                 .get("service_type")
                 .and_then(|v| v.as_str())
                 .map(String::from);
+
+            // ADR-014 async runner rows write only `external_service_id` into
+            // metadata (not `service_name`/`service_type`). Without filling
+            // those in, the frontend ServiceDetail.tsx page filters them out
+            // (it matches by `origin_service_name === serviceName`) and the
+            // user's failed/pending backups become invisible. Look up the
+            // external service once per id and cache.
+            if service_name.is_none() || service_type.is_none() {
+                if let Some(ext_id) = metadata
+                    .get("external_service_id")
+                    .and_then(|v| v.as_i64())
+                    .and_then(|v| i32::try_from(v).ok())
+                {
+                    let cached = ext_service_cache.entry(ext_id).or_insert_with_key(|_| None);
+                    if cached.is_none() {
+                        // Cache miss — try the DB. A None result means we
+                        // already failed once; don't refetch. We can't reuse
+                        // the entry api's value because we need an async call.
+                        if let Ok(Some(svc)) =
+                            temps_entities::external_services::Entity::find_by_id(ext_id)
+                                .one(self.db.as_ref())
+                                .await
+                        {
+                            *cached = Some((svc.name.clone(), svc.service_type.clone()));
+                        }
+                    }
+                    if let Some((n, t)) = cached.clone() {
+                        if service_name.is_none() {
+                            service_name = Some(n);
+                        }
+                        if service_type.is_none() {
+                            service_type = Some(t);
+                        }
+                    }
+                }
+            }
 
             // Skip control-plane backups — this endpoint powers the
             // "restore into an external service" UI, and whole-Temps-DB
@@ -3941,7 +4200,31 @@ impl BackupService {
             // metadata) are not valid candidates for that flow. They'd
             // render as "pg_dump" with blank engine and confuse users
             // into thinking they could be restored onto their service.
-            if service_type.is_none() && !backup.s3_location.contains("external_services/") {
+            //
+            // Rows created by the ADR-014 async runner for external services
+            // may have an empty `s3_location` while pending (the location is
+            // filled in by `mark_job_completed` on `Done`). These rows carry
+            // `external_service_id` in their metadata — that field is the
+            // canonical signal that the row belongs to an external service.
+            // Using the `s3_location` alone to classify pending/failed rows
+            // is the root cause of the "invisible backups" bug (Bug 4).
+            let has_external_service_id = metadata.get("external_service_id").is_some();
+            let is_control_plane =
+                metadata.get("engine").and_then(|v| v.as_str()) == Some("control_plane");
+            let is_external_service_location = backup.s3_location.contains("external_services/");
+
+            // Include the row only if it is clearly an external-service backup.
+            // Rule: skip if none of the three external-service signals are present.
+            if !has_external_service_id
+                && !is_external_service_location
+                && service_type.is_none()
+                && !is_control_plane
+            {
+                // Not enough signal — could be legacy orphan data. Skip.
+                continue;
+            }
+            // Always skip confirmed control-plane backups.
+            if is_control_plane && !is_external_service_location {
                 continue;
             }
 
@@ -4575,11 +4858,26 @@ impl BackupService {
             .all(self.db.as_ref())
             .await?;
 
+        // Spawn each schedule's work in its own task so one hung backup
+        // (slow S3, stuck docker exec, runaway pg_dump) can't wedge the
+        // entire scheduler loop. Before this change, a Redis backup that
+        // never returned from `backup_external_service` would block every
+        // other schedule from firing for that hour AND prevent the next
+        // hourly tick. The HeartbeatGuard + stall sweeper handle the
+        // stuck-row side; here we only need to make sure dispatch is
+        // never serialized.
+        //
+        // We don't await the join handles — the parent loop's job is to
+        // dispatch, not to babysit. Failures bubble up via the row's
+        // `error_message` and the notification path inside
+        // `process_backup_schedule`, not via this return value.
         for schedule in schedules {
-            if let Err(e) = self.process_backup_schedule(&schedule, now).await {
-                error!("Error processing backup schedule {}: {}", schedule.id, e);
-                continue;
-            }
+            let svc = self.clone();
+            tokio::spawn(async move {
+                if let Err(e) = svc.process_backup_schedule(&schedule, now).await {
+                    error!("Error processing backup schedule {}: {}", schedule.id, e);
+                }
+            });
         }
 
         Ok(())
@@ -4723,6 +5021,39 @@ impl BackupService {
         self.get_backup_schedule(id).await
     }
 
+    /// Return the external service record linked to a backup via the
+    /// `external_service_backups` join table, or `None` if no such row
+    /// exists (e.g. for control-plane backups).
+    ///
+    /// Used by `GET /backups/{id}` to populate `external_service` in the
+    /// response without requiring an N+1 join at the handler level.
+    pub async fn get_backup_external_service(
+        &self,
+        backup_id: i32,
+    ) -> Result<Option<temps_entities::external_services::Model>, BackupError> {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        // Look up the child row in external_service_backups for this backup.
+        let child = temps_entities::external_service_backups::Entity::find()
+            .filter(temps_entities::external_service_backups::Column::BackupId.eq(backup_id))
+            .one(self.db.as_ref())
+            .await?;
+
+        let service_id = match child {
+            Some(row) => row.service_id,
+            None => return Ok(None),
+        };
+
+        // Load the parent external_services row. A missing row here is an
+        // unexpected data-integrity gap, but we swallow it gracefully so
+        // the backup detail page can still render.
+        let service = temps_entities::external_services::Entity::find_by_id(service_id)
+            .one(self.db.as_ref())
+            .await?;
+
+        Ok(service)
+    }
+
     // Add this new method
     pub async fn enable_backup_schedule(
         &self,
@@ -4802,6 +5133,97 @@ mod tests {
     use temps_core::notifications::{EmailMessage, NotificationData, NotificationError};
     use temps_core::EncryptionService;
     use temps_entities::{backup_schedules, s3_sources};
+
+    #[test]
+    fn classify_pgdump_by_extension() {
+        let loc = "s3://bucket/external_services/postgres/svc/2026/05/01/uuid/backup.sql.gz";
+        assert_eq!(
+            classify_backup_format(loc, Some("postgres")),
+            Some("pg_dump".to_string())
+        );
+    }
+
+    #[test]
+    fn classify_walg_by_prefix_segment() {
+        let loc = "s3://bucket/external_services/postgres/svc/walg";
+        assert_eq!(
+            classify_backup_format(loc, Some("postgres")),
+            Some("walg".to_string())
+        );
+    }
+
+    #[test]
+    fn classify_walg_with_trailing_slash() {
+        let loc = "s3://bucket/external_services/postgres/svc/walg/";
+        assert_eq!(
+            classify_backup_format(loc, Some("postgres")),
+            Some("walg".to_string())
+        );
+    }
+
+    #[test]
+    fn classify_walg_sentinel_object_under_prefix() {
+        // S3 scan may pass the sentinel key directly — still walg.
+        let loc =
+            "s3://bucket/external_services/postgres/svc/walg/basebackups_005/base_000_backup_stop_sentinel.json";
+        assert_eq!(
+            classify_backup_format(loc, Some("postgres")),
+            Some("walg".to_string())
+        );
+    }
+
+    #[test]
+    fn classify_redis_rdb() {
+        let loc = "s3://bucket/external_services/redis/svc/2026/05/01/uuid/dump.rdb.gz";
+        assert_eq!(
+            classify_backup_format(loc, Some("redis")),
+            Some("rdb".to_string())
+        );
+    }
+
+    #[test]
+    fn classify_mongodump() {
+        let loc = "s3://bucket/external_services/mongodb/svc/2026/05/01/uuid/dump.archive";
+        assert_eq!(
+            classify_backup_format(loc, Some("mongodb")),
+            Some("mongodump".to_string())
+        );
+    }
+
+    #[test]
+    fn classify_s3_mirror_is_engine_driven() {
+        // The location for an s3-mirror backup doesn't have a meaningful
+        // extension; engine name carries the classification.
+        let loc = "s3://bucket/external_services/s3/svc/2026/05/01/uuid";
+        assert_eq!(
+            classify_backup_format(loc, Some("s3")),
+            Some("mirror".to_string())
+        );
+    }
+
+    #[test]
+    fn classify_empty_location_returns_none() {
+        assert_eq!(classify_backup_format("", Some("postgres")), None);
+    }
+
+    #[test]
+    fn classify_does_not_default_s3_uris_to_walg() {
+        // Regression: any `s3://...` location used to be classified as
+        // walg, mislabeling every pg_dump / rdb / mongodump backup that
+        // happened to live in S3 (which is all of them). The classifier
+        // must require an explicit `walg` path segment.
+        let loc = "s3://bucket/external_services/postgres/svc/2026/05/01/uuid/backup.sql.gz";
+        assert_eq!(
+            classify_backup_format(loc, Some("postgres")),
+            Some("pg_dump".to_string())
+        );
+
+        // Unknown extension, no walg segment, not an object-store engine —
+        // we genuinely don't know. Better to return None than to
+        // confidently mislabel.
+        let unknown = "s3://bucket/external_services/postgres/svc/some/random/key";
+        assert_eq!(classify_backup_format(unknown, Some("postgres")), None);
+    }
 
     // Simple mock notification service for testing
     struct TestNotificationService;
@@ -5988,6 +6410,256 @@ mod tests {
             }
             _ => panic!("Expected validation error for empty name"),
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Bug 2: enqueue failure must roll back the parent backups row
+    // -------------------------------------------------------------------------
+
+    /// Regression test for the orphan-row bug (Bug 2).
+    ///
+    /// Before the fix, `create_pending_backup_row` inserted the `backups` row in
+    /// one transaction and then called `runner.enqueue_job(...)` separately. If
+    /// the enqueue failed (e.g., AlreadyInFlight, DB error), the `backups` row
+    /// was already committed and the user was left with an orphan pending row that
+    /// had no job to drive it.
+    ///
+    /// After the fix both inserts share one transaction. We simulate the enqueue
+    /// failing (concurrency guard returns an existing in-flight job) and assert
+    /// that the service method returns a `BackupError::Validation` error (not
+    /// `Ok`), proving the error propagated rather than being swallowed.
+    /// The MockDatabase transaction semantics ensure both inserts are rolled back
+    /// when the method returns `Err`.
+    #[tokio::test]
+    async fn test_enqueue_failure_rolls_back_parent_backup_row() {
+        use sea_orm::Value as SVal;
+        use std::collections::BTreeMap;
+
+        // Query sequence inside `create_pending_backup_row`:
+        //   1. SELECT s3_sources WHERE id = 1  → s3_source found
+        //   2. (txn begins)
+        //   3. INSERT INTO backups              → insert succeeds (returns new row)
+        //   4. SELECT backup_jobs (guard query) → returns existing in-flight row
+        //      → this causes AlreadyInFlight → mapped to BackupError::Validation
+        //      → transaction is dropped (rolled back)
+
+        let s3_src = temps_entities::s3_sources::Model {
+            id: 1,
+            name: "test-src".to_string(),
+            bucket_name: "bucket".to_string(),
+            region: "us-east-1".to_string(),
+            endpoint: None,
+            bucket_path: "/backups".to_string(),
+            access_key_id: "key".to_string(),
+            secret_key: "secret".to_string(),
+            force_path_style: Some(true),
+            is_default: false,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let inserted_backup = temps_entities::backups::Model {
+            id: 10,
+            name: "Backup xyz".to_string(),
+            backup_id: "xyz".to_string(),
+            schedule_id: None,
+            backup_type: "full".to_string(),
+            state: "pending".to_string(),
+            started_at: Utc::now(),
+            finished_at: None,
+            size_bytes: None,
+            file_count: None,
+            s3_source_id: 1,
+            s3_location: String::new(),
+            error_message: None,
+            metadata: serde_json::json!({"engine":"control_plane","async_runner":true}).to_string(),
+            checksum: None,
+            compression_type: "gzip".to_string(),
+            created_by: 1,
+            expires_at: None,
+            tags: "[]".to_string(),
+            last_heartbeat_at: None,
+        };
+
+        // Existing in-flight job row for the guard SELECT.
+        let mut existing_job: BTreeMap<String, SVal> = BTreeMap::new();
+        existing_job.insert("id".to_string(), SVal::BigInt(Some(77)));
+
+        let db = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                // Query 1: s3_source lookup
+                .append_query_results(vec![vec![s3_src]])
+                // Query 2: backups INSERT (inside txn)
+                .append_query_results(vec![vec![inserted_backup]])
+                // Query 3: concurrency guard SELECT (inside txn) — returns in-flight job
+                .append_query_results(vec![vec![existing_job]])
+                .into_connection(),
+        );
+
+        let external_service_manager = create_mock_external_service_manager(db.clone());
+        let notification_service = create_mock_notification_service();
+        let config_service = create_mock_config_service();
+        let encryption_service =
+            Arc::new(EncryptionService::new("test_encryption_key_1234567890ab").unwrap());
+
+        let backup_service = BackupService::new(
+            db.clone(),
+            external_service_manager,
+            notification_service,
+            config_service,
+            encryption_service,
+        );
+
+        // Build a runner backed by the same MockDatabase.
+        let runner =
+            temps_backup_core::BackupRunner::new(db, temps_backup_core::RunnerConfig::default());
+
+        let job_params = temps_backup_core::EnqueueJobParams {
+            backup_id: 0, // overwritten by service
+            engine: "control_plane".to_string(),
+            target_kind: "control_plane".to_string(),
+            target_id: None,
+            params: serde_json::json!({ "s3_source_id": 1 }),
+            max_attempts: None,
+        };
+
+        let result = backup_service
+            .create_pending_backup_row(1, "full", 1, &runner, job_params)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "create_pending_backup_row must return Err when enqueue fails (AlreadyInFlight)"
+        );
+
+        // The error must be Validation (mapped from AlreadyInFlight), not Internal.
+        assert!(
+            matches!(result.unwrap_err(), BackupError::Validation(_)),
+            "AlreadyInFlight from enqueue should be mapped to BackupError::Validation, \
+             which surfaces as HTTP 400 rather than swallowing the error"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Bug 4: list_source_backups must include pending/failed rows without s3_location
+    // -------------------------------------------------------------------------
+
+    /// Regression test for the "invisible backups" bug (Bug 4).
+    ///
+    /// ADR-014 async-runner-created backups start with `s3_location = ""` because
+    /// the location is only filled in by `mark_job_completed` when `Done` fires.
+    /// Before the fix, the `list_source_backups` query skipped any row where
+    /// `s3_location` was empty AND `s3_location` didn't contain `"external_services/"`.
+    /// This made every pending/failed backup invisible in the UI.
+    ///
+    /// The fix: rows that carry `external_service_id` in their JSON metadata are
+    /// always included, even with an empty `s3_location`.
+    #[tokio::test]
+    async fn test_list_source_backups_includes_pending_rows_without_s3_location() {
+        use temps_entities::{backups, s3_sources};
+
+        let s3_src = s3_sources::Model {
+            id: 1,
+            name: "test-src".to_string(),
+            bucket_name: "bucket".to_string(),
+            region: "us-east-1".to_string(),
+            endpoint: None,
+            bucket_path: "/backups".to_string(),
+            access_key_id: "key".to_string(),
+            secret_key: "secret".to_string(),
+            force_path_style: Some(true),
+            is_default: false,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        // A runner-created external service backup in `pending` state with empty
+        // `s3_location`.  The metadata carries `external_service_id` which is the
+        // signal introduced by the fix.
+        let pending_backup = backups::Model {
+            id: 55,
+            name: "Backup abc-123".to_string(),
+            backup_id: "abc-123".to_string(),
+            schedule_id: None,
+            backup_type: "full".to_string(),
+            state: "pending".to_string(),
+            started_at: Utc::now(),
+            finished_at: None,
+            size_bytes: None,
+            file_count: None,
+            s3_source_id: 1,
+            s3_location: String::new(), // empty — the bug trigger
+            error_message: None,
+            metadata: serde_json::json!({
+                "external_service_id": 42,
+                "async_runner": true,
+                "timestamp": Utc::now().to_rfc3339(),
+            })
+            .to_string(),
+            checksum: None,
+            compression_type: "none".to_string(),
+            created_by: 1,
+            expires_at: None,
+            tags: "[]".to_string(),
+            last_heartbeat_at: None,
+        };
+
+        // MockDatabase query sequence for `list_source_backups`:
+        // 1. SELECT s3_sources WHERE id = 1   → returns our s3_src row
+        // 2. SELECT backups WHERE s3_source_id = 1 → returns pending_backup
+        let db = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results(vec![vec![s3_src]])
+                .append_query_results(vec![vec![pending_backup]])
+                .into_connection(),
+        );
+
+        let external_service_manager = create_mock_external_service_manager(db.clone());
+        let notification_service = create_mock_notification_service();
+        let config_service = create_mock_config_service();
+        let encryption_service =
+            Arc::new(EncryptionService::new("test_encryption_key_1234567890ab").unwrap());
+
+        let backup_service = BackupService::new(
+            db,
+            external_service_manager,
+            notification_service,
+            config_service,
+            encryption_service,
+        );
+
+        let result = backup_service.list_source_backups(1).await;
+        assert!(
+            result.is_ok(),
+            "list_source_backups should not fail: {:?}",
+            result
+        );
+
+        let index = result.unwrap();
+        let backups_arr = index
+            .get("backups")
+            .and_then(|v| v.as_array())
+            .expect("response must have a 'backups' array");
+
+        assert_eq!(
+            backups_arr.len(),
+            1,
+            "Expected 1 backup entry (the pending row), got {}; Bug 4 regression: \
+             pending rows with empty s3_location were being filtered out",
+            backups_arr.len()
+        );
+
+        let entry = &backups_arr[0];
+        assert_eq!(
+            entry.get("state").and_then(|v| v.as_str()),
+            Some("pending"),
+            "The returned entry should have state='pending'"
+        );
+        assert_eq!(
+            entry.get("id").and_then(|v| v.as_i64()),
+            Some(55),
+            "The returned entry should have id=55"
+        );
     }
 
     // -------------------------------------------------------------------------

@@ -13,14 +13,34 @@ import {
   FormMessage,
 } from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '@/components/ui/collapsible'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { AlertTriangle } from 'lucide-react'
+import { AlertTriangle, ChevronDown, ChevronRight } from 'lucide-react'
 import { customAlphabet } from 'nanoid'
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useForm, useWatch } from 'react-hook-form'
 import { toast } from 'sonner'
 import * as z from 'zod'
+
+/**
+ * Parameter names that get tucked into the "Advanced" collapsible by
+ * default. Heroku/Render users were confused by `database`, `username`,
+ * and `password` showing up at the top — Temps creates a per-project
+ * `<project>_<env>` database for each linked project automatically, so
+ * the default admin credentials are rarely what the user needs to edit.
+ */
+const ADVANCED_PARAM_NAMES = new Set([
+  'database',
+  'username',
+  'password',
+  'access_key',
+  'secret_key',
+])
 
 /** Service types that support WAL-G streaming backups */
 const WALG_SERVICE_TYPES = ['postgres', 'redis', 'mongodb']
@@ -75,6 +95,61 @@ interface CreateServiceFormProps {
   onSuccess: (data: CreateServiceResponse) => void
 }
 
+type ParamFieldObj = {
+  name: string
+  required?: boolean
+  encrypted?: boolean
+  validation_pattern?: string
+  default_value?: string
+  description?: string
+  type?: string
+}
+
+function ParamField({
+  paramObj,
+  control,
+}: {
+  paramObj: ParamFieldObj
+  control: any
+}) {
+  return (
+    <FormField
+      control={control}
+      name={`parameters.${paramObj.name}`}
+      render={({ field }) => (
+        <FormItem>
+          <FormLabel>
+            {paramObj.name}
+            {paramObj.required && <span className="text-destructive">*</span>}
+          </FormLabel>
+          <FormControl>
+            <Input
+              {...field}
+              value={field.value as string}
+              type={
+                paramObj.encrypted
+                  ? 'password'
+                  : paramObj.type === 'number'
+                    ? 'number'
+                    : 'text'
+              }
+              required={paramObj.required}
+              pattern={paramObj.validation_pattern || undefined}
+              placeholder={paramObj.default_value || undefined}
+            />
+          </FormControl>
+          {paramObj.description && (
+            <p className="text-sm text-muted-foreground">
+              {paramObj.description}
+            </p>
+          )}
+          <FormMessage />
+        </FormItem>
+      )}
+    />
+  )
+}
+
 export function CreateServiceForm({
   serviceType,
   onCancel,
@@ -84,6 +159,7 @@ export function CreateServiceForm({
     () => `${serviceType}-${generateId()}`,
     [serviceType]
   )
+  const [isAdvancedOpen, setIsAdvancedOpen] = useState(false)
 
   // Fetch parameters for the selected service type
   const { data: parametersResponse, isLoading: isLoadingParameters } = useQuery(
@@ -310,11 +386,8 @@ export function CreateServiceForm({
         />
 
         {Array.isArray(parameters) &&
-          parameters.map((param) => {
-            if (!param || typeof param !== 'object' || !('name' in param)) {
-              return null
-            }
-            const paramObj = param as {
+          (() => {
+            type ParamObj = {
               name: string
               required?: boolean
               encrypted?: boolean
@@ -323,46 +396,61 @@ export function CreateServiceForm({
               description?: string
               type?: string
             }
-            return (
-              <FormField
-                key={paramObj.name}
-                control={form.control}
-                name={`parameters.${paramObj.name}`}
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>
-                      {paramObj.name}
-                      {paramObj.required && (
-                        <span className="text-destructive">*</span>
-                      )}
-                    </FormLabel>
-                    <FormControl>
-                      <Input
-                        {...field}
-                        value={field.value as string}
-                        type={
-                          paramObj.encrypted
-                            ? 'password'
-                            : paramObj.type === 'number'
-                              ? 'number'
-                              : 'text'
-                        }
-                        required={paramObj.required}
-                        pattern={paramObj.validation_pattern || undefined}
-                        placeholder={paramObj.default_value || undefined}
-                      />
-                    </FormControl>
-                    {paramObj.description && (
-                      <p className="text-sm text-muted-foreground">
-                        {paramObj.description}
-                      </p>
-                    )}
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
+            const valid = (parameters as unknown[]).filter(
+              (p): p is ParamObj =>
+                !!p && typeof p === 'object' && 'name' in (p as object),
             )
-          })}
+            const basic = valid.filter(
+              (p) => !ADVANCED_PARAM_NAMES.has(p.name.toLowerCase()),
+            )
+            const advanced = valid.filter((p) =>
+              ADVANCED_PARAM_NAMES.has(p.name.toLowerCase()),
+            )
+            return (
+              <>
+                {basic.map((paramObj) => (
+                  <ParamField
+                    key={paramObj.name}
+                    paramObj={paramObj}
+                    control={form.control}
+                  />
+                ))}
+                {advanced.length > 0 && (
+                  <Collapsible
+                    open={isAdvancedOpen}
+                    onOpenChange={setIsAdvancedOpen}
+                  >
+                    <CollapsibleTrigger asChild>
+                      <button
+                        type="button"
+                        className="flex items-center gap-1.5 text-sm font-medium text-muted-foreground hover:text-foreground"
+                      >
+                        {isAdvancedOpen ? (
+                          <ChevronDown className="h-4 w-4" />
+                        ) : (
+                          <ChevronRight className="h-4 w-4" />
+                        )}
+                        Advanced configuration
+                        <span className="text-xs text-muted-foreground/70">
+                          (default DB / credentials — Temps auto-creates a
+                          per-project database for each linked project)
+                        </span>
+                      </button>
+                    </CollapsibleTrigger>
+                    <CollapsibleContent className="space-y-4 pt-2">
+                      {advanced.map((paramObj) => (
+                        <ParamField
+                          key={paramObj.name}
+                          paramObj={paramObj}
+                          control={form.control}
+                        />
+                      ))}
+                    </CollapsibleContent>
+                  </Collapsible>
+                )}
+              </>
+            )
+          })()}
 
         <BackupWarning control={form.control} serviceType={serviceType} />
 

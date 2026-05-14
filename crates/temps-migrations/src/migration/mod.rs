@@ -87,6 +87,7 @@ mod m20260505_000001_create_events_ch_outbox;
 mod m20260507_000001_add_workspace_preview_password_encrypted;
 mod m20260511_000001_create_cli_login_sessions;
 mod m20260511_000002_add_is_secret_to_env_vars;
+mod m20260514_000001_create_backup_jobs;
 
 pub struct Migrator;
 
@@ -177,6 +178,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260507_000001_add_workspace_preview_password_encrypted::Migration),
             Box::new(m20260511_000001_create_cli_login_sessions::Migration),
             Box::new(m20260511_000002_add_is_secret_to_env_vars::Migration),
+            Box::new(m20260514_000001_create_backup_jobs::Migration),
         ]
     }
 }

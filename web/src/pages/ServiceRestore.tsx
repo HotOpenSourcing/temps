@@ -135,7 +135,7 @@ export function ServiceRestore() {
   useEffect(() => {
     if (!service) return
     setBreadcrumbs([
-      { label: 'Storage', href: '/storage' },
+      { label: 'Databases', href: '/storage' },
       { label: service.name, href: `/storage/${serviceId}` },
       { label: 'Restore' },
     ])

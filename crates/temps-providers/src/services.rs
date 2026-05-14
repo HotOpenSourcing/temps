@@ -7356,6 +7356,122 @@ echo "[restore] Pre-seed complete"
         Ok(result)
     }
 
+    /// Preview the env vars a deployment in `environment_id` would receive
+    /// from every service linked to `project_id`. Side-effect-free: skips
+    /// `CREATE DATABASE` / bucket creation that the real runtime path
+    /// performs. Used by the resolved env vars UI so users can switch
+    /// between environments and see the actual `<project>_<env>` values.
+    pub async fn preview_project_service_environment_variables(
+        &self,
+        project_id_val: i32,
+        environment_id: i32,
+    ) -> Result<HashMap<i32, HashMap<String, String>>, ExternalServiceError> {
+        let project = projects::Entity::find_by_id(project_id_val)
+            .one(self.db.as_ref())
+            .await?
+            .ok_or(ExternalServiceError::ProjectNotFound { id: project_id_val })?;
+        let environment = temps_entities::environments::Entity::find_by_id(environment_id)
+            .one(self.db.as_ref())
+            .await?
+            .ok_or_else(|| ExternalServiceError::InternalError {
+                reason: format!("Environment {} not found", environment_id),
+            })?;
+
+        let linked_services = project_services::Entity::find()
+            .filter(project_services::Column::ProjectId.eq(project_id_val))
+            .all(self.db.as_ref())
+            .await?;
+
+        let mut result = HashMap::new();
+        for linked in linked_services {
+            match self
+                .preview_service_environment_variables(
+                    linked.service_id,
+                    &project.slug,
+                    &environment.slug,
+                )
+                .await
+            {
+                Ok(env_vars) => {
+                    result.insert(linked.service_id, env_vars);
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to preview environment variables for service {}: {}",
+                        linked.service_id, e
+                    );
+                    continue;
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Side-effect-free per-service env var preview. Mirrors
+    /// `get_service_environment_variables` but calls
+    /// `preview_runtime_env_vars` on the service instance so no databases
+    /// or buckets get provisioned. Cluster services fall back to their
+    /// regular env var path because `build_cluster_env_vars` reads from
+    /// `service_members` and doesn't provision anything.
+    async fn preview_service_environment_variables(
+        &self,
+        service_id_val: i32,
+        project_slug: &str,
+        environment_slug: &str,
+    ) -> Result<HashMap<String, String>, ExternalServiceError> {
+        let service = self.get_service(service_id_val).await?;
+        let service_type = ServiceType::from_str(&service.service_type).map_err(|_| {
+            ExternalServiceError::InvalidServiceType {
+                id: service_id_val,
+                service_type: service.service_type.clone(),
+            }
+        })?;
+        let parameters = self.get_service_parameters(service_id_val).await?;
+
+        let resource_name = crate::externalsvc::postgres::PostgresService::normalize_database_name(
+            &format!("{}_{}", project_slug, environment_slug),
+        );
+
+        if service.topology == "cluster" && service.service_type == "postgres" {
+            if let Some(cluster_vars) = self
+                .build_cluster_env_vars_for_resource(&service, &parameters, Some(&resource_name))
+                .await?
+            {
+                return Ok(cluster_vars);
+            }
+        }
+        if let Some(cluster_vars) = self.build_cluster_env_vars(&service, &parameters).await? {
+            return Ok(cluster_vars);
+        }
+
+        let service_instance = self.create_service_instance(service.name.clone(), service_type);
+        let service_config = ServiceConfig {
+            name: service.name.clone(),
+            service_type,
+            version: service.version,
+            parameters: serde_json::to_value(&parameters).map_err(|e| {
+                ExternalServiceError::InternalError {
+                    reason: format!("Failed to serialize parameters: {}", e),
+                }
+            })?,
+        };
+
+        service_instance
+            .init(service_config.clone())
+            .await
+            .map_err(|e| ExternalServiceError::InternalError {
+                reason: format!("Failed to initialize service: {}", e),
+            })?;
+
+        service_instance
+            .preview_runtime_env_vars(service_config, project_slug, environment_slug)
+            .await
+            .map_err(|e| ExternalServiceError::InternalError {
+                reason: format!("Failed to preview runtime environment variables: {}", e),
+            })
+    }
+
     pub async fn get_service_type_schema(
         &self,
         service_type: ServiceType,

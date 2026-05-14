@@ -18,6 +18,8 @@ pub mod audit_logs;
 pub mod autopilot_configs;
 pub mod autopilot_run_logs;
 pub mod autopilot_runs;
+pub mod backup_job_steps;
+pub mod backup_jobs;
 pub mod backup_schedules;
 pub mod backups;
 pub mod challenge_sessions;
@@ -131,10 +133,6 @@ pub mod log_events;
 
 // Standalone sandbox API (Vercel-compatible)
 pub mod sandboxes;
-
-// Workspace entities
-pub mod workspace_messages;
-pub mod workspace_sessions;
 
 // Workflow memory
 pub mod workflow_memory;

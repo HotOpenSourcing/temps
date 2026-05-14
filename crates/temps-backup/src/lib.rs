@@ -1,5 +1,6 @@
 //! backup services and utilities
 
+pub mod engines;
 pub mod handlers;
 pub mod plugin;
 pub mod services;

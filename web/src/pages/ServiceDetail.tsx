@@ -305,7 +305,7 @@ export function ServiceDetail() {
   useEffect(() => {
     if (service) {
       setBreadcrumbs([
-        { label: 'Storage', href: '/storage' },
+        { label: 'Databases', href: '/storage' },
         {
           label: service.service.name || 'Service Details',
           href: `/storage/${id}`,
@@ -313,7 +313,7 @@ export function ServiceDetail() {
       ])
     } else {
       setBreadcrumbs([
-        { label: 'Storage', href: '/storage' },
+        { label: 'Databases', href: '/storage' },
         { label: 'Service Details', href: `/storage/${id}` },
       ])
     }
@@ -638,6 +638,13 @@ export function ServiceDetail() {
                 <div className="border-b p-3">
                   <p className="text-xs font-medium text-muted-foreground">
                     Linked projects
+                  </p>
+                  <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                    Linking creates a dedicated{' '}
+                    <code className="rounded bg-muted px-1 py-0.5 font-mono">
+                      {'<project>_<env>'}
+                    </code>{' '}
+                    database per environment. No extra services are spun up.
                   </p>
                   {linkedProjectsLoading ? (
                     <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">

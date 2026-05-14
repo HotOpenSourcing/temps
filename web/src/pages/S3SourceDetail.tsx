@@ -65,6 +65,7 @@ import {
 } from '@/components/ui/table'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { usePageTitle } from '@/hooks/usePageTitle'
+import { testS3SourceConnection } from '@/lib/s3-sources'
 import { cn } from '@/lib/utils'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { format } from 'date-fns'
@@ -73,7 +74,9 @@ import {
   CalendarDays,
   Database,
   DatabaseBackup,
+  Loader2,
   MoreHorizontal,
+  Plug,
   Plus,
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
@@ -183,6 +186,30 @@ export function S3SourceDetail() {
       setCustomCron('')
       setIsCreateDialogOpen(false)
       toast.success('Backup schedule created successfully')
+    },
+  })
+
+  // Probes the S3 source's credentials, region, and bucket reachability
+  // via the existing POST /backups/s3-sources/{id}/test endpoint.
+  // Surfaces the server's `{ ok, message }` verbatim in a toast so operators
+  // can confirm a source works before relying on it for backups.
+  const testConnectionMutation = useMutation({
+    mutationFn: () => {
+      if (!sourceId) {
+        return Promise.reject(new Error('S3 source id is unknown'))
+      }
+      return testS3SourceConnection(sourceId)
+    },
+    onSuccess: (result) => {
+      if (result.ok) {
+        toast.success('S3 connection succeeded', { description: result.message })
+      } else {
+        toast.error('S3 connection failed', { description: result.message })
+      }
+    },
+    onError: (err: unknown) => {
+      const message = err instanceof Error ? err.message : 'Unknown error'
+      toast.error('S3 connection test failed', { description: message })
     },
   })
 
@@ -316,6 +343,19 @@ export function S3SourceDetail() {
             </Link>
           </Button>
         </div>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => testConnectionMutation.mutate()}
+          disabled={testConnectionMutation.isPending || !sourceId}
+        >
+          {testConnectionMutation.isPending ? (
+            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+          ) : (
+            <Plug className="mr-2 h-4 w-4" />
+          )}
+          Test connection
+        </Button>
       </div>
 
       <div className="grid gap-6">

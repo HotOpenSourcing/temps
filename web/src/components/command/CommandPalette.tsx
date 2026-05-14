@@ -149,10 +149,10 @@ const settingsNavItems: NavigationItem[] = [
     keywords: ['dns', 'urls', 'websites', 'custom domain'],
   },
   {
-    title: 'Storage',
+    title: 'Databases',
     url: '/storage',
     icon: Database,
-    keywords: ['database', 'files', 'data', 'services'],
+    keywords: ['database', 'databases', 'storage', 'files', 'data', 'services'],
   },
   {
     title: 'Email',
@@ -369,10 +369,10 @@ const projectNavItems: NavigationItem[] = [
     keywords: ['setup', 'configuration', 'install', 'analytics'],
   },
   {
-    title: 'Storage',
+    title: 'Databases',
     url: 'storage',
     icon: Database,
-    keywords: ['database', 'storage', 'data'],
+    keywords: ['database', 'databases', 'storage', 'data'],
   },
   {
     title: 'Logs',

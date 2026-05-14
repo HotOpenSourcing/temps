@@ -11050,6 +11050,7 @@ name = "temps-backup"
 version = "0.1.0-beta.9"
 dependencies = [
  "anyhow",
+ "async-stream",
  "async-trait",
  "aws-sdk-s3",
  "axum 0.8.6",
@@ -11065,6 +11066,7 @@ dependencies = [
  "serde_yaml",
  "tempfile",
  "temps-auth",
+ "temps-backup-core",
  "temps-config",
  "temps-core",
  "temps-database",
@@ -11081,6 +11083,25 @@ dependencies = [
  "url",
  "urlencoding",
  "utoipa",
+ "uuid",
+]
+
+[[package]]
+name = "temps-backup-core"
+version = "0.1.0-beta.9"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "temps-entities",
+ "thiserror 2.0.17",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
  "uuid",
 ]
 
@@ -11218,7 +11239,6 @@ dependencies = [
  "temps-vulnerability-scanner",
  "temps-webhooks",
  "temps-wireguard",
- "temps-workspace",
  "thiserror 2.0.17",
  "tokio",
  "tokio-util",
@@ -12891,44 +12911,6 @@ dependencies = [
  "tokio",
  "tracing",
  "x25519-dalek",
-]
-
-[[package]]
-name = "temps-workspace"
-version = "0.1.0-beta.9"
-dependencies = [
- "argon2",
- "async-stream",
- "async-trait",
- "axum 0.8.6",
- "base64 0.22.1",
- "bollard",
- "bytes",
- "chrono",
- "futures",
- "http 1.3.1",
- "rand 0.8.6",
- "sea-orm",
- "serde",
- "serde_json",
- "tar",
- "temps-agents",
- "temps-auth",
- "temps-config",
- "temps-core",
- "temps-deployments",
- "temps-entities",
- "temps-git",
- "temps-projects",
- "temps-providers",
- "temps-pty-agent",
- "thiserror 2.0.17",
- "tokio",
- "tokio-util",
- "tracing",
- "url",
- "utoipa",
- "uuid",
 ]
 
 [[package]]

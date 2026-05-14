@@ -41,6 +41,13 @@ import { ImportEnvDialog } from '@/components/ui/import-env-dialog'
 import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import {
   getResolvedEnvVars,
   getResolvedEnvVarValue,
   indexResolvedByKey,
@@ -439,12 +446,14 @@ interface IntegrationEnvVarRowProps {
   projectId: number
   resolved: ResolvedEnvVar
   showAllValues: boolean
+  environmentId: number | null
 }
 
 function IntegrationEnvVarRow({
   projectId,
   resolved,
   showAllValues,
+  environmentId,
 }: IntegrationEnvVarRowProps) {
   const [isVisible, setIsVisible] = useState(false)
   const isIntegration = resolved.source.type === 'integration'
@@ -452,8 +461,9 @@ function IntegrationEnvVarRow({
   const shouldFetch = isIntegration && (isVisible || showAllValues)
 
   const { data: revealedValue, refetch, isFetching } = useQuery({
-    queryKey: ['resolved-env-var-value', projectId, resolved.key],
-    queryFn: () => getResolvedEnvVarValue(projectId, resolved.key),
+    queryKey: ['resolved-env-var-value', projectId, resolved.key, environmentId],
+    queryFn: () =>
+      getResolvedEnvVarValue(projectId, resolved.key, environmentId ?? undefined),
     enabled: shouldFetch,
     staleTime: 15_000,
   })
@@ -873,6 +883,28 @@ export function EnvironmentVariablesSettings({
   )
   const [isBulkDeleteDialogOpen, setIsBulkDeleteDialogOpen] = useState(false)
   const [showAllValues, setShowAllValues] = useState(false)
+  // Environment selector — when set, the resolved env-vars view shows the
+  // values a deployment in that environment would actually receive
+  // (per-tenant DB names like `<project>_<env>` for linked services).
+  // `null` means "no specific environment" — falls back to the static
+  // admin-level values for backward compatibility.
+  const [selectedEnvId, setSelectedEnvId] = useState<number | null>(null)
+
+  const { data: projectEnvironments } = useQuery({
+    ...getEnvironmentsOptions({
+      path: { project_id: project.id },
+    }),
+  })
+
+  // Default to the production environment (or first available) once the
+  // env list loads, so the preview is never blank.
+  useEffect(() => {
+    if (selectedEnvId !== null) return
+    const envs = projectEnvironments
+    if (!envs || envs.length === 0) return
+    const prod = envs.find((e: any) => e.name === 'production') ?? envs[0]
+    if (prod) setSelectedEnvId(prod.id)
+  }, [projectEnvironments, selectedEnvId])
 
   const {
     data: envVariables,
@@ -887,9 +919,11 @@ export function EnvironmentVariablesSettings({
   })
 
   const { data: resolvedEnvVars } = useQuery({
-    queryKey: ['resolved-env-vars', project.id],
-    queryFn: () => getResolvedEnvVars(project.id),
+    queryKey: ['resolved-env-vars', project.id, selectedEnvId],
+    queryFn: () =>
+      getResolvedEnvVars(project.id, selectedEnvId ?? undefined),
     staleTime: 15_000,
+    enabled: selectedEnvId !== null,
   })
 
   const resolvedByKey = useMemo(
@@ -1104,6 +1138,37 @@ export function EnvironmentVariablesSettings({
               Manage your project&apos;s environment variables across different
               environments.
             </p>
+            {projectEnvironments && projectEnvironments.length > 0 ? (
+              <div className="flex flex-wrap items-center gap-2 pt-2">
+                <Label
+                  htmlFor="env-preview-select"
+                  className="text-xs text-muted-foreground"
+                >
+                  Preview values for
+                </Label>
+                <Select
+                  value={selectedEnvId !== null ? String(selectedEnvId) : ''}
+                  onValueChange={(v) => setSelectedEnvId(Number(v))}
+                >
+                  <SelectTrigger
+                    id="env-preview-select"
+                    className="h-8 w-[180px] text-sm"
+                  >
+                    <SelectValue placeholder="Select environment" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {projectEnvironments.map((env: any) => (
+                      <SelectItem key={env.id} value={String(env.id)}>
+                        {env.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <span className="text-[11px] text-muted-foreground">
+                  Linked services show <code className="font-mono">{`<project>_<env>`}</code> values.
+                </span>
+              </div>
+            ) : null}
           </div>
           {hasVariables && (
             <div className="flex flex-wrap gap-2">
@@ -1212,6 +1277,7 @@ export function EnvironmentVariablesSettings({
                     projectId={project.id}
                     resolved={entry}
                     showAllValues={showAllValues}
+                    environmentId={selectedEnvId}
                   />
                 ))}
               </div>

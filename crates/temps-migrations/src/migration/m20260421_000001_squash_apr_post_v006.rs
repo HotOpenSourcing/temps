@@ -71,6 +71,10 @@ impl MigrationTrait for Migration {
         // + m20260407_000001/2/3 + m20260412_000001 + m20260415_000002.
         // public_id is NOT NULL with a default so no backfill step is needed
         // on a fresh DB.
+        //
+        // DORMANT: the temps-workspace feature was removed; these tables are
+        // kept so historical data is preserved for users who had sessions
+        // before the rip. No active code reads or writes them.
         db.execute_unprepared(
             r#"
             CREATE TABLE IF NOT EXISTS workspace_sessions (

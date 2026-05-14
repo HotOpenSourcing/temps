@@ -21,6 +21,11 @@ pub struct Model {
     pub updated_at: DBDateTime,
     pub description: Option<String>,
     pub tags: String,
+    /// FK to the most recently enqueued `backup_jobs` row for this schedule.
+    /// `None` if no job has been enqueued yet. `ON DELETE SET NULL` keeps the
+    /// schedule intact when a job row is pruned by retention.
+    /// Added by ADR-014 Phase 0 migration.
+    pub last_job_id: Option<i64>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

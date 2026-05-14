@@ -931,6 +931,41 @@ impl PostgresService {
         Ok(())
     }
 
+    /// Build the `POSTGRES_*` env vars for a given per-tenant resource name.
+    /// Shared between `get_runtime_env_vars` (which also provisions the DB)
+    /// and `preview_runtime_env_vars` (which doesn't).
+    fn build_runtime_env_vars(
+        &self,
+        service_config: ServiceConfig,
+        resource_name: &str,
+    ) -> Result<HashMap<String, String>> {
+        let config: PostgresConfig = self.get_postgres_config(service_config)?;
+        let mut env_vars = HashMap::new();
+
+        let effective_host = self.get_container_name();
+        let effective_port = POSTGRES_INTERNAL_PORT.to_string();
+
+        env_vars.insert("POSTGRES_DATABASE".to_string(), resource_name.to_string());
+        env_vars.insert(
+            "POSTGRES_URL".to_string(),
+            format!(
+                "postgresql://{}:{}@{}:{}/{}",
+                urlencoding::encode(&config.username),
+                urlencoding::encode(&config.password),
+                effective_host,
+                effective_port,
+                resource_name
+            ),
+        );
+        env_vars.insert("POSTGRES_HOST".to_string(), effective_host);
+        env_vars.insert("POSTGRES_PORT".to_string(), effective_port);
+        env_vars.insert("POSTGRES_NAME".to_string(), resource_name.to_string());
+        env_vars.insert("POSTGRES_USER".to_string(), config.username.clone());
+        env_vars.insert("POSTGRES_PASSWORD".to_string(), config.password.clone());
+
+        Ok(env_vars)
+    }
+
     pub(crate) fn normalize_database_name(name: &str) -> String {
         let normalized = name
             .to_lowercase()
@@ -2701,37 +2736,20 @@ impl ExternalService for PostgresService {
         // Create the database
         self.create_database(service_config.clone(), &resource_name)
             .await?;
-        let config: PostgresConfig = self.get_postgres_config(service_config)?;
-        let mut env_vars = HashMap::new();
+        self.build_runtime_env_vars(service_config, &resource_name)
+    }
 
-        // Always use container name and internal port for container-to-container communication
-        let effective_host = self.get_container_name();
-        let effective_port = POSTGRES_INTERNAL_PORT.to_string();
-
-        // Database-specific variable
-        env_vars.insert("POSTGRES_DATABASE".to_string(), resource_name.clone());
-
-        // Connection URL
-        env_vars.insert(
-            "POSTGRES_URL".to_string(),
-            format!(
-                "postgresql://{}:{}@{}:{}/{}",
-                urlencoding::encode(&config.username),
-                urlencoding::encode(&config.password),
-                effective_host,
-                effective_port,
-                resource_name
-            ),
-        );
-
-        // Individual connection parameters
-        env_vars.insert("POSTGRES_HOST".to_string(), effective_host);
-        env_vars.insert("POSTGRES_PORT".to_string(), effective_port);
-        env_vars.insert("POSTGRES_NAME".to_string(), resource_name.clone());
-        env_vars.insert("POSTGRES_USER".to_string(), config.username.clone());
-        env_vars.insert("POSTGRES_PASSWORD".to_string(), config.password.clone());
-
-        Ok(env_vars)
+    async fn preview_runtime_env_vars(
+        &self,
+        service_config: ServiceConfig,
+        project_id: &str,
+        environment: &str,
+    ) -> Result<HashMap<String, String>> {
+        let resource_name = format!("{}_{}", project_id, environment);
+        let resource_name = Self::normalize_database_name(&resource_name);
+        // Preview path: skip `create_database` so the UI can show what a
+        // deployment would receive without actually provisioning the DB.
+        self.build_runtime_env_vars(service_config, &resource_name)
     }
     fn get_docker_environment_variables(
         &self,

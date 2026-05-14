@@ -63,7 +63,6 @@ use temps_static_files::StaticFilesPlugin;
 use temps_status_page::StatusPagePlugin;
 use temps_vulnerability_scanner::VulnerabilityScannerPlugin;
 use temps_webhooks::WebhooksPlugin;
-use temps_workspace::plugin::WorkspacePlugin;
 use tokio::net::TcpListener;
 use tracing::{debug, info};
 
@@ -800,16 +799,9 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
     plugin_manager.register_plugin(agents_plugin);
 
     // 9. DeploymentsPlugin - provides deployment orchestration (depends on deployer, screenshots, and vulnerability scanner)
-    // Must be registered before WorkspacePlugin so WorkspacePlugin can resolve DeploymentTokenService in phase 1.
     debug!("Registering DeploymentsPlugin");
     let deployments_plugin = Box::new(DeploymentsPlugin::new());
     plugin_manager.register_plugin(deployments_plugin);
-
-    // 8.7. WorkspacePlugin - interactive AI workspace sessions.
-    // Registered after AgentsPlugin (sandbox provider) and DeploymentsPlugin (deployment token service).
-    debug!("Registering WorkspacePlugin");
-    let workspace_plugin = Box::new(WorkspacePlugin::new());
-    plugin_manager.register_plugin(workspace_plugin);
 
     // 8.8. SandboxPlugin - Vercel-compatible `/v1/sandbox/*` API.
     // Consumes the shared SandboxProvider registered by AgentsPlugin.

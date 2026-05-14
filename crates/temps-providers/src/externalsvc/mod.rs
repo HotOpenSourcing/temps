@@ -809,6 +809,25 @@ pub trait ExternalService: Send + Sync {
     ) -> Result<HashMap<String, String>> {
         Ok(HashMap::new())
     }
+
+    /// Side-effect-free variant of [`Self::get_runtime_env_vars`] for the UI
+    /// preview path. Same `<project>_<env>` convention, but must not
+    /// provision databases, buckets, or other external resources — the user
+    /// is just looking at what their deployment *would* receive.
+    ///
+    /// Default delegates to `get_runtime_env_vars`. Services with
+    /// provisioning side effects (Postgres `CREATE DATABASE`, S3 bucket
+    /// create, etc.) override this to skip the side effect while still
+    /// returning per-tenant values.
+    async fn preview_runtime_env_vars(
+        &self,
+        config: ServiceConfig,
+        project_id: &str,
+        environment: &str,
+    ) -> Result<HashMap<String, String>> {
+        self.get_runtime_env_vars(config, project_id, environment)
+            .await
+    }
     fn get_local_address(&self, service_config: ServiceConfig) -> Result<String>;
 
     /// Get the effective host and port for connecting to this service

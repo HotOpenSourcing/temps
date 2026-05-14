@@ -591,6 +591,58 @@ impl S3Service {
 /// Internal port used by MinIO inside the container
 const S3_INTERNAL_PORT: &str = "9000";
 
+impl S3Service {
+    /// Build the per-tenant bucket name shared between provisioning and
+    /// preview paths.
+    fn bucket_name_for(project_id: &str, environment: &str) -> String {
+        format!("{}-{}", project_id, environment)
+            .replace('_', "-")
+            .to_lowercase()
+    }
+
+    /// Build the `S3_*` / `AWS_*` env vars for a given bucket name. Shared
+    /// between `get_runtime_env_vars` and `preview_runtime_env_vars`.
+    fn build_runtime_env_vars(
+        &self,
+        config: ServiceConfig,
+        bucket_name: &str,
+    ) -> Result<HashMap<String, String>> {
+        let mut env_vars = HashMap::new();
+
+        let effective_host = self.get_container_name();
+        let effective_port = S3_INTERNAL_PORT.to_string();
+
+        env_vars.insert("S3_BUCKET".to_string(), bucket_name.to_string());
+
+        let endpoint = format!("http://{}:{}", effective_host, effective_port);
+        env_vars.insert("S3_ENDPOINT".to_string(), endpoint.clone());
+
+        let access_key = config
+            .parameters
+            .get("access_key")
+            .and_then(|v| v.as_str())
+            .context("Missing access key parameter")?;
+        let secret_key = config
+            .parameters
+            .get("secret_key")
+            .and_then(|v| v.as_str())
+            .context("Missing secret key parameter")?;
+
+        env_vars.insert("S3_HOST".to_string(), effective_host.clone());
+        env_vars.insert("S3_PORT".to_string(), effective_port);
+        env_vars.insert("S3_ACCESS_KEY".to_string(), access_key.to_string());
+        env_vars.insert("S3_SECRET_KEY".to_string(), secret_key.to_string());
+        env_vars.insert("S3_REGION".to_string(), "us-east-1".to_string());
+
+        env_vars.insert("AWS_ACCESS_KEY_ID".to_string(), access_key.to_string());
+        env_vars.insert("AWS_SECRET_ACCESS_KEY".to_string(), secret_key.to_string());
+        env_vars.insert("AWS_DEFAULT_REGION".to_string(), "us-east-1".to_string());
+        env_vars.insert("AWS_ENDPOINT_URL".to_string(), endpoint);
+
+        Ok(env_vars)
+    }
+}
+
 #[async_trait]
 impl ExternalService for S3Service {
     fn get_local_address(&self, service_config: ServiceConfig) -> Result<String> {
@@ -887,51 +939,21 @@ impl ExternalService for S3Service {
         project_id: &str,
         environment: &str,
     ) -> Result<HashMap<String, String>> {
-        let bucket_name = format!("{}-{}", project_id, environment)
-            .replace("_", "-")
-            .to_lowercase();
+        let bucket_name = Self::bucket_name_for(project_id, environment);
         // Create the bucket
         self.create_bucket(config.clone(), &bucket_name).await?;
+        self.build_runtime_env_vars(config, &bucket_name)
+    }
 
-        let mut env_vars = HashMap::new();
-
-        // Always use container name and internal port for container-to-container communication
-        let effective_host = self.get_container_name();
-        let effective_port = S3_INTERNAL_PORT.to_string();
-
-        // Bucket name (specific to this project/environment)
-        env_vars.insert("S3_BUCKET".to_string(), bucket_name);
-
-        // Endpoint
-        let endpoint = format!("http://{}:{}", effective_host, effective_port);
-        env_vars.insert("S3_ENDPOINT".to_string(), endpoint.clone());
-
-        // Get access keys from service config
-        let access_key = config
-            .parameters
-            .get("access_key")
-            .and_then(|v| v.as_str())
-            .context("Missing access key parameter")?;
-        let secret_key = config
-            .parameters
-            .get("secret_key")
-            .and_then(|v| v.as_str())
-            .context("Missing secret key parameter")?;
-
-        // S3-style environment variables
-        env_vars.insert("S3_HOST".to_string(), effective_host.clone());
-        env_vars.insert("S3_PORT".to_string(), effective_port);
-        env_vars.insert("S3_ACCESS_KEY".to_string(), access_key.to_string());
-        env_vars.insert("S3_SECRET_KEY".to_string(), secret_key.to_string());
-        env_vars.insert("S3_REGION".to_string(), "us-east-1".to_string());
-
-        // AWS-style environment variables (for AWS SDK compatibility)
-        env_vars.insert("AWS_ACCESS_KEY_ID".to_string(), access_key.to_string());
-        env_vars.insert("AWS_SECRET_ACCESS_KEY".to_string(), secret_key.to_string());
-        env_vars.insert("AWS_DEFAULT_REGION".to_string(), "us-east-1".to_string());
-        env_vars.insert("AWS_ENDPOINT_URL".to_string(), endpoint);
-
-        Ok(env_vars)
+    async fn preview_runtime_env_vars(
+        &self,
+        config: ServiceConfig,
+        project_id: &str,
+        environment: &str,
+    ) -> Result<HashMap<String, String>> {
+        let bucket_name = Self::bucket_name_for(project_id, environment);
+        // Preview: skip create_bucket so the UI doesn't provision buckets.
+        self.build_runtime_env_vars(config, &bucket_name)
     }
     async fn remove(&self) -> Result<()> {
         // First cleanup any connections

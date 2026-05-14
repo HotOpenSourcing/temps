@@ -589,11 +589,10 @@ impl TempsPlugin for AgentsPlugin {
     /// registered later in the boot order.
     ///
     /// Specifically:
-    /// - **WorkflowMemoryProvider** comes from `temps-workspace`, registered after agents
-    /// - **DeploymentTokenService** comes from `temps-deployments`, registered after agents
-    ///
-    /// Both are optional — if not present, the executor degrades gracefully:
-    /// runs work as before but without memory injection.
+    /// - **WorkflowMemoryProvider** is optional; no in-tree implementation
+    ///   currently registers one (the workspace feature that provided it was
+    ///   removed). The executor degrades gracefully without it.
+    /// - **DeploymentTokenService** comes from `temps-deployments`, registered after agents.
     fn initialize_plugin_services<'a>(
         &'a self,
         context: &'a PluginContext,

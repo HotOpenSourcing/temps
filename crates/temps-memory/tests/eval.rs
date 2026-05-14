@@ -19,11 +19,10 @@
 //!   an empty string (callers depend on this to avoid injecting empty
 //!   headers into prompts).
 //!
-//! The harness is kept in the `temps-memory` crate (rather than
-//! `temps-workspace`) because the trait contract belongs here. The
-//! reference `MemoryService` implementation in `temps-workspace` can
-//! depend on this file in its own test suite to prove the DB-backed
-//! provider obeys the same contract.
+//! The harness lives in the `temps-memory` crate because the trait
+//! contract belongs here. Any future provider implementation should
+//! depend on this file in its own test suite to prove it obeys the same
+//! contract.
 
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -37,9 +36,7 @@ use temps_memory::{
 //
 // This is an in-memory implementation of `WorkflowMemoryProvider`. Not a
 // production backend — just a simple, correct reference that the harness
-// exercises. If a behavior is wrong here, the harness itself catches it;
-// real backends (the DB-backed `MemoryService`) are validated against the
-// same harness in `temps-workspace`'s own test suite.
+// exercises. If a behavior is wrong here, the harness itself catches it.
 
 #[derive(Default)]
 struct InMemoryProvider {

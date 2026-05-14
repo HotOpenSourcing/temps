@@ -1,3 +1,4 @@
+use crate::engines::dispatch::{resolve_engine_key, ResolveEngineError};
 use crate::handlers::audit::{
     AuditContext, BackupRunAudit, BackupScheduleStatusChangedAudit, ExternalServiceBackupRunAudit,
     S3SourceCreatedAudit, S3SourceDeletedAudit, S3SourceUpdatedAudit,
@@ -16,11 +17,28 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use temps_auth::permission_guard;
 use temps_auth::RequireAuth;
+use temps_backup_core::EnqueueJobParams;
 use temps_core::problemdetails;
 use temps_core::problemdetails::{Problem, ProblemDetails};
 use temps_core::RequestMetadata;
 use tracing::error;
 use utoipa::{OpenApi, ToSchema};
+
+impl From<ResolveEngineError> for Problem {
+    fn from(error: ResolveEngineError) -> Self {
+        match error {
+            ResolveEngineError::Unsupported { .. } => problemdetails::new(StatusCode::BAD_REQUEST)
+                .with_title("Unsupported Service Type")
+                .with_detail(error.to_string()),
+            ResolveEngineError::WalgProbeFailed { .. } => {
+                // Probe failure is non-fatal: caller should retry or fall back.
+                problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
+                    .with_title("Engine Detection Failed")
+                    .with_detail(error.to_string())
+            }
+        }
+    }
+}
 
 impl From<BackupError> for Problem {
     fn from(error: BackupError) -> Self {
@@ -88,6 +106,7 @@ impl From<BackupError> for Problem {
             S3ConnectionTestResponse,
             BackupScheduleResponse,
             BackupResponse,
+            ExternalServiceSummary,
             ExternalServiceBackupResponse,
             SourceBackupIndexResponse,
             SourceBackupEntry,
@@ -271,6 +290,20 @@ pub struct BackupScheduleResponse {
     pub last_run: Option<i64>,
 }
 
+/// Summary of the external service that owns a backup. Only populated for
+/// external-service backups (Redis, Postgres, etc.); absent for control-plane
+/// backups.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ExternalServiceSummary {
+    /// Database id of the external service.
+    pub id: i32,
+    /// Human-readable service name (e.g. "redis-prod").
+    pub name: String,
+    /// Service type string (e.g. "postgres", "redis", "mongodb").
+    #[schema(example = "postgres")]
+    pub service_type: String,
+}
+
 /// Response type for backup
 #[derive(Debug, Serialize, ToSchema)]
 pub struct BackupResponse {
@@ -304,6 +337,10 @@ pub struct BackupResponse {
     /// True when `state == "running"` but the heartbeat is stale, suggesting
     /// the worker process died mid-backup.
     pub stalled: bool,
+    /// External service that owns this backup (Redis, Postgres, etc.).
+    /// `null` for control-plane backups (the Temps server's own database).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_service: Option<ExternalServiceSummary>,
 }
 
 /// Response type for source backup index
@@ -451,6 +488,8 @@ impl From<temps_entities::backups::Model> for BackupResponse {
             tags: serde_json::from_str(&backup.tags).unwrap_or_default(),
             last_heartbeat_at: backup.last_heartbeat_at.map(|dt| dt.timestamp_millis()),
             stalled,
+            // Populated by the handler when the linked external service is available.
+            external_service: None,
         }
     }
 }
@@ -1068,14 +1107,20 @@ async fn list_backups_for_schedule(
     Ok(Json(responses))
 }
 
-/// Run a backup immediately for an S3 source
+/// Run a backup immediately for an S3 source.
+///
+/// Enqueues the backup for asynchronous execution via the `BackupRunner`
+/// (ADR-014). Returns `202 Accepted` immediately: a `backups` row is inserted
+/// with `state='pending'` and a `backup_jobs` row is enqueued for the
+/// `ControlPlaneEngine`. Poll `GET /backups/{id}` to observe
+/// `pending → running → completed`.
 #[utoipa::path(
     tag = "Backups",
     post,
     path = "/backups/s3-sources/{id}/run",
     request_body = RunBackupRequest,
     responses(
-        (status = 200, description = "Backup started successfully", body = BackupResponse),
+        (status = 202, description = "Backup enqueued for async execution", body = BackupResponse),
         (status = 400, description = "Invalid request", body = ProblemDetails),
         (status = 404, description = "S3 source not found", body = ProblemDetails),
         (status = 500, description = "Internal server error", body = ProblemDetails)
@@ -1093,12 +1138,38 @@ async fn run_backup_for_source(
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, BackupsCreate);
 
-    let backup = app_state
+    // Insert the `backups` row and the `backup_jobs` row atomically: if either
+    // insert fails, both are rolled back. This prevents orphan `backups` rows
+    // that sit in `state='pending'` indefinitely with no job to drive them
+    // (ADR-014 lifecycle bug fix).
+    let job_params = EnqueueJobParams {
+        // backup_id is filled in by the service once the backups row is inserted
+        backup_id: 0,
+        engine: "control_plane".to_string(),
+        target_kind: "control_plane".to_string(),
+        target_id: None,
+        // s3_source_id is in the backups row; also pass it in params
+        // so the engine can resolve S3 credentials without joining.
+        params: serde_json::json!({ "s3_source_id": id }),
+        max_attempts: None,
+    };
+
+    let (backup, job_id) = app_state
         .backup_service
-        .run_backup_for_source(id, &request.backup_type, auth.user_id())
+        .create_pending_backup_row(
+            id,
+            &request.backup_type,
+            auth.user_id(),
+            &app_state.backup_runner,
+            job_params,
+        )
         .await
         .map_err(|e| {
-            error!("Failed to run backup for S3 source {}: {}", id, e);
+            error!(
+                s3_source_id = id,
+                error = %e,
+                "run_backup_for_source: failed to create pending backup row and enqueue job",
+            );
             Problem::from(e)
         })?;
 
@@ -1113,12 +1184,18 @@ async fn run_backup_for_source(
         backup_id: backup.backup_id.clone(),
         backup_type: request.backup_type,
     };
-
     if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
         error!("Failed to create audit log: {}", e);
     }
 
-    Ok(Json(BackupResponse::from(backup)))
+    tracing::info!(
+        backup_id = backup.id,
+        job_id,
+        s3_source_id = id,
+        "run_backup_for_source: job enqueued",
+    );
+
+    Ok((StatusCode::ACCEPTED, Json(BackupResponse::from(backup))).into_response())
 }
 
 /// Get a backup by ID
@@ -1150,12 +1227,29 @@ async fn get_backup(
             .build());
     };
 
+    let backup_id_int = backup.id;
+
     // Compute partial size while the backup is still running. Best-effort
     // and capped to one S3 list call per request — `compute_live_size`
     // returns None for finished or unresolvable backups.
     let live_size = app_state.backup_service.compute_live_size(&backup).await;
     let mut response = BackupResponse::from(backup);
     response.live_size_bytes = live_size;
+
+    // Populate the linked external service if this is an external-service backup.
+    // A `None` result means this is a control-plane backup — that's fine.
+    // Errors are downgraded to None so a DB hiccup never breaks the detail page.
+    response.external_service = app_state
+        .backup_service
+        .get_backup_external_service(backup_id_int)
+        .await
+        .unwrap_or(None)
+        .map(|svc| ExternalServiceSummary {
+            id: svc.id,
+            name: svc.name,
+            service_type: svc.service_type,
+        });
+
     Ok(Json(response))
 }
 
@@ -1240,14 +1334,19 @@ async fn enable_backup_schedule(
     Ok(Json(BackupScheduleResponse::from(schedule)))
 }
 
-/// Run a backup for an external service manually
+/// Run a backup for an external service manually.
+///
+/// Enqueues the backup for asynchronous execution via the `BackupRunner`
+/// (ADR-014). Returns `202 Accepted` immediately: pending parent and child
+/// rows are inserted, and a `backup_jobs` row is enqueued for the resolved
+/// engine. Poll `GET /backups/{id}` to observe `pending → running → completed`.
 #[utoipa::path(
     tag = "Backups",
     post,
     path = "/backups/external-services/{id}/run",
     request_body = RunExternalServiceBackupRequest,
     responses(
-        (status = 200, description = "Backup started successfully", body = ExternalServiceBackupResponse),
+        (status = 202, description = "Backup enqueued for async execution", body = ExternalServiceBackupResponse),
         (status = 400, description = "Invalid request", body = ProblemDetails),
         (status = 404, description = "External service or S3 source not found", body = ProblemDetails),
         (status = 500, description = "Internal server error", body = ProblemDetails)
@@ -1265,7 +1364,6 @@ async fn run_external_service_backup(
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, BackupsCreate);
 
-    // Get the external service
     let service = app_state
         .backup_service
         .get_external_service(id)
@@ -1283,20 +1381,61 @@ async fn run_external_service_backup(
         .await
         .map_err(Problem::from)?;
 
-    // Run the backup
-    let backup = app_state
+    // 1. Resolve which engine handles this service type (may probe Docker).
+    // 2. Insert pending parent (`backups`) + child (`external_service_backups`)
+    //    + `backup_jobs` rows in a single transaction.
+    // 3. Return 202 immediately — the runner executes the backup asynchronously.
+    // All three inserts are atomic: if any fails, the entire operation is rolled
+    // back and the handler returns an error. No orphan rows are created.
+    let docker = bollard::Docker::connect_with_local_defaults().map_err(|e| {
+        error!(service_id = id, error = %e, "run_external_service_backup: failed to connect to Docker for engine resolution");
+        problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
+            .with_title("Docker Unavailable")
+            .with_detail(format!("Could not connect to Docker to determine backup engine: {}", e))
+    })?;
+
+    let engine_key = resolve_engine_key(&service, &docker)
+        .await
+        .map_err(|e| {
+            error!(service_id = id, error = %e, "run_external_service_backup: engine resolution failed");
+            Problem::from(e)
+        })?;
+
+    let job_params = EnqueueJobParams {
+        // backup_id is filled in by the service once the backups row is inserted
+        backup_id: 0,
+        engine: engine_key.to_string(),
+        target_kind: "external_service".to_string(),
+        target_id: Some(service.id),
+        params: serde_json::json!({
+            "service_id": service.id,
+            "s3_source_id": s3_source_id,
+            "backup_type": backup_type,
+        }),
+        max_attempts: None,
+    };
+
+    let (pending, job_id) = app_state
         .backup_service
-        .backup_external_service(&service, s3_source_id, backup_type, auth.user_id())
+        .create_pending_external_service_backup_row(
+            service.id,
+            s3_source_id,
+            backup_type,
+            auth.user_id(),
+            &app_state.backup_runner,
+            job_params,
+        )
         .await
         .map_err(|e| {
             error!(
-                "Failed to backup external service {} ({}): {}",
-                service.name, service.service_type, e
+                service_id = id,
+                engine = engine_key,
+                error = %e,
+                "run_external_service_backup: failed to create pending rows and enqueue job",
             );
             Problem::from(e)
         })?;
 
-    // Create audit log
     let audit = ExternalServiceBackupRunAudit {
         context: AuditContext {
             user_id: auth.user_id(),
@@ -1306,13 +1445,24 @@ async fn run_external_service_backup(
         service_id: service.id,
         service_name: service.name.clone(),
         service_type: service.service_type.clone(),
-        backup_id: backup.id,
+        backup_id: pending.id,
         backup_type: backup_type.to_string(),
     };
-
     if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
         error!("Failed to create audit log: {}", e);
     }
 
-    Ok(Json(ExternalServiceBackupResponse::from(backup)))
+    tracing::info!(
+        service_id = id,
+        service_name = %service.name,
+        engine = engine_key,
+        job_id,
+        "run_external_service_backup: job enqueued",
+    );
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(ExternalServiceBackupResponse::from(pending)),
+    )
+        .into_response())
 }
