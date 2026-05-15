@@ -451,7 +451,7 @@ export function BackupDetail() {
               {backupEx.external_service ? (
                 <Detail label="Service">
                   <Link
-                    to={`/services/${backupEx.external_service.id}`}
+                    to={`/storage/${backupEx.external_service.id}`}
                     className="text-foreground hover:underline"
                   >
                     {backupEx.external_service.name}
