@@ -8228,25 +8228,29 @@ echo "[restore] Pre-seed complete"
         &self,
         service_id: i32,
     ) -> Result<ServiceStatsReport, ExternalServiceError> {
-        use futures::StreamExt;
-
+        // Stream consumption + sampling now lives in
+        // `sample_container_stats_twice`. This caller just iterates
+        // containers and projects the result.
         let service = self.get_service(service_id).await?;
         let containers = self.resolve_member_containers(&service).await?;
 
         let mut members = Vec::with_capacity(containers.len());
         for (role, name) in containers {
-            let opts = bollard::query_parameters::StatsOptionsBuilder::default()
-                .stream(false)
-                .one_shot(true)
-                .build();
-            let mut stream = self.docker.stats(&name, Some(opts));
-            let sample = match stream.next().await {
-                Some(Ok(s)) => Some(s),
-                Some(Err(_)) | None => None,
-            };
-
-            let stats = match sample {
-                Some(s) => compute_stats_sample(role.clone(), name.clone(), s),
+            // Docker's `one_shot` stats response carries `precpu_stats` as
+            // zeros — the CPU formula needs deltas, so a single one_shot
+            // sample produces either 0% or the "cumulative since container
+            // start" ratio (which was the pre-fix bug: a container at
+            // 108% real load read back as 0.6% because total/system over
+            // the container's full lifetime is dominated by idle history).
+            //
+            // Take two one_shot samples 1s apart and compute the delta
+            // ourselves. Matches `docker stats` exactly. The 1s window is
+            // the same default the Docker CLI uses for its "default"
+            // streaming interval.
+            let stats = match sample_container_stats_twice(&self.docker, &name).await {
+                Some((first, second)) => {
+                    compute_stats_sample(role.clone(), name.clone(), &first, Some(&second))
+                }
                 None => ContainerStatsSample {
                     role,
                     container_name: name,
@@ -8530,34 +8534,124 @@ fn build_container_update_body(
     }
 }
 
-/// Bollard's stats response is full of `Option<u64>`s. This helper
-/// projects the fields we care about onto `ContainerStatsSample`,
-/// returning `None` for any value where the upstream is missing.
+/// Sample the same container twice ~1s apart so we have a delta window for
+/// the CPU formula. Returns `None` on any error or if Docker returns no
+/// frames (container missing / stopped). The 1-second pause matches the
+/// Docker CLI's default sampling interval.
+async fn sample_container_stats_twice(
+    docker: &bollard::Docker,
+    name: &str,
+) -> Option<(
+    bollard::models::ContainerStatsResponse,
+    bollard::models::ContainerStatsResponse,
+)> {
+    use futures::StreamExt;
+
+    let opts = bollard::query_parameters::StatsOptionsBuilder::default()
+        .stream(false)
+        .one_shot(true)
+        .build();
+
+    let mut first_stream = docker.stats(name, Some(opts.clone()));
+    let first = first_stream.next().await?.ok()?;
+    drop(first_stream);
+
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+    let mut second_stream = docker.stats(name, Some(opts));
+    let second = second_stream.next().await?.ok()?;
+
+    Some((first, second))
+}
+
+/// Compute the docker-CLI-equivalent CPU percent from two consecutive
+/// stats samples. Returns `None` when either sample is missing the
+/// counters we need, the deltas are zero/negative (container just
+/// started / stopped), or the result isn't finite.
+///
+/// Formula (matches `docker stats`):
+/// ```
+/// cpu_delta    = current.total_usage     - previous.total_usage
+/// system_delta = current.system_cpu_usage - previous.system_cpu_usage
+/// percent      = (cpu_delta / system_delta) * online_cpus * 100
+/// ```
+fn cpu_percent_from_delta(
+    current: &bollard::models::ContainerCpuStats,
+    previous: &bollard::models::ContainerCpuStats,
+) -> Option<f64> {
+    let cur_total = current.cpu_usage.as_ref()?.total_usage? as i128;
+    let prev_total = previous.cpu_usage.as_ref()?.total_usage? as i128;
+    let cur_system = current.system_cpu_usage? as i128;
+    let prev_system = previous.system_cpu_usage? as i128;
+
+    let cpu_delta = cur_total - prev_total;
+    let system_delta = cur_system - prev_system;
+
+    // The system delta is the increment of CPU time available across ALL
+    // cores; multiplying by online_cpus rescales the ratio so a fully
+    // pinned 4-core container reads as 400%, not 100%.
+    let cpus = current.online_cpus.unwrap_or(1).max(1) as f64;
+
+    if cpu_delta <= 0 || system_delta <= 0 {
+        return None;
+    }
+
+    let percent = (cpu_delta as f64 / system_delta as f64) * cpus * 100.0;
+    if percent.is_finite() && percent >= 0.0 {
+        Some(percent)
+    } else {
+        None
+    }
+}
+
+/// Subtract page cache from raw memory usage so the number matches
+/// `docker stats`'s "MEM USAGE" column.
+///
+/// Docker reports `usage` straight from cgroups, which includes page
+/// cache. A Postgres container with an 8 GB working set + 8 GB of file
+/// cache reads back as `usage == limit` on a 16 GB cap, even though only
+/// half is real RSS. The Docker CLI compensates by subtracting:
+/// - cgroup v1: `stats.cache`
+/// - cgroup v2: `stats.inactive_file`
+///
+/// We try cgroup v2 first (modern hosts), fall back to v1. If neither
+/// key is present, return the raw usage unchanged — better to slightly
+/// over-report than to crash on a missing field.
+fn memory_usage_excluding_cache(mem: &bollard::models::ContainerMemoryStats) -> Option<u64> {
+    let raw_usage = mem.usage?;
+    let cache = mem.stats.as_ref().and_then(|s| {
+        // cgroup v2 uses `inactive_file`; older v1 hosts use `cache`.
+        // Prefer v2; fall back to v1. Some hosts report both, in which
+        // case `inactive_file` is the better signal (matches docker
+        // CLI exactly).
+        s.get("inactive_file").or_else(|| s.get("cache")).copied()
+    });
+    match cache {
+        Some(c) if c <= raw_usage => Some(raw_usage - c),
+        _ => Some(raw_usage),
+    }
+}
+
+/// Project two consecutive stats responses onto `ContainerStatsSample`.
+/// `previous` is `None` when only a single sample is available — in that
+/// case CPU is reported as `None` since the delta formula needs two
+/// samples; memory is still computed from the latest sample.
 fn compute_stats_sample(
     role: String,
     container_name: String,
-    s: bollard::models::ContainerStatsResponse,
+    current: &bollard::models::ContainerStatsResponse,
+    previous: Option<&bollard::models::ContainerStatsResponse>,
 ) -> ContainerStatsSample {
-    let cpu_stats = s.cpu_stats.as_ref();
-    let online_cpus = cpu_stats.and_then(|c| c.online_cpus);
-    let cpu_percent = cpu_stats.and_then(|c| {
-        let cpu_usage = c.cpu_usage.as_ref()?;
-        let total = cpu_usage.total_usage? as f64;
-        let system = c.system_cpu_usage? as f64;
-        // Docker's reference formula. Negative deltas can happen on
-        // stopped containers; clamp to zero so we never surface a
-        // misleading negative percent.
-        let cpus = c.online_cpus.unwrap_or(1).max(1) as f64;
-        let percent = (total / system) * cpus * 100.0;
-        if percent.is_finite() && percent >= 0.0 {
-            Some(percent)
-        } else {
-            None
-        }
-    });
+    let cur_cpu = current.cpu_stats.as_ref();
+    let online_cpus = cur_cpu.and_then(|c| c.online_cpus);
 
-    let mem_stats = s.memory_stats.as_ref();
-    let memory_usage_bytes = mem_stats.and_then(|m| m.usage);
+    let cpu_percent = match (cur_cpu, previous.and_then(|p| p.cpu_stats.as_ref())) {
+        (Some(c), Some(p)) => cpu_percent_from_delta(c, p),
+        _ => None,
+    };
+
+    let mem_stats = current.memory_stats.as_ref();
+    let memory_usage_bytes = mem_stats.and_then(memory_usage_excluding_cache);
     let memory_limit_bytes = mem_stats.and_then(|m| m.limit);
     let memory_percent = match (memory_usage_bytes, memory_limit_bytes) {
         (Some(usage), Some(limit)) if limit > 0 => Some((usage as f64 / limit as f64) * 100.0),
@@ -8611,6 +8705,166 @@ fn rewrite_env_vars_for_cross_node(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Container stats helpers ──────────────────────────────────────────────
+
+    fn cpu_stats_at(
+        total: u64,
+        system: u64,
+        online_cpus: u32,
+    ) -> bollard::models::ContainerCpuStats {
+        bollard::models::ContainerCpuStats {
+            cpu_usage: Some(bollard::models::ContainerCpuUsage {
+                total_usage: Some(total),
+                ..Default::default()
+            }),
+            system_cpu_usage: Some(system),
+            online_cpus: Some(online_cpus),
+            ..Default::default()
+        }
+    }
+
+    /// 50% on a 2-CPU host: cpu_delta = 1e9 (1 second of CPU time at the
+    /// nanosecond resolution Docker reports), system_delta = 4e9 (the
+    /// host's "system CPU" counter advances at `wall_ticks * cpus`).
+    /// (cpu_delta / system_delta) * online_cpus = 0.25 * 2 = 0.5 = 50%.
+    /// Matches docker stats output for a container at half utilization
+    /// on 2 cores.
+    #[test]
+    fn cpu_percent_delta_50pct_two_cpus() {
+        let prev = cpu_stats_at(0, 0, 2);
+        let curr = cpu_stats_at(1_000_000_000, 4_000_000_000, 2);
+        let pct = cpu_percent_from_delta(&curr, &prev).unwrap();
+        assert!((pct - 50.0).abs() < 0.01, "expected ~50%, got {pct}");
+    }
+
+    /// A container fully saturating both of its 2 CPUs reads as 200%
+    /// (matches docker stats display for multi-core saturation).
+    #[test]
+    fn cpu_percent_delta_fully_pinned_two_cpus_reads_200pct() {
+        let prev = cpu_stats_at(0, 0, 2);
+        // cpu_delta == system_delta means the container used every
+        // available CPU-second the system gave it across all cores.
+        let curr = cpu_stats_at(2_000_000_000, 2_000_000_000, 2);
+        let pct = cpu_percent_from_delta(&curr, &prev).unwrap();
+        assert!((pct - 200.0).abs() < 0.01, "expected ~200%, got {pct}");
+    }
+
+    /// Zero/negative deltas (container just started, stopped, or clock
+    /// went backwards) must report `None` instead of NaN/Inf/negative.
+    /// The pre-fix code returned a misleading "cumulative since boot"
+    /// ratio here — usually ~0% for any long-running container.
+    #[test]
+    fn cpu_percent_delta_zero_returns_none() {
+        let prev = cpu_stats_at(5_000_000_000, 10_000_000_000, 4);
+        let same = cpu_stats_at(5_000_000_000, 10_000_000_000, 4);
+        assert!(cpu_percent_from_delta(&same, &prev).is_none());
+    }
+
+    #[test]
+    fn cpu_percent_delta_missing_counters_returns_none() {
+        let prev = bollard::models::ContainerCpuStats {
+            cpu_usage: None,
+            system_cpu_usage: Some(0),
+            online_cpus: Some(1),
+            ..Default::default()
+        };
+        let curr = cpu_stats_at(1_000_000_000, 1_000_000_000, 1);
+        assert!(cpu_percent_from_delta(&curr, &prev).is_none());
+    }
+
+    fn mem_stats(
+        usage: u64,
+        limit: u64,
+        cache: Option<(&'static str, u64)>,
+    ) -> bollard::models::ContainerMemoryStats {
+        let mut stats_map = std::collections::HashMap::new();
+        if let Some((key, val)) = cache {
+            stats_map.insert(key.to_string(), val);
+        }
+        bollard::models::ContainerMemoryStats {
+            usage: Some(usage),
+            limit: Some(limit),
+            stats: if cache.is_some() {
+                Some(stats_map)
+            } else {
+                None
+            },
+            ..Default::default()
+        }
+    }
+
+    /// cgroup v2 `inactive_file` is preferred over the v1 `cache` key.
+    /// A Postgres container with 8 GB working set + 8 GB page cache on a
+    /// 16 GB limit must read as 8 GB usage (matching docker stats), not
+    /// 16 GB / 16 GB which was the pre-fix bug.
+    #[test]
+    fn memory_usage_subtracts_inactive_file_cgroup_v2() {
+        let mem = mem_stats(
+            16 * 1024 * 1024 * 1024, // 16 GB raw usage
+            16 * 1024 * 1024 * 1024, // 16 GB limit
+            Some(("inactive_file", 8 * 1024 * 1024 * 1024)),
+        );
+        let usage = memory_usage_excluding_cache(&mem).unwrap();
+        assert_eq!(usage, 8 * 1024 * 1024 * 1024);
+    }
+
+    /// cgroup v1 hosts surface the cache as `cache`. Subtract it.
+    #[test]
+    fn memory_usage_subtracts_cache_cgroup_v1() {
+        let mem = mem_stats(
+            10 * 1024 * 1024 * 1024,
+            16 * 1024 * 1024 * 1024,
+            Some(("cache", 3 * 1024 * 1024 * 1024)),
+        );
+        let usage = memory_usage_excluding_cache(&mem).unwrap();
+        assert_eq!(usage, 7 * 1024 * 1024 * 1024);
+    }
+
+    /// When both keys are present (some hosts report both), prefer
+    /// `inactive_file` — that's what the Docker CLI does and it's the
+    /// more accurate signal on cgroup v2.
+    #[test]
+    fn memory_usage_prefers_inactive_file_over_cache_when_both_present() {
+        let mut stats_map = std::collections::HashMap::new();
+        stats_map.insert("inactive_file".to_string(), 4 * 1024 * 1024 * 1024);
+        stats_map.insert("cache".to_string(), 6 * 1024 * 1024 * 1024);
+        let mem = bollard::models::ContainerMemoryStats {
+            usage: Some(10 * 1024 * 1024 * 1024),
+            limit: Some(16 * 1024 * 1024 * 1024),
+            stats: Some(stats_map),
+            ..Default::default()
+        };
+        // 10 GB - 4 GB inactive_file = 6 GB. If the helper preferred
+        // `cache` we'd see 4 GB.
+        let expected: u64 = 6 * 1024 * 1024 * 1024;
+        assert_eq!(memory_usage_excluding_cache(&mem).unwrap(), expected);
+    }
+
+    /// Without cache info, return raw usage rather than crashing.
+    #[test]
+    fn memory_usage_returns_raw_when_no_cache_info() {
+        let mem = mem_stats(5 * 1024 * 1024 * 1024, 16 * 1024 * 1024 * 1024, None);
+        assert_eq!(
+            memory_usage_excluding_cache(&mem).unwrap(),
+            5u64 * 1024 * 1024 * 1024
+        );
+    }
+
+    /// Defensive: if `cache` is somehow larger than `usage` (sentinel
+    /// values, stat skew), don't underflow — return raw usage.
+    #[test]
+    fn memory_usage_handles_cache_larger_than_usage() {
+        let mem = mem_stats(
+            1024 * 1024,
+            16 * 1024 * 1024 * 1024,
+            Some(("cache", 10 * 1024 * 1024 * 1024)),
+        );
+        // cache > usage → fall through to raw usage rather than wrap.
+        assert_eq!(memory_usage_excluding_cache(&mem).unwrap(), 1024 * 1024);
+    }
+
+    // ── End container stats helpers ──────────────────────────────────────────
 
     #[cfg(feature = "docker-tests")]
     use bollard::Docker;
