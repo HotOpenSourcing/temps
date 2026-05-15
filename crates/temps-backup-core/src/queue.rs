@@ -38,6 +38,12 @@ pub struct BackupJobRow {
     pub attempts: i32,
     pub max_attempts: i32,
     pub claim_token: Option<uuid::Uuid>,
+    /// Wall-clock timeout baked in at enqueue time (seconds).
+    ///
+    /// The runner reads this directly at dispatch time. A floor of 60 seconds
+    /// is applied in `dispatch` so a corrupt or zero value never instantly fails
+    /// the job.
+    pub max_runtime_secs: i64,
 }
 
 /// Claim one job from the queue (ADR-014 §"Claim query").
@@ -105,7 +111,8 @@ RETURNING
     step_state,
     attempts,
     max_attempts,
-    claim_token
+    claim_token,
+    max_runtime_secs
     "#;
 
     let row = BackupJobRow::find_by_statement(Statement::from_sql_and_values(

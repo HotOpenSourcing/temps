@@ -8,6 +8,7 @@ import {
   startServiceMutation,
   stopServiceMutation,
 } from '@/api/client/@tanstack/react-query.gen'
+import { cn } from '@/lib/utils'
 import { listExternalServiceBackupsOptions } from '@/lib/external-service-backups'
 import { ClusterHealthPanel } from '@/components/storage/ClusterHealthPanel'
 import { EditServiceDialog } from '@/components/storage/EditServiceDialog'
@@ -223,6 +224,8 @@ export function ServiceDetail() {
   const {
     data: serviceBackupsData,
     isLoading: isLoadingBackups,
+    isFetching: isFetchingBackups,
+    refetch: refetchBackups,
   } = useQuery({
     ...listExternalServiceBackupsOptions(serviceId, backupsPage, BACKUPS_PAGE_SIZE),
     enabled: !!serviceId,
@@ -1125,15 +1128,33 @@ export function ServiceDetail() {
                     Backups of this service stored across your S3 sources
                   </CardDescription>
                 </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="gap-2"
-                  onClick={() => setIsBackupDialogOpen(true)}
-                >
-                  <HardDrive className="h-4 w-4" />
-                  Trigger backup
-                </Button>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    className="h-9 w-9"
+                    aria-label="Refresh backups"
+                    title="Refresh backups"
+                    onClick={() => void refetchBackups()}
+                    disabled={isFetchingBackups}
+                  >
+                    <RefreshCcw
+                      className={cn(
+                        'h-4 w-4',
+                        isFetchingBackups && 'animate-spin',
+                      )}
+                    />
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="gap-2"
+                    onClick={() => setIsBackupDialogOpen(true)}
+                  >
+                    <HardDrive className="h-4 w-4" />
+                    Trigger backup
+                  </Button>
+                </div>
               </div>
             </CardHeader>
             <CardContent>

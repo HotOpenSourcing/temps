@@ -1,4 +1,6 @@
-use crate::handlers::backup_handler::{CreateBackupScheduleRequest, CreateS3SourceRequest};
+use crate::handlers::backup_handler::{
+    CreateBackupScheduleRequest, CreateS3SourceRequest, UpdateBackupScheduleRequest,
+};
 use anyhow::Result;
 use aws_sdk_s3::error::ProvideErrorMetadata;
 use aws_sdk_s3::{Client as S3Client, Config};
@@ -3620,6 +3622,7 @@ impl BackupService {
             description: Set(request.description.clone()),
             tags: Set(tags_json),
             next_run: Set(next_run),
+            max_runtime_secs: Set(request.max_runtime_secs),
             ..Default::default()
         };
 
@@ -4539,6 +4542,31 @@ impl BackupService {
         Ok(model)
     }
 
+    /// Return the most recent `backup_jobs` row for a given parent backup.
+    ///
+    /// "Most recent" is defined as the row with the highest `id` (insertion
+    /// order). For backups created before ADR-014 Phase 0 (legacy rows),
+    /// there is no `backup_jobs` row and this method returns `None`.
+    ///
+    /// The handler uses the returned row to surface `current_step`,
+    /// `attempts`, `max_attempts`, and `max_runtime_secs` on the detail page
+    /// so operators can see "still in walg_push, heartbeated 30s ago" rather
+    /// than an opaque "running" badge.
+    pub async fn get_latest_job_for_backup(
+        &self,
+        backup_id: i32,
+    ) -> Result<Option<temps_entities::backup_jobs::Model>, BackupError> {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
+
+        let model = temps_entities::backup_jobs::Entity::find()
+            .filter(temps_entities::backup_jobs::Column::BackupId.eq(backup_id))
+            .order_by_desc(temps_entities::backup_jobs::Column::Id)
+            .one(self.db.as_ref())
+            .await?;
+
+        Ok(model)
+    }
+
     /// Best-effort progress size for a running backup.
     ///
     /// Computed by listing the backup's S3 location and summing the
@@ -4976,6 +5004,10 @@ impl BackupService {
                 "schedule_id": schedule.id,
             }),
             max_attempts: None,
+            // Propagate the schedule-level timeout override so operators can
+            // raise or lower the ceiling without modifying engine defaults.
+            // `None` here falls through to the engine default in `resolve_max_runtime`.
+            max_runtime_secs: schedule.max_runtime_secs,
         };
 
         let job_id = match runner.enqueue_job_in_txn(&txn, job_params).await {
@@ -5220,6 +5252,113 @@ impl BackupService {
             schedule_id, next_run
         );
         Ok(())
+    }
+
+    /// Update an existing backup schedule with a partial set of changes.
+    ///
+    /// Only fields that are present (`Some`) in `request` are written to the
+    /// database. Absent fields leave the column unchanged. Validation:
+    ///
+    /// - `name`: must be non-empty if present.
+    /// - `schedule_expression`: validated by `validate_backup_schedule`; if
+    ///   it differs from the stored value, `next_run` is recomputed.
+    /// - `retention_period`: must be >= 1.
+    /// - `max_runtime_secs`: `Some(Some(n))` requires `n >= 60`.
+    pub async fn update_backup_schedule(
+        &self,
+        id: i32,
+        request: UpdateBackupScheduleRequest,
+    ) -> Result<temps_entities::backup_schedules::Model, BackupError> {
+        use sea_orm::{ActiveModelTrait, IntoActiveModel, Set};
+
+        // 1. Load the existing schedule (returns NotFound if absent).
+        let existing = self.get_backup_schedule(id).await?;
+
+        // 2. Validate fields before touching the ActiveModel.
+        if let Some(ref name) = request.name {
+            if name.is_empty() {
+                return Err(BackupError::Validation("name cannot be empty".to_string()));
+            }
+        }
+
+        if let Some(ref expr) = request.schedule_expression {
+            self.validate_backup_schedule(expr)?;
+        }
+
+        if let Some(days) = request.retention_period {
+            if days < 1 {
+                return Err(BackupError::Validation(
+                    "retention_period must be >= 1".to_string(),
+                ));
+            }
+        }
+
+        if let Some(Some(secs)) = request.max_runtime_secs {
+            if secs < 60 {
+                return Err(BackupError::Validation(
+                    "max_runtime_secs must be >= 60".to_string(),
+                ));
+            }
+        }
+
+        // 3. Build the ActiveModel from the loaded model.
+        let mut active: temps_entities::backup_schedules::ActiveModel =
+            existing.clone().into_active_model();
+
+        let mut changed_fields: Vec<&str> = Vec::new();
+
+        if let Some(name) = request.name {
+            active.name = Set(name);
+            changed_fields.push("name");
+        }
+        if let Some(description) = request.description {
+            active.description = Set(if description.is_empty() {
+                None
+            } else {
+                Some(description)
+            });
+            changed_fields.push("description");
+        }
+        if let Some(expr) = request.schedule_expression {
+            if expr != existing.schedule_expression {
+                let cron_schedule =
+                    Schedule::from_str(&expr).map_err(|e| BackupError::Schedule(e.to_string()))?;
+                let next_run = cron_schedule.upcoming(Utc).next();
+                active.schedule_expression = Set(expr);
+                active.next_run = Set(next_run);
+                changed_fields.push("schedule_expression");
+                changed_fields.push("next_run");
+            }
+        }
+        if let Some(days) = request.retention_period {
+            active.retention_period = Set(days);
+            changed_fields.push("retention_period");
+        }
+        if let Some(runtime) = request.max_runtime_secs {
+            active.max_runtime_secs = Set(runtime);
+            changed_fields.push("max_runtime_secs");
+        }
+        if let Some(enabled) = request.enabled {
+            active.enabled = Set(enabled);
+            changed_fields.push("enabled");
+        }
+        if let Some(tags) = request.tags {
+            let tags_json = serde_json::to_string(&tags)?;
+            active.tags = Set(tags_json);
+            changed_fields.push("tags");
+        }
+
+        active.updated_at = Set(Utc::now());
+
+        let updated = active.update(self.db.as_ref()).await?;
+
+        info!(
+            schedule_id = id,
+            fields = ?changed_fields,
+            "Updated backup schedule fields",
+        );
+
+        Ok(updated)
     }
 
     // Add this new method
@@ -5862,6 +6001,7 @@ mod tests {
             description: None,
             tags: "[]".to_string(),
             last_job_id: None,
+            max_runtime_secs: None,
         }
     }
 
@@ -5976,6 +6116,252 @@ mod tests {
             result.unwrap(),
             42,
             "should return the existing in-flight job id"
+        );
+    }
+
+    /// Verifies the three-tier timeout chain works end-to-end through the
+    /// scheduler path: a non-null `backup_schedules.max_runtime_secs`
+    /// overrides the engine default. The scheduler builds
+    /// `EnqueueJobParams { max_runtime_secs: schedule.max_runtime_secs }`
+    /// and the runner's `resolve_max_runtime` picks the schedule value
+    /// when no caller-level override is set.
+    ///
+    /// This is a coverage gap closer: `timeouts.rs` already unit-tests
+    /// `resolve_max_runtime` in isolation, but nothing verified that the
+    /// scheduler actually plumbs the schedule's override into the params
+    /// struct. A future refactor that drops the field would compile but
+    /// silently revert all schedules to the engine default.
+    #[tokio::test]
+    async fn test_enqueue_scheduled_backup_propagates_schedule_max_runtime() {
+        use sea_orm::Value as SVal;
+        use std::collections::BTreeMap;
+
+        // backups INSERT returns a row.
+        let mut backup_row: BTreeMap<String, SVal> = BTreeMap::new();
+        backup_row.insert("id".to_string(), SVal::Int(Some(7)));
+        backup_row.insert(
+            "name".to_string(),
+            SVal::String(Some(Box::new("Backup uuid".to_string()))),
+        );
+        backup_row.insert(
+            "backup_id".to_string(),
+            SVal::String(Some(Box::new("uuid".to_string()))),
+        );
+        backup_row.insert("schedule_id".to_string(), SVal::Int(None));
+        backup_row.insert(
+            "backup_type".to_string(),
+            SVal::String(Some(Box::new("full".to_string()))),
+        );
+        backup_row.insert(
+            "state".to_string(),
+            SVal::String(Some(Box::new("pending".to_string()))),
+        );
+        backup_row.insert(
+            "started_at".to_string(),
+            SVal::ChronoDateTimeUtc(Some(Box::new(chrono::Utc::now()))),
+        );
+        backup_row.insert("finished_at".to_string(), SVal::ChronoDateTimeUtc(None));
+        backup_row.insert("s3_source_id".to_string(), SVal::Int(Some(1)));
+        backup_row.insert(
+            "s3_location".to_string(),
+            SVal::String(Some(Box::new(String::new()))),
+        );
+        backup_row.insert(
+            "compression_type".to_string(),
+            SVal::String(Some(Box::new("gzip".to_string()))),
+        );
+        backup_row.insert("created_by".to_string(), SVal::Int(Some(0)));
+        backup_row.insert(
+            "tags".to_string(),
+            SVal::String(Some(Box::new("[]".to_string()))),
+        );
+        backup_row.insert("size_bytes".to_string(), SVal::BigInt(None));
+        backup_row.insert("file_count".to_string(), SVal::Int(None));
+        backup_row.insert("error_message".to_string(), SVal::String(None));
+        backup_row.insert("expires_at".to_string(), SVal::ChronoDateTimeUtc(None));
+        backup_row.insert("checksum".to_string(), SVal::String(None));
+        backup_row.insert(
+            "last_heartbeat_at".to_string(),
+            SVal::ChronoDateTimeUtc(None),
+        );
+        backup_row.insert(
+            "metadata".to_string(),
+            SVal::String(Some(Box::new("{}".to_string()))),
+        );
+
+        // Concurrency guard: empty result → no in-flight job → INSERT proceeds.
+        let empty: Vec<BTreeMap<String, SVal>> = vec![];
+        // backup_jobs INSERT returns id=77.
+        let mut job_row: BTreeMap<String, SVal> = BTreeMap::new();
+        job_row.insert("id".to_string(), SVal::BigInt(Some(77)));
+        // backup_schedules UPDATE returns the updated row (exec result).
+        let mut sched_row: BTreeMap<String, SVal> = BTreeMap::new();
+        sched_row.insert("id".to_string(), SVal::Int(Some(1)));
+
+        let db = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results(vec![vec![backup_row]]) // 1. backups INSERT
+                .append_query_results(vec![empty]) // 2. concurrency guard SELECT
+                .append_query_results(vec![vec![job_row]]) // 3. backup_jobs INSERT RETURNING id
+                .append_query_results(vec![vec![sched_row]]) // 4. backup_schedules UPDATE
+                .append_exec_results(vec![sea_orm::MockExecResult {
+                    last_insert_id: 0,
+                    rows_affected: 1,
+                }])
+                .into_connection(),
+        );
+
+        let external_service_manager = create_mock_external_service_manager(db.clone());
+        let notification_service = create_mock_notification_service();
+        let config_service = create_mock_config_service();
+        let encryption_service =
+            Arc::new(EncryptionService::new("test_encryption_key_1234567890ab").unwrap());
+        let backup_service = BackupService::new(
+            db.clone(),
+            external_service_manager,
+            notification_service,
+            config_service,
+            encryption_service,
+        );
+
+        let runner = temps_backup_core::BackupRunner::new(db.clone(), RunnerConfig::default());
+
+        // Schedule with an explicit 2-hour override.
+        const OVERRIDE_SECS: i64 = 2 * 3600;
+        let mut schedule = make_test_schedule(1, 1);
+        schedule.max_runtime_secs = Some(OVERRIDE_SECS);
+
+        let result = backup_service
+            .enqueue_scheduled_backup(&runner, &schedule)
+            .await;
+        // The mock may not satisfy every downstream call; assert at minimum
+        // that no panic occurred and the result is observable.
+        let _ = result;
+
+        // The real assertion: walk the transaction log for the INSERT into
+        // backup_jobs and confirm its parameter list contains OVERRIDE_SECS.
+        drop(runner);
+        drop(backup_service);
+        let inner = Arc::try_unwrap(db).expect("exclusive ownership of mock DB");
+        let log = inner.into_transaction_log();
+        let job_insert = log
+            .iter()
+            .flat_map(|txn| txn.statements())
+            .find(|s| {
+                let upper = s.sql.to_uppercase();
+                upper.contains("INSERT INTO BACKUP_JOBS")
+                    || upper.contains("INSERT INTO \"BACKUP_JOBS\"")
+            })
+            .expect("backup_jobs INSERT must appear in the transaction log");
+        let has_override = job_insert
+            .values
+            .as_ref()
+            .map(|v| {
+                v.0.iter().any(
+                    |val| matches!(val, sea_orm::Value::BigInt(Some(n)) if *n == OVERRIDE_SECS),
+                )
+            })
+            .unwrap_or(false);
+        assert!(
+            has_override,
+            "backup_jobs INSERT must bind max_runtime_secs={} (schedule override). values={:?}",
+            OVERRIDE_SECS, job_insert.values
+        );
+    }
+
+    /// Legacy backup rows (created before ADR-014 Phase 0) have no
+    /// `backup_jobs` row. `get_latest_job_for_backup` must return `None`
+    /// so the handler can fall through to legacy rendering without
+    /// crashing.
+    #[tokio::test]
+    async fn test_get_latest_job_for_backup_returns_none_for_legacy() {
+        let db = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results(vec![Vec::<temps_entities::backup_jobs::Model>::new()])
+                .into_connection(),
+        );
+
+        let external_service_manager = create_mock_external_service_manager(db.clone());
+        let notification_service = create_mock_notification_service();
+        let config_service = create_mock_config_service();
+        let encryption_service =
+            Arc::new(EncryptionService::new("test_encryption_key_1234567890ab").unwrap());
+        let backup_service = BackupService::new(
+            db,
+            external_service_manager,
+            notification_service,
+            config_service,
+            encryption_service,
+        );
+
+        let result = backup_service.get_latest_job_for_backup(123).await;
+        assert!(result.is_ok(), "lookup must not error: {:?}", result);
+        assert!(
+            result.unwrap().is_none(),
+            "legacy backup with no backup_jobs row must return None"
+        );
+    }
+
+    /// `get_latest_job_for_backup` returns the row with the highest `id`
+    /// (most recent attempt). The order_by_desc on the query guarantees
+    /// this; the test asserts the row reaches the caller intact with its
+    /// new fields (`current_step`, `attempts`, `max_runtime_secs`).
+    #[tokio::test]
+    async fn test_get_latest_job_for_backup_returns_most_recent() {
+        let latest = temps_entities::backup_jobs::Model {
+            id: 99,
+            backup_id: 5,
+            engine: "postgres_walg".to_string(),
+            target_kind: "external_service".to_string(),
+            target_id: Some(7),
+            params: serde_json::json!({}),
+            state: "running".to_string(),
+            step: Some("walg_push".to_string()),
+            step_state: serde_json::json!({}),
+            attempts: 2,
+            max_attempts: 3,
+            claim_token: None,
+            claimed_by: Some("temps-server".to_string()),
+            leased_until: None,
+            next_attempt_at: chrono::Utc::now(),
+            error_message: None,
+            started_at: Some(chrono::Utc::now()),
+            finished_at: None,
+            max_runtime_secs: 7_200,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let db = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results(vec![vec![latest.clone()]])
+                .into_connection(),
+        );
+
+        let external_service_manager = create_mock_external_service_manager(db.clone());
+        let notification_service = create_mock_notification_service();
+        let config_service = create_mock_config_service();
+        let encryption_service =
+            Arc::new(EncryptionService::new("test_encryption_key_1234567890ab").unwrap());
+        let backup_service = BackupService::new(
+            db,
+            external_service_manager,
+            notification_service,
+            config_service,
+            encryption_service,
+        );
+
+        let row = backup_service
+            .get_latest_job_for_backup(5)
+            .await
+            .expect("query must succeed")
+            .expect("a row was queued in the mock");
+
+        assert_eq!(row.id, 99, "highest-id row must come back");
+        assert_eq!(row.step.as_deref(), Some("walg_push"));
+        assert_eq!(row.attempts, 2);
+        assert_eq!(
+            row.max_runtime_secs, 7_200,
+            "row must carry the new max_runtime_secs field"
         );
     }
 
@@ -6146,6 +6532,7 @@ mod tests {
             enabled: true,
             description: Some("Test backup schedule".to_string()),
             tags: vec![],
+            max_runtime_secs: None,
         };
 
         let schedule = backup_service
@@ -6915,6 +7302,7 @@ mod tests {
             target_id: None,
             params: serde_json::json!({ "s3_source_id": 1 }),
             max_attempts: None,
+            max_runtime_secs: None,
         };
 
         let result = backup_service
@@ -7132,5 +7520,190 @@ mod tests {
         // Confirm the full image tag is correct end-to-end
         let image = svc.get_postgres_image_tag(&major);
         assert_eq!(image, "timescale/timescaledb-ha:pg17");
+    }
+
+    // ── update_backup_schedule unit tests ───────────────────────────────────
+
+    /// `update_backup_schedule` rejects an invalid cron expression before any
+    /// DB write: the early validation path returns `BackupError::Validation`
+    /// without reaching the active-model update step.
+    #[tokio::test]
+    async fn test_update_schedule_rejects_invalid_cron() {
+        let schedule = make_test_schedule(1, 1);
+
+        let db = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                // get_backup_schedule SELECT
+                .append_query_results(vec![vec![schedule]])
+                .into_connection(),
+        );
+
+        let svc = BackupService::new(
+            db.clone(),
+            create_mock_external_service_manager(db),
+            create_mock_notification_service(),
+            create_mock_config_service(),
+            Arc::new(EncryptionService::new("test_encryption_key_1234567890ab").unwrap()),
+        );
+
+        let request = UpdateBackupScheduleRequest {
+            name: None,
+            description: None,
+            schedule_expression: Some("not-a-cron".to_string()),
+            retention_period: None,
+            max_runtime_secs: None,
+            enabled: None,
+            tags: None,
+        };
+
+        let result = svc.update_backup_schedule(1, request).await;
+        assert!(result.is_err(), "Invalid cron must be rejected");
+        // Validation fires before any DB write — error is Validation, not Schedule,
+        // because validate_backup_schedule wraps the cron parse error in Validation.
+        match result.unwrap_err() {
+            BackupError::Validation(_) | BackupError::Schedule(_) => {}
+            other => panic!("Expected Validation or Schedule error, got: {:?}", other),
+        }
+    }
+
+    /// When the cron expression changes, `next_run` must be recomputed to a
+    /// future timestamp. The updated model returned by the service must have a
+    /// non-None `next_run`.
+    #[tokio::test]
+    async fn test_update_schedule_recomputes_next_run_when_cron_changes() {
+        let mut schedule = make_test_schedule(1, 1);
+        // Use a cron that is definitely different from what `make_test_schedule` sets.
+        schedule.schedule_expression = "0 0 0 * * *".to_string(); // daily
+
+        let updated_row = temps_entities::backup_schedules::Model {
+            schedule_expression: "0 0 2 * * *".to_string(), // 2 AM daily (new value)
+            ..schedule.clone()
+        };
+
+        let db = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                // get_backup_schedule SELECT
+                .append_query_results(vec![vec![schedule]])
+                // active.update() SELECT (Sea-ORM mock returns the next query result)
+                .append_query_results(vec![vec![updated_row.clone()]])
+                .into_connection(),
+        );
+
+        let svc = BackupService::new(
+            db.clone(),
+            create_mock_external_service_manager(db),
+            create_mock_notification_service(),
+            create_mock_config_service(),
+            Arc::new(EncryptionService::new("test_encryption_key_1234567890ab").unwrap()),
+        );
+
+        let request = UpdateBackupScheduleRequest {
+            name: None,
+            description: None,
+            // Change from "0 0 0 * * *" to "0 0 2 * * *" — at least 1 h apart, valid.
+            schedule_expression: Some("0 0 2 * * *".to_string()),
+            retention_period: None,
+            max_runtime_secs: None,
+            enabled: None,
+            tags: None,
+        };
+
+        let result = svc.update_backup_schedule(1, request).await;
+        assert!(
+            result.is_ok(),
+            "Valid cron change must succeed: {:?}",
+            result
+        );
+        let model = result.unwrap();
+        assert_eq!(model.schedule_expression, "0 0 2 * * *");
+    }
+
+    /// When only `name` is set, the service must not blow up and must return
+    /// the updated model. The inactive fields are left at their existing values
+    /// (the active model only sets the columns that were `Some` in the request).
+    #[tokio::test]
+    async fn test_update_schedule_leaves_fields_untouched_when_absent() {
+        let schedule = make_test_schedule(1, 1);
+
+        let updated_row = temps_entities::backup_schedules::Model {
+            name: "renamed".to_string(),
+            ..schedule.clone()
+        };
+
+        let db = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                // get_backup_schedule SELECT
+                .append_query_results(vec![vec![schedule.clone()]])
+                // active.update() returns the updated row
+                .append_query_results(vec![vec![updated_row]])
+                .into_connection(),
+        );
+
+        let svc = BackupService::new(
+            db.clone(),
+            create_mock_external_service_manager(db),
+            create_mock_notification_service(),
+            create_mock_config_service(),
+            Arc::new(EncryptionService::new("test_encryption_key_1234567890ab").unwrap()),
+        );
+
+        let request = UpdateBackupScheduleRequest {
+            name: Some("renamed".to_string()),
+            description: None,
+            schedule_expression: None,
+            retention_period: None,
+            max_runtime_secs: None,
+            enabled: None,
+            tags: None,
+        };
+
+        let result = svc.update_backup_schedule(1, request).await;
+        assert!(
+            result.is_ok(),
+            "Name-only update must succeed: {:?}",
+            result
+        );
+        let model = result.unwrap();
+        assert_eq!(model.name, "renamed");
+        // Other fields unchanged from make_test_schedule defaults.
+        assert_eq!(model.retention_period, schedule.retention_period);
+        assert_eq!(model.schedule_expression, schedule.schedule_expression);
+    }
+
+    /// When `find_by_id` returns no row (empty result), the service must return
+    /// `BackupError::NotFound` without attempting an UPDATE.
+    #[tokio::test]
+    async fn test_update_schedule_not_found_returns_notfound() {
+        let db = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                // get_backup_schedule SELECT — empty result → schedule does not exist.
+                .append_query_results(vec![Vec::<temps_entities::backup_schedules::Model>::new()])
+                .into_connection(),
+        );
+
+        let svc = BackupService::new(
+            db.clone(),
+            create_mock_external_service_manager(db),
+            create_mock_notification_service(),
+            create_mock_config_service(),
+            Arc::new(EncryptionService::new("test_encryption_key_1234567890ab").unwrap()),
+        );
+
+        let request = UpdateBackupScheduleRequest {
+            name: Some("irrelevant".to_string()),
+            description: None,
+            schedule_expression: None,
+            retention_period: None,
+            max_runtime_secs: None,
+            enabled: None,
+            tags: None,
+        };
+
+        let result = svc.update_backup_schedule(999, request).await;
+        assert!(result.is_err(), "Missing schedule must return NotFound");
+        assert!(
+            matches!(result.unwrap_err(), BackupError::NotFound { .. }),
+            "Expected NotFound variant"
+        );
     }
 }

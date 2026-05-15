@@ -1,7 +1,8 @@
 use crate::engines::dispatch::{resolve_engine_key, ResolveEngineError};
 use crate::handlers::audit::{
-    AuditContext, BackupRunAudit, BackupScheduleStatusChangedAudit, ExternalServiceBackupRunAudit,
-    S3SourceCreatedAudit, S3SourceDeletedAudit, S3SourceUpdatedAudit,
+    AuditContext, BackupRunAudit, BackupScheduleStatusChangedAudit, BackupScheduleUpdatedAudit,
+    ExternalServiceBackupRunAudit, S3SourceCreatedAudit, S3SourceDeletedAudit,
+    S3SourceUpdatedAudit,
 };
 use crate::handlers::types::BackupAppState;
 use crate::services::BackupError;
@@ -95,6 +96,7 @@ impl From<BackupError> for Problem {
         get_backup,
         disable_backup_schedule,
         enable_backup_schedule,
+        update_backup_schedule,
         run_external_service_backup,
         list_backup_alerts
     ),
@@ -103,6 +105,7 @@ impl From<BackupError> for Problem {
             CreateS3SourceRequest,
             UpdateS3SourceRequest,
             CreateBackupScheduleRequest,
+            UpdateBackupScheduleRequest,
             RunBackupRequest,
             RunExternalServiceBackupRequest,
             S3SourceResponse,
@@ -185,6 +188,90 @@ pub struct CreateBackupScheduleRequest {
     pub enabled: bool,
     pub description: Option<String>,
     pub tags: Vec<String>,
+    /// Optional wall-clock timeout override for jobs created by this schedule
+    /// (seconds). When set, overrides the engine-family default. `null` means
+    /// "use engine default." The per-job `max_runtime_secs` in
+    /// `EnqueueJobParams` can still override this for ad-hoc triggers.
+    pub max_runtime_secs: Option<i64>,
+}
+
+/// Deserializer for `Option<Option<i64>>` that maps:
+/// - field absent → `None` (leave the column unchanged)
+/// - field present with JSON `null` → `Some(None)` (clear the column)
+/// - field present with a number → `Some(Some(n))` (set to value)
+fn deserialize_optional_optional_i64<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<i64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // `Option<Option<i64>>` with serde's standard behaviour only handles
+    // absent vs. `null` at the outermost level; nested `null` → `Some(None)`
+    // requires a custom impl.
+    let outer: Option<serde_json::Value> = serde::Deserialize::deserialize(deserializer)?;
+    match outer {
+        None => Ok(None),
+        Some(serde_json::Value::Null) => Ok(Some(None)),
+        Some(v) => {
+            let n: i64 = serde_json::from_value(v).map_err(serde::de::Error::custom)?;
+            Ok(Some(Some(n)))
+        }
+    }
+}
+
+/// Request body for updating an existing backup schedule via `PATCH /api/backups/schedules/{id}`.
+///
+/// All fields are optional; only present fields are updated. Absent fields
+/// leave the corresponding column unchanged.
+#[derive(Debug, Deserialize, ToSchema, Clone)]
+pub struct UpdateBackupScheduleRequest {
+    /// New schedule name. Skipped when `None`. Must not be empty if provided.
+    pub name: Option<String>,
+    /// New human-readable description. Pass an empty string `""` to clear.
+    pub description: Option<String>,
+    /// New cron expression. When changed, `next_run` is recomputed.
+    pub schedule_expression: Option<String>,
+    /// Days to retain backups produced by this schedule. Must be >= 1.
+    pub retention_period: Option<i32>,
+    /// Per-schedule wall-clock timeout override (seconds).
+    ///
+    /// - `None` (field absent) — leave current value unchanged
+    /// - `Some(None)` (field present, JSON `null`) — clear override; fall back to engine default
+    /// - `Some(Some(n))` — set to `n` seconds (must be >= 60)
+    #[serde(default, deserialize_with = "deserialize_optional_optional_i64")]
+    pub max_runtime_secs: Option<Option<i64>>,
+    /// Enable or disable the schedule. Skipped when `None`.
+    pub enabled: Option<bool>,
+    /// Replace the full tag list. Skipped when `None`.
+    pub tags: Option<Vec<String>>,
+}
+
+/// Returns the names of fields that are present (i.e., `Some`) in the patch
+/// request, for inclusion in the audit log.
+fn changed_fields_for_audit(request: &UpdateBackupScheduleRequest) -> Vec<String> {
+    let mut fields = Vec::new();
+    if request.name.is_some() {
+        fields.push("name".to_string());
+    }
+    if request.description.is_some() {
+        fields.push("description".to_string());
+    }
+    if request.schedule_expression.is_some() {
+        fields.push("schedule_expression".to_string());
+    }
+    if request.retention_period.is_some() {
+        fields.push("retention_period".to_string());
+    }
+    if request.max_runtime_secs.is_some() {
+        fields.push("max_runtime_secs".to_string());
+    }
+    if request.enabled.is_some() {
+        fields.push("enabled".to_string());
+    }
+    if request.tags.is_some() {
+        fields.push("tags".to_string());
+    }
+    fields
 }
 
 #[derive(Deserialize, ToSchema, Clone)]
@@ -295,6 +382,10 @@ pub struct BackupScheduleResponse {
     pub tags: Vec<String>,
     pub next_run: Option<i64>,
     pub last_run: Option<i64>,
+    /// Per-schedule wall-clock timeout override for backup jobs (seconds).
+    /// `null` means the engine-family default is used. See
+    /// `temps_backup_core::timeouts::default_max_runtime_secs`.
+    pub max_runtime_secs: Option<i64>,
 }
 
 /// Summary of the external service that owns a backup. Only populated for
@@ -348,6 +439,20 @@ pub struct BackupResponse {
     /// `null` for control-plane backups (the Temps server's own database).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_service: Option<ExternalServiceSummary>,
+    /// Name of the engine step currently executing (e.g., `"walg_push"`).
+    /// `null` when no `backup_jobs` row exists for this backup (legacy rows
+    /// pre-dating ADR-014), or when the job has not yet completed its first step.
+    pub current_step: Option<String>,
+    /// How many times this job has been claimed and run. `null` for legacy
+    /// backups with no `backup_jobs` row.
+    pub attempts: Option<i32>,
+    /// Maximum attempts before the job is permanently failed. `null` for
+    /// legacy backups.
+    pub max_attempts: Option<i32>,
+    /// Resolved wall-clock timeout for this backup job (seconds). `null` for
+    /// legacy backups. Derived from the three-tier resolution order:
+    /// caller override → schedule override → engine default.
+    pub max_runtime_secs: Option<i64>,
 }
 
 /// Response type for source backup index
@@ -453,6 +558,7 @@ impl From<temps_entities::backup_schedules::Model> for BackupScheduleResponse {
             tags: serde_json::from_str(&schedule.tags).unwrap_or_default(),
             next_run: schedule.next_run.map(|dt| dt.timestamp_millis()),
             last_run: schedule.last_run.map(|dt| dt.timestamp_millis()),
+            max_runtime_secs: schedule.max_runtime_secs,
         }
     }
 }
@@ -497,6 +603,11 @@ impl From<temps_entities::backups::Model> for BackupResponse {
             stalled,
             // Populated by the handler when the linked external service is available.
             external_service: None,
+            // Populated by the handler via get_latest_job_for_backup.
+            current_step: None,
+            attempts: None,
+            max_attempts: None,
+            max_runtime_secs: None,
         }
     }
 }
@@ -775,7 +886,9 @@ pub fn configure_routes() -> Router<Arc<BackupAppState>> {
         )
         .route(
             "/backups/schedules/{id}",
-            get(get_backup_schedule).delete(delete_backup_schedule),
+            get(get_backup_schedule)
+                .patch(update_backup_schedule)
+                .delete(delete_backup_schedule),
         )
         .route(
             "/backups/schedules/{id}/backups",
@@ -1312,6 +1425,8 @@ async fn run_backup_for_source(
         // so the engine can resolve S3 credentials without joining.
         params: serde_json::json!({ "s3_source_id": id }),
         max_attempts: None,
+        // No per-request override; engine default (4 h for control_plane) applies.
+        max_runtime_secs: None,
     };
 
     let (backup, job_id) = app_state
@@ -1410,6 +1525,21 @@ async fn get_backup(
             service_type: svc.service_type,
         });
 
+    // Populate job-level progress fields (current_step, attempts, max_runtime_secs).
+    // Errors are downgraded to None so a DB hiccup never breaks the detail page.
+    // Legacy backups (before ADR-014 Phase 0) have no backup_jobs row — all four
+    // fields remain None in that case.
+    if let Ok(Some(job)) = app_state
+        .backup_service
+        .get_latest_job_for_backup(backup_id_int)
+        .await
+    {
+        response.current_step = job.step;
+        response.attempts = Some(job.attempts);
+        response.max_attempts = Some(job.max_attempts);
+        response.max_runtime_secs = Some(job.max_runtime_secs);
+    }
+
     Ok(Json(response))
 }
 
@@ -1494,6 +1624,60 @@ async fn enable_backup_schedule(
     Ok(Json(BackupScheduleResponse::from(schedule)))
 }
 
+/// Update a backup schedule (partial update).
+///
+/// All request fields are optional; only fields that are present in the
+/// JSON body are updated. Absent fields leave the corresponding column
+/// unchanged. If `schedule_expression` is changed, `next_run` is
+/// recomputed automatically.
+#[utoipa::path(
+    tag = "Backups",
+    patch,
+    path = "/backups/schedules/{id}",
+    request_body = UpdateBackupScheduleRequest,
+    responses(
+        (status = 200, description = "Schedule updated", body = BackupScheduleResponse),
+        (status = 400, description = "Validation error", body = ProblemDetails),
+        (status = 401, description = "Unauthorized", body = ProblemDetails),
+        (status = 404, description = "Schedule not found", body = ProblemDetails),
+        (status = 500, description = "Internal server error", body = ProblemDetails)
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn update_backup_schedule(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<BackupAppState>>,
+    Path(id): Path<i32>,
+    Extension(metadata): Extension<RequestMetadata>,
+    Json(request): Json<UpdateBackupScheduleRequest>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, BackupsWrite);
+
+    let schedule = app_state
+        .backup_service
+        .update_backup_schedule(id, request.clone())
+        .await?;
+
+    let audit = BackupScheduleUpdatedAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        schedule_id: schedule.id,
+        schedule_name: schedule.name.clone(),
+        fields_changed: changed_fields_for_audit(&request),
+    };
+    if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+        error!(
+            "Failed to create audit log for schedule update {}: {}",
+            id, e
+        );
+    }
+
+    Ok(Json(BackupScheduleResponse::from(schedule)))
+}
+
 /// Run a backup for an external service manually.
 ///
 /// Enqueues the backup for asynchronous execution via the `BackupRunner`
@@ -1573,6 +1757,8 @@ async fn run_external_service_backup(
             "backup_type": backup_type,
         }),
         max_attempts: None,
+        // No per-request override; engine-family default applies.
+        max_runtime_secs: None,
     };
 
     let (pending, job_id) = app_state

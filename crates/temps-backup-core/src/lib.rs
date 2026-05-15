@@ -15,12 +15,15 @@
 //!   persistence, job completion/failure, retry scheduling, and backoff.
 //! - [`config`] — `RunnerConfig` with defaults matching the ADR recommendations.
 //! - [`error`] — `BackupRunnerError` enum (thiserror, typed, contextual).
+//! - [`timeouts`] — Per-engine default wall-clock timeouts and the
+//!   three-tier resolution helper (`resolve_max_runtime`).
 
 pub mod config;
 pub mod engine;
 pub mod error;
 pub mod queue;
 pub mod runner;
+pub mod timeouts;
 
 // Flatten the most-used public types for convenience.
 pub use config::RunnerConfig;
@@ -28,3 +31,4 @@ pub use engine::{BackupContext, BackupEngine, BackupEngineError, StepCursor, Ste
 pub use error::BackupRunnerError;
 pub use queue::{backoff_delay, BackupJobRow};
 pub use runner::{BackupRunner, EnqueueJobParams};
+pub use timeouts::{default_max_runtime_secs, resolve_max_runtime};

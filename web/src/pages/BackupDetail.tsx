@@ -16,12 +16,18 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import { CopyButton } from '@/components/ui/copy-button'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
 import { TimeAgo } from '@/components/utils/TimeAgo'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { usePageTitle } from '@/hooks/usePageTitle'
 import { cn, formatBytes } from '@/lib/utils'
 import { useQuery } from '@tanstack/react-query'
-import { format } from 'date-fns'
+import { format, formatDistanceToNow } from 'date-fns'
 import {
   AlertCircle,
   ArrowLeft,
@@ -37,16 +43,6 @@ import { Link, useParams } from 'react-router-dom'
 
 type BackupState = 'completed' | 'failed' | 'running' | (string & {})
 
-/** Extends the generated BackupResponse with the `external_service` field
- * that was added in the May 2026 hardening PR. The generated types will
- * include this automatically once `openapi-ts` is re-run against the updated
- * schema — this local extension keeps the UI working in the interim. */
-interface ExternalServiceSummary {
-  id: number
-  name: string
-  service_type: string
-}
-
 function formatDuration(ms: number): string {
   if (!Number.isFinite(ms) || ms <= 0) return '—'
   const seconds = Math.floor(ms / 1000)
@@ -59,6 +55,16 @@ function formatDuration(ms: number): string {
   const hours = Math.floor(minutes / 60)
   const remMinutes = minutes % 60
   return remMinutes ? `${hours}h ${remMinutes}m` : `${hours}h`
+}
+
+/** Format a wall-clock timeout from seconds into a human-readable string. */
+function formatTimeoutSecs(secs: number): string {
+  if (secs <= 0) return '—'
+  const hours = Math.floor(secs / 3600)
+  const minutes = Math.floor((secs % 3600) / 60)
+  if (hours > 0 && minutes > 0) return `${hours}h ${minutes}m`
+  if (hours > 0) return `${hours}h`
+  return `${minutes}m`
 }
 
 function StatusIcon({ state }: { state: BackupState }) {
@@ -190,6 +196,12 @@ export function BackupDetail() {
       path: { id: backupId! },
     }),
     enabled: !!id && !!backupId,
+    // Poll every 5 s while the backup is running so step transitions are
+    // visible without a manual refresh. Back off to no polling when done.
+    refetchInterval: (query) => {
+      const state = (query.state.data as { state?: string } | undefined)?.state
+      return state === 'running' ? 5_000 : false
+    },
   })
 
   const sourceId = id ? parseInt(id) : undefined
@@ -241,9 +253,6 @@ export function BackupDetail() {
   }
 
   const state = backup.state as BackupState
-  // Cast to include the extended field. Remove this cast once `openapi-ts` is
-  // re-run after the May 2026 hardening PR adds ExternalServiceSummary to the schema.
-  const backupEx = backup as typeof backup & { external_service?: ExternalServiceSummary }
   const startedAt = new Date(backup.started_at)
   const completedAt = backup.completed_at
     ? new Date(backup.completed_at)
@@ -448,16 +457,16 @@ export function BackupDetail() {
                   </span>
                 </Detail>
               ) : null}
-              {backupEx.external_service ? (
+              {backup.external_service ? (
                 <Detail label="Service">
                   <Link
-                    to={`/storage/${backupEx.external_service.id}`}
+                    to={`/storage/${backup.external_service.id}`}
                     className="text-foreground hover:underline"
                   >
-                    {backupEx.external_service.name}
+                    {backup.external_service.name}
                   </Link>{' '}
                   <span className="text-muted-foreground capitalize">
-                    ({backupEx.external_service.service_type})
+                    ({backup.external_service.service_type})
                   </span>
                 </Detail>
               ) : null}
@@ -477,6 +486,53 @@ export function BackupDetail() {
               {completedAt ? (
                 <Detail label="Finished at">
                   {format(completedAt, 'PPpp')}
+                </Detail>
+              ) : null}
+              {state === 'running' ? (
+                <Detail label="Step">
+                  <span className="inline-flex items-center gap-2">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-600 shrink-0" />
+                    <span className="font-mono text-xs">
+                      {backup.current_step ?? 'starting…'}
+                    </span>
+                  </span>
+                </Detail>
+              ) : null}
+              {state === 'running' && backup.last_heartbeat_at ? (
+                <Detail label="Last heartbeat">
+                  {isStalled ? (
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span className="text-destructive cursor-help">
+                            {formatDistanceToNow(
+                              new Date(backup.last_heartbeat_at),
+                              { addSuffix: true },
+                            )}
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          No heartbeat in over 5 minutes — engine may be
+                          wedged.
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  ) : (
+                    formatDistanceToNow(new Date(backup.last_heartbeat_at), {
+                      addSuffix: true,
+                    })
+                  )}
+                </Detail>
+              ) : null}
+              {typeof backup.attempts === 'number' &&
+              backup.attempts > 1 ? (
+                <Detail label="Attempt">
+                  {backup.attempts} of {backup.max_attempts ?? '?'}
+                </Detail>
+              ) : null}
+              {typeof backup.max_runtime_secs === 'number' ? (
+                <Detail label="Timeout">
+                  {formatTimeoutSecs(backup.max_runtime_secs)}
                 </Detail>
               ) : null}
               {backup.expires_at ? (

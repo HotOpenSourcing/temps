@@ -1,7 +1,6 @@
 'use client'
 
 import {
-  createBackupScheduleMutation,
   deleteBackupScheduleMutation,
   disableBackupScheduleMutation,
   enableBackupScheduleMutation,
@@ -30,14 +29,6 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from '@/components/ui/dialog'
-import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -45,16 +36,6 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { EmptyState } from '@/components/ui/empty-state'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import {
   Table,
   TableBody,
@@ -76,6 +57,7 @@ import {
   DatabaseBackup,
   Loader2,
   MoreHorizontal,
+  Pencil,
   Plug,
   Plus,
   ScanSearch,
@@ -84,65 +66,24 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
 
-interface ScheduleOption {
-  label: string
-  value: string
-  description: string
-  customizable?: boolean
+/** Format a wall-clock timeout from seconds into a human-readable string.
+ * Mirrors the helper in `BackupDetail.tsx`; if this gets copied a third
+ * time it should move to `lib/utils.ts`. */
+function formatTimeoutSecs(secs: number): string {
+  if (secs <= 0) return '—'
+  const hours = Math.floor(secs / 3600)
+  const minutes = Math.floor((secs % 3600) / 60)
+  if (hours > 0 && minutes > 0) return `${hours}h ${minutes}m`
+  if (hours > 0) return `${hours}h`
+  return `${minutes}m`
 }
 
-const scheduleOptions: ScheduleOption[] = [
-  {
-    label: 'Every 12 hours',
-    value: '0 0 */12 * * *',
-    description: 'Runs at 00:00 and 12:00',
-  },
-  {
-    label: 'Daily',
-    value: '0 0 0 * * *',
-    description: 'Runs every day at midnight',
-  },
-  {
-    label: 'Weekly',
-    value: '0 0 0 * * 0',
-    description: 'Runs every Sunday at midnight',
-  },
-  {
-    label: 'Monthly',
-    value: '0 0 0 1 * *',
-    description: 'Runs on the first day of every month at midnight',
-  },
-  {
-    label: 'Custom',
-    value: 'custom',
-    description: 'Specify a custom cron expression',
-    customizable: true,
-  },
-]
-
-interface NewScheduleForm {
-  name: string
-  description?: string
-  backup_type: string
-  retention_period: number
-  enabled: boolean
-}
 
 export function S3SourceDetail() {
   const { id } = useParams<{ id: string }>()
   const sourceId = id ? parseInt(id) : undefined
   const { setBreadcrumbs } = useBreadcrumbs()
 
-  const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false)
-  const [newSchedule, setNewSchedule] = useState<Partial<NewScheduleForm>>({
-    backup_type: 'scheduled',
-    retention_period: 7,
-    enabled: true,
-  })
-  const [selectedSchedule, setSelectedSchedule] = useState<string>(
-    scheduleOptions[1].value,
-  )
-  const [customCron, setCustomCron] = useState('')
   const [scheduleToDelete, setScheduleToDelete] =
     useState<BackupScheduleResponse | null>(null)
 
@@ -172,23 +113,6 @@ export function S3SourceDetail() {
     () => schedules.filter((s) => s.s3_source_id === sourceId),
     [schedules, sourceId],
   )
-
-  const createMutation = useMutation({
-    ...createBackupScheduleMutation(),
-    meta: { errorTitle: 'Failed to create backup schedule' },
-    onSuccess: () => {
-      refetchSchedules()
-      setNewSchedule({
-        backup_type: 'scheduled',
-        retention_period: 7,
-        enabled: true,
-      })
-      setSelectedSchedule(scheduleOptions[1].value)
-      setCustomCron('')
-      setIsCreateDialogOpen(false)
-      toast.success('Backup schedule created successfully')
-    },
-  })
 
   // Probes the S3 source's credentials, region, and bucket reachability
   // via the existing POST /backups/s3-sources/{id}/test endpoint.
@@ -292,39 +216,6 @@ export function S3SourceDetail() {
       ),
     [backupIndex],
   )
-
-  const handleScheduleChange = (value: string) => {
-    setSelectedSchedule(value)
-  }
-
-  const handleCreateSchedule = () => {
-    if (!newSchedule.name) {
-      toast.error('Schedule name is required')
-      return
-    }
-    if (!sourceId) return
-
-    const schedule_expression =
-      selectedSchedule === 'custom' ? customCron : selectedSchedule
-
-    if (!schedule_expression) {
-      toast.error('Please select a schedule or enter a custom cron expression')
-      return
-    }
-
-    createMutation.mutate({
-      body: {
-        name: newSchedule.name,
-        description: newSchedule.description,
-        backup_type: newSchedule.backup_type || 'scheduled',
-        schedule_expression,
-        retention_period: newSchedule.retention_period || 7,
-        s3_source_id: sourceId,
-        enabled: newSchedule.enabled ?? true,
-        tags: [],
-      },
-    })
-  }
 
   const handleToggleSchedule = (schedule: BackupScheduleResponse) => {
     if (schedule.enabled) {
@@ -464,150 +355,12 @@ export function S3SourceDetail() {
                 Scheduled backups writing to this S3 source
               </CardDescription>
             </div>
-            <Dialog
-              open={isCreateDialogOpen}
-              onOpenChange={setIsCreateDialogOpen}
-            >
-              <DialogTrigger asChild>
-                <Button size="sm">
-                  <Plus className="mr-2 h-4 w-4" />
-                  New Schedule
-                </Button>
-              </DialogTrigger>
-              <DialogContent className="max-h-screen flex flex-col">
-                <DialogHeader>
-                  <DialogTitle>Create Backup Schedule</DialogTitle>
-                </DialogHeader>
-                <div className="grid gap-4 py-4 flex-1 overflow-y-auto">
-                  <div className="grid gap-2">
-                    <Label htmlFor="name">Schedule Name</Label>
-                    <Input
-                      id="name"
-                      placeholder="Daily Backup"
-                      value={newSchedule.name || ''}
-                      onChange={(e) =>
-                        setNewSchedule({
-                          ...newSchedule,
-                          name: e.target.value,
-                        })
-                      }
-                    />
-                  </div>
-                  <div className="grid gap-2">
-                    <Label htmlFor="description">
-                      Description (Optional)
-                    </Label>
-                    <Input
-                      id="description"
-                      placeholder="Daily backup at midnight"
-                      value={newSchedule.description || ''}
-                      onChange={(e) =>
-                        setNewSchedule({
-                          ...newSchedule,
-                          description: e.target.value,
-                        })
-                      }
-                    />
-                  </div>
-                  <div className="grid gap-2">
-                    <Label htmlFor="type">Backup Type</Label>
-                    <Select
-                      value={newSchedule.backup_type}
-                      onValueChange={(value) =>
-                        setNewSchedule({
-                          ...newSchedule,
-                          backup_type: value,
-                        })
-                      }
-                    >
-                      <SelectTrigger>
-                        <SelectValue placeholder="Select type" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="manual">Manual</SelectItem>
-                        <SelectItem value="scheduled">Scheduled</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  {newSchedule.backup_type === 'scheduled' && (
-                    <div className="grid gap-2">
-                      <Label>Schedule</Label>
-                      <RadioGroup
-                        value={selectedSchedule}
-                        onValueChange={handleScheduleChange}
-                        className="gap-4"
-                      >
-                        {scheduleOptions.map((option) => (
-                          <div
-                            key={option.value}
-                            className="flex items-start space-x-3 space-y-0"
-                          >
-                            <RadioGroupItem
-                              value={option.value}
-                              id={option.value}
-                            />
-                            <div className="grid gap-1.5 leading-none">
-                              <Label
-                                htmlFor={option.value}
-                                className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
-                              >
-                                {option.label}
-                              </Label>
-                              <p className="text-sm text-muted-foreground">
-                                {option.description}
-                              </p>
-                            </div>
-                          </div>
-                        ))}
-                      </RadioGroup>
-                      {selectedSchedule === 'custom' && (
-                        <div className="mt-4">
-                          <Label htmlFor="customCron">
-                            Custom Cron Expression
-                          </Label>
-                          <Input
-                            id="customCron"
-                            placeholder="0 0 * * *"
-                            value={customCron}
-                            onChange={(e) => setCustomCron(e.target.value)}
-                          />
-                          <p className="text-xs text-muted-foreground mt-1">
-                            Format: minute hour day month weekday
-                          </p>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  <div className="grid gap-2">
-                    <Label htmlFor="retention">
-                      Retention Period (days)
-                    </Label>
-                    <Input
-                      id="retention"
-                      type="number"
-                      min={1}
-                      value={newSchedule.retention_period || 7}
-                      onChange={(e) =>
-                        setNewSchedule({
-                          ...newSchedule,
-                          retention_period: parseInt(e.target.value),
-                        })
-                      }
-                    />
-                  </div>
-                </div>
-                <DialogFooter className="shrink-0">
-                  <Button
-                    onClick={handleCreateSchedule}
-                    disabled={createMutation.isPending}
-                  >
-                    {createMutation.isPending
-                      ? 'Creating...'
-                      : 'Create Schedule'}
-                  </Button>
-                </DialogFooter>
-              </DialogContent>
-            </Dialog>
+            <Button size="sm" asChild>
+              <Link to={`/backups/s3-sources/${sourceId}/schedules/new`}>
+                <Plus className="mr-2 h-4 w-4" />
+                New Schedule
+              </Link>
+            </Button>
           </CardHeader>
           <CardContent>
             {isLoadingSchedules ? (
@@ -620,9 +373,13 @@ export function S3SourceDetail() {
                 title="No schedules for this source"
                 description="Create a schedule to back up automatically to this S3 target"
                 action={
-                  <Button onClick={() => setIsCreateDialogOpen(true)}>
-                    <Plus className="mr-2 h-4 w-4" />
-                    New Schedule
+                  <Button asChild>
+                    <Link
+                      to={`/backups/s3-sources/${sourceId}/schedules/new`}
+                    >
+                      <Plus className="mr-2 h-4 w-4" />
+                      New Schedule
+                    </Link>
                   </Button>
                 }
               />
@@ -637,6 +394,9 @@ export function S3SourceDetail() {
                       <TableHead>Status</TableHead>
                       <TableHead className="hidden md:table-cell">
                         Retention
+                      </TableHead>
+                      <TableHead className="hidden md:table-cell">
+                        Timeout
                       </TableHead>
                       <TableHead className="hidden md:table-cell">
                         Last Run
@@ -703,6 +463,11 @@ export function S3SourceDetail() {
                         <TableCell className="hidden md:table-cell">
                           {schedule.retention_period} days
                         </TableCell>
+                        <TableCell className="hidden md:table-cell text-muted-foreground">
+                          {schedule.max_runtime_secs
+                            ? formatTimeoutSecs(schedule.max_runtime_secs)
+                            : 'engine default'}
+                        </TableCell>
                         <TableCell className="hidden md:table-cell">
                           {schedule.last_run
                             ? format(
@@ -727,6 +492,15 @@ export function S3SourceDetail() {
                               </Button>
                             </DropdownMenuTrigger>
                             <DropdownMenuContent align="end">
+                              <DropdownMenuItem asChild>
+                                <Link
+                                  to={`/backups/s3-sources/${sourceId}/schedules/${schedule.id}/edit`}
+                                >
+                                  <Pencil className="mr-2 h-4 w-4" />
+                                  Edit
+                                </Link>
+                              </DropdownMenuItem>
+                              <DropdownMenuSeparator />
                               <DropdownMenuItem
                                 onClick={() =>
                                   handleToggleSchedule(schedule)

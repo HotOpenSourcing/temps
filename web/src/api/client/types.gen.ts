@@ -825,17 +825,102 @@ export type AvailablePermissions = {
 };
 
 /**
+ * Response body for the list-backup-alerts endpoint.
+ */
+export type BackupAlertListResponse = {
+    /**
+     * All currently open (unresolved) alerts, newest first.
+     */
+    alerts: Array<BackupAlertResponse>;
+};
+
+/**
+ * A single open backup alert surfaced in the UI banner.
+ *
+ * Alerts are auto-opened by the watcher and auto-resolved when the triggering
+ * condition clears. No manual dismiss is required or supported.
+ *
+ * The optional `schedule_s3_source_id` and `backup_id` / `backup_s3_source_id`
+ * fields are included so the UI can deep-link the alert row to its target —
+ * for `overdue_schedule`, the S3 source detail page that hosts the schedule;
+ * for `stalled_job`, the backup detail page.
+ */
+export type BackupAlertResponse = {
+    /**
+     * FK to `backups.id` — the parent backup row the stalled job belongs to.
+     * Set for `stalled_job` alerts.
+     */
+    backup_id?: number | null;
+    /**
+     * FK to `backups.s3_source_id`. Lets the UI build the deep-link
+     * `/backups/s3-sources/{backup_s3_source_id}/backups/{backup_id}`.
+     * Set for `stalled_job` alerts.
+     */
+    backup_s3_source_id?: number | null;
+    /**
+     * Database id of the alert row.
+     */
+    id: number;
+    /**
+     * FK to `backup_jobs.id`. Set for `stalled_job` alerts.
+     */
+    job_id?: number | null;
+    /**
+     * `"overdue_schedule"` or `"stalled_job"`.
+     */
+    kind: string;
+    /**
+     * Human-readable description of the alert condition.
+     */
+    message: string;
+    /**
+     * RFC 3339 timestamp when the alert was opened.
+     */
+    opened_at: string;
+    /**
+     * FK to `backup_schedules.id`. Set for `overdue_schedule` alerts.
+     */
+    schedule_id?: number | null;
+    /**
+     * Human-readable name of the linked schedule, if applicable.
+     */
+    schedule_name?: string | null;
+    /**
+     * FK to `backup_schedules.s3_source_id`. The UI uses this to deep-link
+     * the alert to the S3 source detail page that hosts the schedule.
+     * Set for `overdue_schedule` alerts.
+     */
+    schedule_s3_source_id?: number | null;
+    /**
+     * `"warning"` or `"critical"`.
+     */
+    severity: string;
+};
+
+/**
  * Response type for backup
  */
 export type BackupResponse = {
+    /**
+     * How many times this job has been claimed and run. `null` for legacy
+     * backups with no `backup_jobs` row.
+     */
+    attempts?: number | null;
     backup_id: string;
     backup_type: string;
     checksum?: string | null;
     completed_at?: number | null;
     compression_type: string;
     created_by: number;
+    /**
+     * Name of the engine step currently executing (e.g., `"walg_push"`).
+     * `null` when no `backup_jobs` row exists for this backup (legacy rows
+     * pre-dating ADR-014), or when the job has not yet completed its first step.
+     */
+    current_step?: string | null;
     error_message?: string | null;
     expires_at?: number | null;
+    external_service?: null | ExternalServiceSummary;
     file_count?: number | null;
     id: number;
     /**
@@ -849,6 +934,17 @@ export type BackupResponse = {
      * (`size_bytes` is authoritative in that case).
      */
     live_size_bytes?: number | null;
+    /**
+     * Maximum attempts before the job is permanently failed. `null` for
+     * legacy backups.
+     */
+    max_attempts?: number | null;
+    /**
+     * Resolved wall-clock timeout for this backup job (seconds). `null` for
+     * legacy backups. Derived from the three-tier resolution order:
+     * caller override → schedule override → engine default.
+     */
+    max_runtime_secs?: number | null;
     metadata: unknown;
     name: string;
     s3_location: string;
@@ -878,6 +974,12 @@ export type BackupScheduleResponse = {
     enabled: boolean;
     id: number;
     last_run?: number | null;
+    /**
+     * Per-schedule wall-clock timeout override for backup jobs (seconds).
+     * `null` means the engine-family default is used. See
+     * `temps_backup_core::timeouts::default_max_runtime_secs`.
+     */
+    max_runtime_secs?: number | null;
     name: string;
     next_run?: number | null;
     retention_period: number;
@@ -1965,6 +2067,13 @@ export type CreateBackupScheduleRequest = {
     backup_type: string;
     description?: string | null;
     enabled: boolean;
+    /**
+     * Optional wall-clock timeout override for jobs created by this schedule
+     * (seconds). When set, overrides the engine-family default. `null` means
+     * "use engine default." The per-job `max_runtime_secs` in
+     * `EnqueueJobParams` can still override this for ad-hoc triggers.
+     */
+    max_runtime_secs?: number | null;
     name: string;
     retention_period: number;
     /**
@@ -4944,6 +5053,26 @@ export type ExternalServiceInfo = {
     topology: string;
     updated_at: string;
     version?: string | null;
+};
+
+/**
+ * Summary of the external service that owns a backup. Only populated for
+ * external-service backups (Redis, Postgres, etc.); absent for control-plane
+ * backups.
+ */
+export type ExternalServiceSummary = {
+    /**
+     * Database id of the external service.
+     */
+    id: number;
+    /**
+     * Human-readable service name (e.g. "redis-prod").
+     */
+    name: string;
+    /**
+     * Service type string (e.g. "postgres", "redis", "mongodb").
+     */
+    service_type: string;
 };
 
 export type FieldResponse = {
@@ -10586,6 +10715,92 @@ export type ServiceAccessInfo = {
  */
 export type ServiceAction = 'create' | 'link-external' | 'skip';
 
+/**
+ * A single backup entry in the per-service backup list.
+ */
+export type ServiceBackupEntryResponse = {
+    /**
+     * UUID string assigned at backup creation time.
+     */
+    backup_id: string;
+    /**
+     * Backup variant (e.g. "full", "incremental").
+     */
+    backup_type: string;
+    /**
+     * Compression algorithm used (e.g. "gzip").
+     */
+    compression_type: string;
+    /**
+     * Engine-reported error message, populated when `state = "failed"`.
+     */
+    error_message?: string | null;
+    /**
+     * Row ID from `external_service_backups`.
+     */
+    external_service_backup_id: number;
+    /**
+     * ISO 8601 timestamp when the backup finished, if known.
+     */
+    finished_at?: string | null;
+    /**
+     * Row ID from the `backups` table.
+     */
+    id: number;
+    /**
+     * Human-friendly display name.
+     */
+    name: string;
+    /**
+     * Object key or `s3://` URL for the backup data.
+     */
+    s3_location: string;
+    /**
+     * FK to `s3_sources.id`.
+     */
+    s3_source_id: number;
+    /**
+     * Human-readable name of the S3 source.
+     */
+    s3_source_name: string;
+    /**
+     * Size of the backup in bytes, if available.
+     */
+    size_bytes?: number | null;
+    /**
+     * ISO 8601 timestamp when the backup started.
+     */
+    started_at: string;
+    /**
+     * Current state: "completed", "running", "failed".
+     */
+    state: string;
+};
+
+/**
+ * Paginated list of backups for a specific external service.
+ *
+ * Returned by `GET /backups/external-services/{service_id}/backups`.
+ */
+export type ServiceBackupListResponse = {
+    /**
+     * Backups belonging to this service, newest first.
+     */
+    backups: Array<ServiceBackupEntryResponse>;
+    /**
+     * Current page (1-based).
+     */
+    page: number;
+    /**
+     * Number of items per page.
+     */
+    page_size: number;
+    /**
+     * Total number of backups for this service across all pages.
+     */
+    total: number;
+};
+
 export type ServiceHealthResponse = {
     /**
      * Consecutive failed probes. Alert fires at 3.
@@ -12339,6 +12554,47 @@ export type UpdateApiKeyRequest = {
 
 export type UpdateAutomaticDeployRequest = {
     automatic_deploy: boolean;
+};
+
+/**
+ * Request body for updating an existing backup schedule via `PATCH /api/backups/schedules/{id}`.
+ *
+ * All fields are optional; only present fields are updated. Absent fields
+ * leave the corresponding column unchanged.
+ */
+export type UpdateBackupScheduleRequest = {
+    /**
+     * New human-readable description. Pass an empty string `""` to clear.
+     */
+    description?: string | null;
+    /**
+     * Enable or disable the schedule. Skipped when `None`.
+     */
+    enabled?: boolean | null;
+    /**
+     * Per-schedule wall-clock timeout override (seconds).
+     *
+     * - `None` (field absent) — leave current value unchanged
+     * - `Some(None)` (field present, JSON `null`) — clear override; fall back to engine default
+     * - `Some(Some(n))` — set to `n` seconds (must be >= 60)
+     */
+    max_runtime_secs?: number | null;
+    /**
+     * New schedule name. Skipped when `None`. Must not be empty if provided.
+     */
+    name?: string | null;
+    /**
+     * Days to retain backups produced by this schedule. Must be >= 1.
+     */
+    retention_period?: number | null;
+    /**
+     * New cron expression. When changed, `next_run` is recomputed.
+     */
+    schedule_expression?: string | null;
+    /**
+     * Replace the full tag list. Skipped when `None`.
+     */
+    tags?: Array<string> | null;
 };
 
 /**
@@ -16865,6 +17121,35 @@ export type VerifyMfaChallengeResponses = {
 
 export type VerifyMfaChallengeResponse = VerifyMfaChallengeResponses[keyof VerifyMfaChallengeResponses];
 
+export type ListBackupAlertsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/backups/alerts';
+};
+
+export type ListBackupAlertsErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type ListBackupAlertsError = ListBackupAlertsErrors[keyof ListBackupAlertsErrors];
+
+export type ListBackupAlertsResponses = {
+    /**
+     * List of open backup alerts
+     */
+    200: BackupAlertListResponse;
+};
+
+export type ListBackupAlertsResponse = ListBackupAlertsResponses[keyof ListBackupAlertsResponses];
+
 export type RunExternalServiceBackupData = {
     body: RunExternalServiceBackupRequest;
     path: {
@@ -16893,12 +17178,55 @@ export type RunExternalServiceBackupError = RunExternalServiceBackupErrors[keyof
 
 export type RunExternalServiceBackupResponses = {
     /**
-     * Backup started successfully
+     * Backup enqueued for async execution
      */
-    200: ExternalServiceBackupResponse;
+    202: ExternalServiceBackupResponse;
 };
 
 export type RunExternalServiceBackupResponse = RunExternalServiceBackupResponses[keyof RunExternalServiceBackupResponses];
+
+export type ListExternalServiceBackupsData = {
+    body?: never;
+    path: {
+        /**
+         * External service ID
+         */
+        service_id: number;
+    };
+    query?: {
+        /**
+         * Page number (1-based). Defaults to 1.
+         */
+        page?: number;
+        /**
+         * Items per page. Defaults to 20, max 100.
+         */
+        page_size?: number;
+    };
+    url: '/backups/external-services/{service_id}/backups';
+};
+
+export type ListExternalServiceBackupsErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type ListExternalServiceBackupsError = ListExternalServiceBackupsErrors[keyof ListExternalServiceBackupsErrors];
+
+export type ListExternalServiceBackupsResponses = {
+    /**
+     * Paginated list of backups for this service
+     */
+    200: ServiceBackupListResponse;
+};
+
+export type ListExternalServiceBackupsResponse = ListExternalServiceBackupsResponses[keyof ListExternalServiceBackupsResponses];
 
 export type ListS3SourcesData = {
     body?: never;
@@ -17093,7 +17421,14 @@ export type ListSourceBackupsData = {
     path: {
         id: number;
     };
-    query?: never;
+    query?: {
+        /**
+         * When `true`, scan the S3 bucket for backups not tracked in the
+         * local database (useful after disaster-recovery from another Temps
+         * instance).  Defaults to `false` — the fast DB-only path.
+         */
+        include_s3_scan?: boolean;
+    };
     url: '/backups/s3-sources/{id}/backups';
 };
 
@@ -17151,9 +17486,9 @@ export type RunBackupForSourceError = RunBackupForSourceErrors[keyof RunBackupFo
 
 export type RunBackupForSourceResponses = {
     /**
-     * Backup started successfully
+     * Backup enqueued for async execution
      */
-    200: BackupResponse;
+    202: BackupResponse;
 };
 
 export type RunBackupForSourceResponse = RunBackupForSourceResponses[keyof RunBackupForSourceResponses];
@@ -17345,6 +17680,45 @@ export type GetBackupScheduleResponses = {
 };
 
 export type GetBackupScheduleResponse = GetBackupScheduleResponses[keyof GetBackupScheduleResponses];
+
+export type UpdateBackupScheduleData = {
+    body: UpdateBackupScheduleRequest;
+    path: {
+        id: number;
+    };
+    query?: never;
+    url: '/backups/schedules/{id}';
+};
+
+export type UpdateBackupScheduleErrors = {
+    /**
+     * Validation error
+     */
+    400: ProblemDetails;
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Schedule not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type UpdateBackupScheduleError = UpdateBackupScheduleErrors[keyof UpdateBackupScheduleErrors];
+
+export type UpdateBackupScheduleResponses = {
+    /**
+     * Schedule updated
+     */
+    200: BackupScheduleResponse;
+};
+
+export type UpdateBackupScheduleResponse = UpdateBackupScheduleResponses[keyof UpdateBackupScheduleResponses];
 
 export type ListBackupsForScheduleData = {
     body?: never;

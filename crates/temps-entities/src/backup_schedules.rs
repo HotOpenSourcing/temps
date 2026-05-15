@@ -26,6 +26,15 @@ pub struct Model {
     /// schedule intact when a job row is pruned by retention.
     /// Added by ADR-014 Phase 0 migration.
     pub last_job_id: Option<i64>,
+    /// Optional per-schedule wall-clock timeout override (seconds).
+    ///
+    /// When `Some`, this value is used instead of the engine's global default
+    /// (`temps_backup_core::timeouts::default_max_runtime_secs`) for all jobs
+    /// created by this schedule. Callers can still override per-job via
+    /// `EnqueueJobParams::max_runtime_secs`.
+    ///
+    /// `None` (the common case) means "use the engine default."
+    pub max_runtime_secs: Option<i64>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -46,6 +46,19 @@ pub struct EnqueueJobParams {
     pub params: serde_json::Value,
     /// Maximum retry count. Defaults to 3 when `None`.
     pub max_attempts: Option<i32>,
+    /// Wall-clock timeout override for this job (seconds).
+    ///
+    /// Resolution order in `enqueue_job`:
+    /// 1. This field (`Some(secs)`) — highest priority.
+    /// 2. `backup_schedules.max_runtime_secs` — passed by the caller when
+    ///    enqueueing a scheduled backup and the schedule has a custom limit.
+    /// 3. `crate::timeouts::default_max_runtime_secs(engine)` — engine family
+    ///    default (24 h for Postgres, 12 h for S3, 4 h for Redis/Mongo).
+    ///
+    /// `None` means "use schedule override or engine default." The resolved
+    /// value is written into `backup_jobs.max_runtime_secs` at insert time
+    /// so the runner never recomputes it at dispatch.
+    pub max_runtime_secs: Option<i64>,
 }
 
 // ── BackupRunner ──────────────────────────────────────────────────────────────
@@ -170,11 +183,20 @@ LIMIT 1
 
         let max_attempts = params.max_attempts.unwrap_or(3);
 
+        // Resolve the wall-clock timeout using the three-tier precedence chain.
+        // The resolved value is written into the row so the runner reads it
+        // directly at dispatch time (no re-computation needed).
+        let max_runtime_secs = crate::timeouts::resolve_max_runtime(
+            params.max_runtime_secs,
+            None, // schedule-level override is resolved by the caller before calling enqueue_job
+            &params.engine,
+        );
+
         let sql = r#"
 INSERT INTO backup_jobs
-    (backup_id, engine, target_kind, target_id, params, max_attempts, next_attempt_at)
+    (backup_id, engine, target_kind, target_id, params, max_attempts, max_runtime_secs, next_attempt_at)
 VALUES
-    ($1, $2, $3, $4, $5, $6, NOW())
+    ($1, $2, $3, $4, $5, $6, $7, NOW())
 RETURNING id
         "#;
 
@@ -188,6 +210,7 @@ RETURNING id
                 SValue::from(params.target_id),
                 params_value,
                 SValue::from(max_attempts),
+                SValue::from(max_runtime_secs),
             ],
         ))
         .one(db)
@@ -276,11 +299,21 @@ LIMIT 1
         let params_value = SValue::Json(Some(Box::new(params.params.clone())));
         let max_attempts = params.max_attempts.unwrap_or(3);
 
+        // Resolve the wall-clock timeout. The caller has already folded the
+        // schedule-level override into `params.max_runtime_secs` if applicable
+        // (see `enqueue_scheduled_backup` in temps-backup). Here we apply the
+        // engine-default fallback for any remaining None.
+        let max_runtime_secs = crate::timeouts::resolve_max_runtime(
+            params.max_runtime_secs,
+            None, // schedule-level override pre-resolved by caller
+            &params.engine,
+        );
+
         let sql = r#"
 INSERT INTO backup_jobs
-    (backup_id, engine, target_kind, target_id, params, max_attempts, next_attempt_at)
+    (backup_id, engine, target_kind, target_id, params, max_attempts, max_runtime_secs, next_attempt_at)
 VALUES
-    ($1, $2, $3, $4, $5, $6, NOW())
+    ($1, $2, $3, $4, $5, $6, $7, NOW())
 RETURNING id
         "#;
 
@@ -294,6 +327,7 @@ RETURNING id
                 SValue::from(params.target_id),
                 params_value,
                 SValue::from(max_attempts),
+                SValue::from(max_runtime_secs),
             ],
         ))
         .one(txn)
@@ -420,22 +454,17 @@ RETURNING id
         Ok(())
     }
 
-    /// Per-job wall-clock timeout. Any backup job that runs longer than this
-    /// is forcibly failed so it can never "run" indefinitely like the May 2026
-    /// production incident where three wal-g jobs hung for 14+ minutes.
-    ///
-    /// Engines that legitimately need longer durations (e.g., a full
-    /// TimescaleDB backup of a multi-TB cluster) can override this via
-    /// `backup_jobs.params.max_runtime_secs` in a future PR.
-    const DEFAULT_JOB_MAX_RUNTIME: std::time::Duration = std::time::Duration::from_secs(30 * 60);
-
     /// Dispatch a claimed job to its engine and advance the job through the
     /// runner loop (ADR-014 §"Runner loop" pseudocode).
     ///
-    /// A per-job wall-clock timeout of [`DEFAULT_JOB_MAX_RUNTIME`] (30 min) is
-    /// enforced via `tokio::time::sleep`. Jobs that exceed this ceiling are
-    /// immediately marked failed with a descriptive timeout message and their
-    /// `CancellationToken` is fired so cooperative engines can abort.
+    /// A per-job wall-clock timeout is read from `row.max_runtime_secs` (baked
+    /// in at enqueue time via `crate::timeouts::resolve_max_runtime`). Jobs
+    /// that exceed this ceiling are immediately marked failed with a descriptive
+    /// timeout message and their `CancellationToken` is fired so cooperative
+    /// engines can abort.
+    ///
+    /// A floor of 60 seconds is applied so a zero or corrupt DB value never
+    /// instantly fails every job.
     async fn dispatch(self: Arc<Self>, row: BackupJobRow, engine: Arc<dyn BackupEngine>) {
         let job_id = row.id;
         let backup_id = row.backup_id;
@@ -467,9 +496,12 @@ RETURNING id
         let mut stream = engine.execute(&ctx, cursor.clone());
 
         // Per-job wall-clock deadline (ADR-014 hardening fix #3).
-        // Pin the sleep future so we can poll it inside the select loop without
-        // recreating it on every iteration.
-        let work_deadline = tokio::time::sleep(Self::DEFAULT_JOB_MAX_RUNTIME);
+        // Read the resolved timeout from the row (baked in at enqueue time).
+        // Apply a 60-second floor so a corrupt or zero value never instantly
+        // fails the job. Pin the sleep future so we can poll it inside the
+        // select loop without recreating it on every iteration.
+        let max_runtime = std::time::Duration::from_secs(row.max_runtime_secs.max(60) as u64);
+        let work_deadline = tokio::time::sleep(max_runtime);
         tokio::pin!(work_deadline);
 
         loop {
@@ -480,12 +512,21 @@ RETURNING id
                 // immediately and cancel the engine's CancellationToken so
                 // cooperative steps abort at their next checkpoint.
                 () = &mut work_deadline => {
+                    let timeout_secs = max_runtime.as_secs();
+                    let hours = timeout_secs / 3600;
+                    let minutes = (timeout_secs % 3600) / 60;
+                    let human = if hours > 0 {
+                        format!("{}h {}m", hours, minutes)
+                    } else {
+                        format!("{}m", minutes)
+                    };
                     let msg = format!(
-                        "Job exceeded wall-clock timeout of {} seconds; \
+                        "Job exceeded wall-clock timeout of {} seconds ({}); \
                          automatically failed to prevent indefinite execution.",
-                        Self::DEFAULT_JOB_MAX_RUNTIME.as_secs(),
+                        timeout_secs,
+                        human,
                     );
-                    error!(job_id, attempt, timeout_secs = Self::DEFAULT_JOB_MAX_RUNTIME.as_secs(), %msg, "BackupRunner: job timeout");
+                    error!(job_id, attempt, timeout_secs, %msg, "BackupRunner: job timeout");
                     job_cancel.cancel();
                     let _ = mark_job_failed(
                         self.db.as_ref(),
@@ -749,12 +790,138 @@ mod tests {
             target_id: Some(3),
             params: serde_json::json!({}),
             max_attempts: None,
+            max_runtime_secs: None,
         };
 
         let result = runner.enqueue_job(db.as_ref(), params).await;
 
         assert!(result.is_ok(), "enqueue_job should succeed: {:?}", result);
         assert_eq!(result.unwrap(), 99);
+    }
+
+    /// `enqueue_job` must resolve and write the per-job `max_runtime_secs`
+    /// onto the row at INSERT time. Without this, the runner's
+    /// `dispatch()` would read whatever default the DB column carries
+    /// instead of honoring caller overrides.
+    ///
+    /// We assert by inspecting the transaction log: the second statement
+    /// must be the INSERT, and its parameter list must contain `7200_i64`
+    /// (the explicit caller override) — not the postgres_walg default
+    /// `86_400` and not `0`.
+    #[tokio::test]
+    async fn test_enqueue_job_writes_resolved_max_runtime() {
+        use sea_orm::Value as SVal;
+
+        let empty: Vec<BTreeMap<String, SVal>> = vec![];
+        let mut insert_row: BTreeMap<String, SVal> = BTreeMap::new();
+        insert_row.insert("id".to_string(), SVal::BigInt(Some(101)));
+
+        let db = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results(vec![empty])
+                .append_query_results(vec![vec![insert_row]])
+                .into_connection(),
+        );
+
+        let runner = BackupRunner::new(Arc::clone(&db), RunnerConfig::default());
+
+        let params = EnqueueJobParams {
+            backup_id: 1,
+            engine: "postgres_walg".to_string(),
+            target_kind: "external_service".to_string(),
+            target_id: Some(1),
+            params: serde_json::json!({}),
+            max_attempts: None,
+            // Explicit override — must end up in the row regardless of engine default.
+            max_runtime_secs: Some(7200),
+        };
+
+        let result = runner.enqueue_job(db.as_ref(), params).await;
+        assert!(result.is_ok(), "enqueue must succeed: {:?}", result);
+
+        // Inspect the transaction log to confirm the INSERT carried 7200.
+        drop(runner);
+        let inner = Arc::try_unwrap(db).expect("exclusive ownership");
+        let log = inner.into_transaction_log();
+        let insert_stmt = log
+            .iter()
+            .flat_map(|txn| txn.statements())
+            .find(|s| s.sql.trim_start().to_uppercase().starts_with("INSERT"))
+            .expect("INSERT statement must appear in the transaction log");
+        let has_7200 = insert_stmt
+            .values
+            .as_ref()
+            .map(|v| {
+                v.0.iter()
+                    .any(|val| matches!(val, sea_orm::Value::BigInt(Some(n)) if *n == 7200))
+            })
+            .unwrap_or(false);
+        assert!(
+            has_7200,
+            "INSERT must bind max_runtime_secs=7200, got values: {:?}",
+            insert_stmt.values
+        );
+    }
+
+    /// When the caller doesn't override `max_runtime_secs`, `enqueue_job`
+    /// must fall back to the engine-family default from
+    /// `timeouts::default_max_runtime_secs`. For `redis` that's 4 hours
+    /// (`14_400` seconds).
+    #[tokio::test]
+    async fn test_enqueue_job_uses_engine_default_when_no_override() {
+        use sea_orm::Value as SVal;
+
+        let empty: Vec<BTreeMap<String, SVal>> = vec![];
+        let mut insert_row: BTreeMap<String, SVal> = BTreeMap::new();
+        insert_row.insert("id".to_string(), SVal::BigInt(Some(102)));
+
+        let db = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results(vec![empty])
+                .append_query_results(vec![vec![insert_row]])
+                .into_connection(),
+        );
+
+        let runner = BackupRunner::new(Arc::clone(&db), RunnerConfig::default());
+
+        let params = EnqueueJobParams {
+            backup_id: 2,
+            engine: "redis".to_string(),
+            target_kind: "external_service".to_string(),
+            target_id: Some(2),
+            params: serde_json::json!({}),
+            max_attempts: None,
+            max_runtime_secs: None,
+        };
+
+        runner
+            .enqueue_job(db.as_ref(), params)
+            .await
+            .expect("enqueue must succeed");
+
+        drop(runner);
+        let inner = Arc::try_unwrap(db).expect("exclusive ownership");
+        let log = inner.into_transaction_log();
+        let insert_stmt = log
+            .iter()
+            .flat_map(|txn| txn.statements())
+            .find(|s| s.sql.trim_start().to_uppercase().starts_with("INSERT"))
+            .expect("INSERT must appear");
+
+        let expected = crate::timeouts::default_max_runtime_secs("redis");
+        let has_default = insert_stmt
+            .values
+            .as_ref()
+            .map(|v| {
+                v.0.iter()
+                    .any(|val| matches!(val, sea_orm::Value::BigInt(Some(n)) if *n == expected))
+            })
+            .unwrap_or(false);
+        assert!(
+            has_default,
+            "INSERT must bind max_runtime_secs={} (redis default), got values: {:?}",
+            expected, insert_stmt.values
+        );
     }
 
     #[tokio::test]
@@ -782,6 +949,7 @@ mod tests {
             target_id: Some(5),
             params: serde_json::json!({}),
             max_attempts: None,
+            max_runtime_secs: None,
         };
 
         let result = runner.enqueue_job(db.as_ref(), params).await;
@@ -882,6 +1050,7 @@ mod tests {
             attempts: 1, // not at max — proves the permanent-failure path
             max_attempts: 3,
             claim_token: Some(uuid::Uuid::new_v4()),
+            max_runtime_secs: 86_400, // 24 h — will not fire in the test
         };
 
         let engine: Arc<dyn BackupEngine> = Arc::new(PreflightFailEngine);

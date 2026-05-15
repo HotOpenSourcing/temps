@@ -121,6 +121,16 @@ const BackupDetail = lazy(() =>
 const CreateS3Source = lazy(() =>
   import('./pages/CreateS3Source').then((m) => ({ default: m.CreateS3Source }))
 )
+const CreateBackupSchedule = lazy(() =>
+  import('./pages/CreateBackupSchedule').then((m) => ({
+    default: m.CreateBackupSchedule,
+  }))
+)
+const EditBackupSchedule = lazy(() =>
+  import('./pages/EditBackupSchedule').then((m) => ({
+    default: m.EditBackupSchedule,
+  }))
+)
 const NewProject = lazy(() =>
   import('./pages/NewProject').then((m) => ({ default: m.NewProject }))
 )
@@ -414,8 +424,10 @@ const FullAppRoutes = () => {
                 <Route path="/dns-providers/:id" element={<DnsProviderDetail />} />
                 <Route path="/backups" element={<Backups />} />
                 <Route path="/backups/s3-sources/new" element={<CreateS3Source />} />
-                <Route path="/backups/s3-sources/:id" element={<S3SourceDetail />} />
+                <Route path="/backups/s3-sources/:id/schedules/new" element={<CreateBackupSchedule />} />
+                <Route path="/backups/s3-sources/:id/schedules/:scheduleId/edit" element={<EditBackupSchedule />} />
                 <Route path="/backups/s3-sources/:id/backups/:backupId" element={<BackupDetail />} />
+                <Route path="/backups/s3-sources/:id" element={<S3SourceDetail />} />
                 {/* Backward-compat: old /settings/<resource> links → new top-level */}
                 <Route path="/settings/domains/*" element={<Navigate to="/domains" replace />} />
                 <Route path="/settings/email/*" element={<Navigate to="/email" replace />} />

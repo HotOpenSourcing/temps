@@ -89,6 +89,8 @@ mod m20260511_000001_create_cli_login_sessions;
 mod m20260511_000002_add_is_secret_to_env_vars;
 mod m20260514_000001_create_backup_jobs;
 mod m20260515_000001_create_backup_alerts;
+mod m20260515_000002_add_backup_jobs_max_runtime;
+mod m20260515_000003_add_backup_schedules_max_runtime;
 
 pub struct Migrator;
 
@@ -181,6 +183,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260511_000002_add_is_secret_to_env_vars::Migration),
             Box::new(m20260514_000001_create_backup_jobs::Migration),
             Box::new(m20260515_000001_create_backup_alerts::Migration),
+            Box::new(m20260515_000002_add_backup_jobs_max_runtime::Migration),
+            Box::new(m20260515_000003_add_backup_schedules_max_runtime::Migration),
         ]
     }
 }

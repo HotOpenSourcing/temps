@@ -55,6 +55,19 @@ pub struct Model {
     pub finished_at: Option<DBDateTime>,
     pub created_at: DBDateTime,
     pub updated_at: DBDateTime,
+    /// Wall-clock timeout baked in at enqueue time (seconds).
+    ///
+    /// Resolution order at enqueue: caller-supplied override →
+    /// schedule-level `backup_schedules.max_runtime_secs` → engine default
+    /// (see `temps_backup_core::timeouts::default_max_runtime_secs`).
+    ///
+    /// The runner reads this column directly so it never needs to infer
+    /// the timeout from the engine key at dispatch time.
+    ///
+    /// DB default is 86 400 (24 h), matching the engine default for unknown
+    /// engines and Postgres. Existing rows produced before this migration was
+    /// applied receive 24 h automatically.
+    pub max_runtime_secs: i64,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
