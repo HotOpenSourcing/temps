@@ -22,7 +22,10 @@ use crate::{
         s3_mirror::{S3MirrorDeps, S3MirrorEngine},
     },
     handlers::{self, create_backup_app_state, BackupAppState},
-    services::{reconcile_orphan_backups, sweep_stalled_backups, BackupService, RestoreService},
+    services::{
+        reconcile_orphan_backups, sweep_backup_alerts, sweep_stalled_backups, BackupService,
+        RestoreService,
+    },
 };
 use temps_providers::externalsvc::postgres_upgrade::{
     PostgresContainerLifecycle, PreUpgradeBackupProvider,
@@ -243,6 +246,29 @@ impl TempsPlugin for BackupPlugin {
                     tick.tick().await;
                     if let Err(e) = sweep_stalled_backups(sweep_db.as_ref()).await {
                         error!("Backup stall sweep failed (will retry next tick): {}", e);
+                    }
+                }
+            });
+
+            // Alert watcher: detects overdue schedules and stalled jobs.
+            // Fires every 5 minutes; uses Skip so a slow DB doesn't cause
+            // accumulated ticks to run back-to-back.
+            let alert_db = db.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(5 * 60));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tick.tick().await;
+                    match sweep_backup_alerts(alert_db.as_ref()).await {
+                        Ok(stats) if stats.has_changes() => info!(
+                            opened_overdue = stats.opened_overdue,
+                            opened_stalled = stats.opened_stalled,
+                            resolved_overdue = stats.resolved_overdue,
+                            resolved_stalled = stats.resolved_stalled,
+                            "backup alert sweep: state changes detected"
+                        ),
+                        Ok(_) => tracing::debug!("backup alert sweep: no changes"),
+                        Err(e) => error!("backup alert sweep failed: {}", e),
                     }
                 }
             });

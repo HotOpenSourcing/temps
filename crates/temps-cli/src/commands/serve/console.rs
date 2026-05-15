@@ -962,23 +962,38 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
         debug!("UserService not available, skipping user initialization");
     }
 
-    // Start backup scheduler if BackupService is available
+    // Start backup scheduler if BackupService is available.
+    // The scheduler requires the BackupRunner (ADR-014 Phase 3: enqueuer-only path).
+    // Both are accessible from BackupAppState which was registered by BackupPlugin.
     if let Some(backup_service) = service_context.get_service::<temps_backup::BackupService>() {
         let cancellation_token = tokio_util::sync::CancellationToken::new();
         let scheduler_token = cancellation_token.clone();
         let scheduler_service = backup_service.clone();
 
-        tokio::spawn(async move {
-            debug!("Starting backup scheduler");
-            if let Err(e) = scheduler_service
-                .start_backup_scheduler(scheduler_token)
-                .await
-            {
-                tracing::error!("Backup scheduler error: {}", e);
-            }
-        });
+        // Retrieve the runner from BackupAppState. If unavailable (e.g., during
+        // tests that only register BackupService without the full plugin), fall back
+        // gracefully — the scheduler simply won't start.
+        let maybe_runner = service_context
+            .get_service::<temps_backup::BackupAppState>()
+            .map(|s| Arc::clone(&s.backup_runner));
 
-        debug!("Backup scheduler started in background");
+        if let Some(runner) = maybe_runner {
+            tokio::spawn(async move {
+                debug!("Starting backup scheduler (ADR-014 enqueuer-only mode)");
+                if let Err(e) = scheduler_service
+                    .start_backup_scheduler(scheduler_token, runner)
+                    .await
+                {
+                    tracing::error!("Backup scheduler error: {}", e);
+                }
+            });
+            debug!("Backup scheduler started in background");
+        } else {
+            tracing::warn!(
+                "BackupAppState not available; backup scheduler will not start. \
+                 This is expected only in tests or partial plugin configurations."
+            );
+        }
         // Note: Currently no graceful shutdown mechanism for cancellation_token
         // In the future, this could be wired to a shutdown signal handler
     }

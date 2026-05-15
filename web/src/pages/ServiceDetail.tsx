@@ -4,13 +4,11 @@ import {
   getServiceOptions,
   getServicePreviewEnvironmentVariablesMaskedOptions,
   linkServiceToProjectMutation,
-  listS3SourcesOptions,
   listServiceProjectsOptions,
-  listSourceBackupsOptions,
   startServiceMutation,
   stopServiceMutation,
 } from '@/api/client/@tanstack/react-query.gen'
-import type { SourceBackupEntry } from '@/api/client/types.gen'
+import { listExternalServiceBackupsOptions } from '@/lib/external-service-backups'
 import { ClusterHealthPanel } from '@/components/storage/ClusterHealthPanel'
 import { EditServiceDialog } from '@/components/storage/EditServiceDialog'
 import { ServiceResourcesPanel } from '@/components/storage/ServiceResourcesPanel'
@@ -63,7 +61,6 @@ import { maskValue, shouldMaskValue } from '@/lib/masking'
 import { formatBytes } from '@/lib/utils'
 import {
   useMutation,
-  useQueries,
   useQuery,
   useQueryClient,
 } from '@tanstack/react-query'
@@ -216,51 +213,25 @@ export function ServiceDetail() {
     ...getProjectsOptions({ query: { page: 1, per_page: 100 } }),
   })
 
-  // Backups that belong to this service. We pull the S3 source list and then
-  // fan out to each source's backup index; entries whose origin service name
-  // matches this service are surfaced in the Backups card below.
-  const serviceName = service?.service?.name
-  const { data: s3Sources } = useQuery({
-    ...listS3SourcesOptions(),
-    enabled: !!serviceName,
-  })
-
-  const sourceBackupQueries = useQueries({
-    queries: (s3Sources || []).map((source) => ({
-      ...listSourceBackupsOptions({ path: { id: source.id } }),
-      enabled: !!serviceName,
-    })),
-  })
-
-  const isLoadingBackups =
-    !!serviceName &&
-    (s3Sources === undefined ||
-      sourceBackupQueries.some((q) => q.isLoading))
-
-  const serviceBackups = useMemo(() => {
-    if (!serviceName || !s3Sources) return []
-    const rows: Array<SourceBackupEntry & { source_id: number; source_name: string }> = []
-    sourceBackupQueries.forEach((q, idx) => {
-      const source = s3Sources[idx]
-      if (!source || !q.data) return
-      for (const entry of q.data.backups) {
-        if (entry.origin_service_name === serviceName) {
-          rows.push({ ...entry, source_id: source.id, source_name: source.name })
-        }
-      }
-    })
-    rows.sort(
-      (a, b) =>
-        new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
-    )
-    return rows
-  }, [serviceName, s3Sources, sourceBackupQueries])
-
-  const BACKUPS_PAGE_SIZE = 5
+  // Backups for this service — single DB-only query, no S3 fan-out.
+  // Replaces the previous multi-source fan-out that issued one slow S3 scan
+  // per configured source on every page load.
+  const serviceId = id ? parseInt(id) : undefined
   const [backupsPage, setBackupsPage] = useState(1)
+  const BACKUPS_PAGE_SIZE = 5
+
+  const {
+    data: serviceBackupsData,
+    isLoading: isLoadingBackups,
+  } = useQuery({
+    ...listExternalServiceBackupsOptions(serviceId, backupsPage, BACKUPS_PAGE_SIZE),
+    enabled: !!serviceId,
+  })
+
+  const serviceBackups = serviceBackupsData?.backups ?? []
   const backupsTotalPages = Math.max(
     1,
-    Math.ceil(serviceBackups.length / BACKUPS_PAGE_SIZE),
+    Math.ceil((serviceBackupsData?.total ?? 0) / BACKUPS_PAGE_SIZE),
   )
 
   useEffect(() => {
@@ -269,14 +240,7 @@ export function ServiceDetail() {
     }
   }, [backupsPage, backupsTotalPages])
 
-  const paginatedBackups = useMemo(
-    () =>
-      serviceBackups.slice(
-        (backupsPage - 1) * BACKUPS_PAGE_SIZE,
-        backupsPage * BACKUPS_PAGE_SIZE,
-      ),
-    [serviceBackups, backupsPage],
-  )
+  const paginatedBackups = serviceBackups
 
   const backupsPageWindow = useMemo(() => {
     const windowSize = Math.min(5, backupsTotalPages)
@@ -1153,7 +1117,7 @@ export function ServiceDetail() {
                       {isLoadingBackups ? (
                         <Loader2 className="h-3 w-3 animate-spin" />
                       ) : (
-                        serviceBackups.length
+                        serviceBackupsData?.total ?? 0
                       )}
                     </Badge>
                   </CardTitle>
@@ -1188,7 +1152,7 @@ export function ServiceDetail() {
               ) : (
                 <ul role="list" className="divide-y divide-border">
                   {paginatedBackups.map((backup) => {
-                    const key = backup.backup_id || `${backup.source_id}-${backup.location}`
+                    const key = backup.backup_id || String(backup.external_service_backup_id)
                     const isFailed = backup.state === 'failed'
                     const isRunning = backup.state === 'running'
                     return (
@@ -1202,7 +1166,7 @@ export function ServiceDetail() {
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2 flex-wrap">
                             <p className="truncate text-sm font-medium">
-                              <TimeAgo date={backup.created_at} />
+                              <TimeAgo date={backup.started_at} />
                             </p>
                             {backup.backup_type && (
                               <Badge variant="outline" className="text-xs">
@@ -1220,25 +1184,19 @@ export function ServiceDetail() {
                                 Failed
                               </Badge>
                             )}
-                            {backup.source === 's3_scan' && (
-                              <Badge variant="secondary" className="text-xs">
-                                External
-                              </Badge>
-                            )}
                           </div>
                           <p className="mt-0.5 truncate text-xs text-muted-foreground tabular-nums">
-                            {backup.source_name}
+                            {backup.s3_source_name}
                             {backup.size_bytes
                               ? ` · ${formatBytes(backup.size_bytes)}`
                               : ''}
-                            {backup.format ? ` · ${backup.format}` : ''}
                           </p>
                         </div>
                         <Link
                           to={
                             backup.backup_id
-                              ? `/backups/s3-sources/${backup.source_id}/backups/${backup.backup_id}`
-                              : `/backups/s3-sources/${backup.source_id}`
+                              ? `/backups/s3-sources/${backup.s3_source_id}/backups/${backup.backup_id}`
+                              : `/backups/s3-sources/${backup.s3_source_id}`
                           }
                         >
                           <Button variant="ghost" size="sm" className="gap-2">
@@ -1258,9 +1216,9 @@ export function ServiceDetail() {
                       Showing {(backupsPage - 1) * BACKUPS_PAGE_SIZE + 1} to{' '}
                       {Math.min(
                         backupsPage * BACKUPS_PAGE_SIZE,
-                        serviceBackups.length,
+                        serviceBackupsData?.total ?? 0,
                       )}{' '}
-                      of {serviceBackups.length} backups
+                      of {serviceBackupsData?.total ?? 0} backups
                     </span>
                     <span className="sm:hidden tabular-nums">
                       {backupsPage} / {backupsTotalPages}

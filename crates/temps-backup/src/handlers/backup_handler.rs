@@ -12,6 +12,7 @@ use axum::{
     routing::{get, patch, post},
     Json, Router,
 };
+use sea_orm::{DatabaseBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -90,10 +91,12 @@ impl From<BackupError> for Problem {
         list_backups_for_schedule,
         run_backup_for_source,
         list_source_backups,
+        list_external_service_backups,
         get_backup,
         disable_backup_schedule,
         enable_backup_schedule,
-        run_external_service_backup
+        run_external_service_backup,
+        list_backup_alerts
     ),
     components(
         schemas(
@@ -110,6 +113,10 @@ impl From<BackupError> for Problem {
             ExternalServiceBackupResponse,
             SourceBackupIndexResponse,
             SourceBackupEntry,
+            ServiceBackupListResponse,
+            ServiceBackupEntryResponse,
+            BackupAlertResponse,
+            BackupAlertListResponse,
         )
     ),
     info(
@@ -534,11 +541,22 @@ fn default_backup_source() -> String {
     "db".to_string()
 }
 
+/// Query parameters for the S3-source backup listing.
+#[derive(serde::Deserialize, utoipa::IntoParams)]
+struct ListSourceBackupsParams {
+    /// When `true`, scan the S3 bucket for backups not tracked in the
+    /// local database (useful after disaster-recovery from another Temps
+    /// instance).  Defaults to `false` — the fast DB-only path.
+    #[serde(default)]
+    include_s3_scan: bool,
+}
+
 /// List all backups in an S3 source
 #[utoipa::path(
     tag = "Backups",
     get,
     path = "/backups/s3-sources/{id}/backups",
+    params(ListSourceBackupsParams),
     responses(
         (status = 200, description = "List of all backups in the source", body = SourceBackupIndexResponse),
         (status = 401, description = "Unauthorized", body = ProblemDetails),
@@ -553,12 +571,13 @@ async fn list_source_backups(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<BackupAppState>>,
     Path(id): Path<i32>,
+    axum::extract::Query(params): axum::extract::Query<ListSourceBackupsParams>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, BackupsRead);
 
     let index = app_state
         .backup_service
-        .list_source_backups(id)
+        .list_source_backups(id, params.include_s3_scan)
         .await
         .map_err(Problem::from)?;
 
@@ -589,6 +608,142 @@ async fn list_source_backups(
             .collect(),
         last_updated: s3_index.last_updated,
     };
+    Ok(Json(response))
+}
+
+/// Paginated list of backups for a specific external service.
+///
+/// Returned by `GET /backups/external-services/{service_id}/backups`.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct ServiceBackupListResponse {
+    /// Backups belonging to this service, newest first.
+    pub backups: Vec<ServiceBackupEntryResponse>,
+    /// Total number of backups for this service across all pages.
+    pub total: i64,
+    /// Current page (1-based).
+    pub page: i64,
+    /// Number of items per page.
+    pub page_size: i64,
+}
+
+/// A single backup entry in the per-service backup list.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct ServiceBackupEntryResponse {
+    /// Row ID from the `backups` table.
+    pub id: i32,
+    /// UUID string assigned at backup creation time.
+    pub backup_id: String,
+    /// Human-friendly display name.
+    pub name: String,
+    /// Current state: "completed", "running", "failed".
+    pub state: String,
+    /// Backup variant (e.g. "full", "incremental").
+    pub backup_type: String,
+    /// ISO 8601 timestamp when the backup started.
+    #[schema(example = "2025-01-15T14:30:00Z")]
+    pub started_at: String,
+    /// ISO 8601 timestamp when the backup finished, if known.
+    #[schema(example = "2025-01-15T14:35:00Z")]
+    pub finished_at: Option<String>,
+    /// Size of the backup in bytes, if available.
+    pub size_bytes: Option<i64>,
+    /// Object key or `s3://` URL for the backup data.
+    pub s3_location: String,
+    /// Engine-reported error message, populated when `state = "failed"`.
+    pub error_message: Option<String>,
+    /// Compression algorithm used (e.g. "gzip").
+    pub compression_type: String,
+    /// FK to `s3_sources.id`.
+    pub s3_source_id: i32,
+    /// Human-readable name of the S3 source.
+    pub s3_source_name: String,
+    /// Row ID from `external_service_backups`.
+    pub external_service_backup_id: i32,
+}
+
+impl From<crate::services::ServiceBackupEntry> for ServiceBackupEntryResponse {
+    fn from(e: crate::services::ServiceBackupEntry) -> Self {
+        Self {
+            id: e.id,
+            backup_id: e.backup_id,
+            name: e.name,
+            state: e.state,
+            backup_type: e.backup_type,
+            started_at: e.started_at.to_rfc3339(),
+            finished_at: e
+                .finished_at
+                .map(|dt: chrono::DateTime<chrono::Utc>| dt.to_rfc3339()),
+            size_bytes: e.size_bytes,
+            s3_location: e.s3_location,
+            error_message: e.error_message,
+            compression_type: e.compression_type,
+            s3_source_id: e.s3_source_id,
+            s3_source_name: e.s3_source_name,
+            external_service_backup_id: e.external_service_backup_id,
+        }
+    }
+}
+
+/// Query parameters for the per-service backup listing.
+#[derive(serde::Deserialize, utoipa::IntoParams)]
+struct ListExternalServiceBackupsParams {
+    /// Page number (1-based). Defaults to 1.
+    #[serde(default = "default_page")]
+    page: i64,
+    /// Items per page. Defaults to 20, max 100.
+    #[serde(default = "default_page_size")]
+    page_size: i64,
+}
+
+fn default_page() -> i64 {
+    1
+}
+
+fn default_page_size() -> i64 {
+    20
+}
+
+/// List all backups for a specific external service (DB-only, no S3 scan).
+///
+/// Returns a paginated list of backups that belong to this service.
+/// Completes in <100 ms regardless of S3 endpoint latency because it
+/// never touches S3.
+#[utoipa::path(
+    tag = "Backups",
+    get,
+    path = "/backups/external-services/{service_id}/backups",
+    params(
+        ("service_id" = i32, Path, description = "External service ID"),
+        ListExternalServiceBackupsParams
+    ),
+    responses(
+        (status = 200, description = "Paginated list of backups for this service", body = ServiceBackupListResponse),
+        (status = 401, description = "Unauthorized", body = ProblemDetails),
+        (status = 500, description = "Internal server error", body = ProblemDetails)
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn list_external_service_backups(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<BackupAppState>>,
+    Path(service_id): Path<i32>,
+    axum::extract::Query(params): axum::extract::Query<ListExternalServiceBackupsParams>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, BackupsRead);
+
+    let (entries, total) = app_state
+        .backup_service
+        .list_external_service_backups(service_id, params.page, params.page_size)
+        .await
+        .map_err(Problem::from)?;
+
+    let response = ServiceBackupListResponse {
+        backups: entries.into_iter().map(Into::into).collect(),
+        total,
+        page: params.page,
+        page_size: params.page_size,
+    };
+
     Ok(Json(response))
 }
 
@@ -627,6 +782,10 @@ pub fn configure_routes() -> Router<Arc<BackupAppState>> {
             get(list_backups_for_schedule),
         )
         .route("/backups/s3-sources/{id}/backups", get(list_source_backups))
+        .route(
+            "/backups/external-services/{id}/backups",
+            get(list_external_service_backups),
+        )
         .route("/backups/{id}", get(get_backup))
         .route(
             "/backups/schedules/{id}/disable",
@@ -640,6 +799,7 @@ pub fn configure_routes() -> Router<Arc<BackupAppState>> {
             "/backups/external-services/{id}/run",
             post(run_external_service_backup),
         )
+        .route("/backups/alerts", get(list_backup_alerts))
 }
 
 /// List all S3 sources
@@ -1465,4 +1625,161 @@ async fn run_external_service_backup(
         Json(ExternalServiceBackupResponse::from(pending)),
     )
         .into_response())
+}
+
+// ── Backup Alerts ──────────────────────────────────────────────────────────────
+
+/// A single open backup alert surfaced in the UI banner.
+///
+/// Alerts are auto-opened by the watcher and auto-resolved when the triggering
+/// condition clears. No manual dismiss is required or supported.
+///
+/// The optional `schedule_s3_source_id` and `backup_id` / `backup_s3_source_id`
+/// fields are included so the UI can deep-link the alert row to its target —
+/// for `overdue_schedule`, the S3 source detail page that hosts the schedule;
+/// for `stalled_job`, the backup detail page.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BackupAlertResponse {
+    /// Database id of the alert row.
+    pub id: i64,
+    /// `"overdue_schedule"` or `"stalled_job"`.
+    pub kind: String,
+    /// `"warning"` or `"critical"`.
+    pub severity: String,
+    /// FK to `backup_schedules.id`. Set for `overdue_schedule` alerts.
+    pub schedule_id: Option<i32>,
+    /// Human-readable name of the linked schedule, if applicable.
+    pub schedule_name: Option<String>,
+    /// FK to `backup_schedules.s3_source_id`. The UI uses this to deep-link
+    /// the alert to the S3 source detail page that hosts the schedule.
+    /// Set for `overdue_schedule` alerts.
+    pub schedule_s3_source_id: Option<i32>,
+    /// FK to `backup_jobs.id`. Set for `stalled_job` alerts.
+    pub job_id: Option<i64>,
+    /// FK to `backups.id` — the parent backup row the stalled job belongs to.
+    /// Set for `stalled_job` alerts.
+    pub backup_id: Option<i32>,
+    /// FK to `backups.s3_source_id`. Lets the UI build the deep-link
+    /// `/backups/s3-sources/{backup_s3_source_id}/backups/{backup_id}`.
+    /// Set for `stalled_job` alerts.
+    pub backup_s3_source_id: Option<i32>,
+    /// Human-readable description of the alert condition.
+    pub message: String,
+    /// RFC 3339 timestamp when the alert was opened.
+    #[schema(example = "2026-05-15T10:00:00Z")]
+    pub opened_at: String,
+}
+
+/// Response body for the list-backup-alerts endpoint.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BackupAlertListResponse {
+    /// All currently open (unresolved) alerts, newest first.
+    pub alerts: Vec<BackupAlertResponse>,
+}
+
+/// Internal row type for the alert JOIN query.
+#[derive(Debug, FromQueryResult)]
+struct AlertRow {
+    pub id: i64,
+    pub kind: String,
+    pub severity: String,
+    pub schedule_id: Option<i32>,
+    pub schedule_name: Option<String>,
+    pub schedule_s3_source_id: Option<i32>,
+    pub job_id: Option<i64>,
+    pub backup_id: Option<i32>,
+    pub backup_s3_source_id: Option<i32>,
+    pub message: String,
+    pub opened_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// List open backup alerts.
+///
+/// Returns all alerts that have not yet been resolved, ordered by `opened_at`
+/// descending (newest first). The UI renders these as a banner above the
+/// Backups page content. Alerts are auto-opened by the watcher and
+/// auto-resolved when the triggering condition clears.
+///
+/// **Schedule overdue** — the backup scheduler did not enqueue a job within
+/// the expected window (1 hour past `next_run`). Usually means the scheduler
+/// task is dead or wedged.
+///
+/// **Job stalled** — a `backup_jobs` row has been in `state='pending'` for
+/// more than 1 hour. The runner never claimed the job. Usually means the
+/// runner task is dead or the runner concurrency cap is too low.
+#[utoipa::path(
+    tag = "Backups",
+    get,
+    path = "/backups/alerts",
+    responses(
+        (status = 200, description = "List of open backup alerts", body = BackupAlertListResponse),
+        (status = 401, description = "Unauthorized", body = ProblemDetails),
+        (status = 500, description = "Internal server error", body = ProblemDetails)
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn list_backup_alerts(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<BackupAppState>>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, BackupsRead);
+
+    // LEFT JOIN backup_schedules + backup_jobs + backups so the response
+    // carries everything the UI needs to deep-link the alert to its target
+    // (no N+1, one round-trip). For overdue_schedule alerts we surface the
+    // schedule's `s3_source_id`. For stalled_job alerts we surface the
+    // backup id and the backup's `s3_source_id`.
+    let sql = r#"
+SELECT
+    a.id,
+    a.kind,
+    a.severity,
+    a.schedule_id,
+    s.name             AS schedule_name,
+    s.s3_source_id     AS schedule_s3_source_id,
+    a.job_id,
+    j.backup_id        AS backup_id,
+    b.s3_source_id     AS backup_s3_source_id,
+    a.message,
+    a.opened_at
+FROM backup_alerts a
+LEFT JOIN backup_schedules s ON s.id = a.schedule_id
+LEFT JOIN backup_jobs       j ON j.id = a.job_id
+LEFT JOIN backups           b ON b.id = j.backup_id
+WHERE a.resolved_at IS NULL
+ORDER BY a.opened_at DESC
+"#;
+
+    let rows = AlertRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        sql,
+        vec![],
+    ))
+    .all(app_state.db.as_ref())
+    .await
+    .map_err(|e| {
+        error!("Failed to query backup alerts: {}", e);
+        problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
+            .with_title("Internal Server Error")
+            .with_detail(format!("Failed to query backup alerts: {}", e))
+    })?;
+
+    let alerts = rows
+        .into_iter()
+        .map(|row| BackupAlertResponse {
+            id: row.id,
+            kind: row.kind,
+            severity: row.severity,
+            schedule_id: row.schedule_id,
+            schedule_name: row.schedule_name,
+            schedule_s3_source_id: row.schedule_s3_source_id,
+            job_id: row.job_id,
+            backup_id: row.backup_id,
+            backup_s3_source_id: row.backup_s3_source_id,
+            message: row.message,
+            opened_at: row.opened_at.to_rfc3339(),
+        })
+        .collect();
+
+    Ok(Json(BackupAlertListResponse { alerts }))
 }

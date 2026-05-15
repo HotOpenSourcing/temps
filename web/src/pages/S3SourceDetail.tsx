@@ -65,9 +65,9 @@ import {
 } from '@/components/ui/table'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { usePageTitle } from '@/hooks/usePageTitle'
-import { testS3SourceConnection } from '@/lib/s3-sources'
+import { listSourceBackupsWithScan, testS3SourceConnection } from '@/lib/s3-sources'
 import { cn } from '@/lib/utils'
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { format } from 'date-fns'
 import {
   ArrowLeft,
@@ -78,6 +78,7 @@ import {
   MoreHorizontal,
   Plug,
   Plus,
+  ScanSearch,
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
@@ -222,6 +223,37 @@ export function S3SourceDetail() {
     },
     onSettled: () => {
       setScheduleToDelete(null)
+    },
+  })
+
+  const queryClient = useQueryClient()
+
+  // "Discover orphan backups" — explicit opt-in S3 scan. Slow on some
+  // endpoints (5-30 s on OVH); only triggered by user action.
+  const discoverOrphansMutation = useMutation({
+    mutationFn: () => {
+      if (!sourceId) {
+        return Promise.reject(new Error('S3 source id is unknown'))
+      }
+      return listSourceBackupsWithScan(sourceId)
+    },
+    onSuccess: (result) => {
+      const scanned = result.backups.filter(
+        (b) => (b as { source?: string }).source === 's3_scan',
+      ).length
+      toast.success(
+        scanned > 0
+          ? `Found ${scanned} additional backup${scanned === 1 ? '' : 's'} in S3`
+          : 'No additional backups found in S3',
+      )
+      // Refresh the normal listing so newly discovered entries appear.
+      void queryClient.invalidateQueries({
+        queryKey: ['backups', 's3-source', sourceId],
+      })
+    },
+    onError: (err: unknown) => {
+      const message = err instanceof Error ? err.message : 'Unknown error'
+      toast.error('S3 scan failed', { description: message })
     },
   })
 
@@ -727,11 +759,28 @@ export function S3SourceDetail() {
         </Card>
 
         <Card>
-          <CardHeader>
-            <CardTitle>Recent Backups</CardTitle>
-            <CardDescription>
-              Backups that have been written to this S3 source
-            </CardDescription>
+          <CardHeader className="flex flex-row items-start justify-between gap-3 space-y-0">
+            <div>
+              <CardTitle>Recent Backups</CardTitle>
+              <CardDescription>
+                Backups that have been written to this S3 source
+              </CardDescription>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => discoverOrphansMutation.mutate()}
+              disabled={discoverOrphansMutation.isPending || !sourceId}
+              title="Scan S3 for backups not tracked in the database — useful after a Temps restore from a different instance"
+            >
+              {discoverOrphansMutation.isPending ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <ScanSearch className="mr-2 h-4 w-4" />
+              )}
+              <span className="hidden sm:inline">Discover orphan backups</span>
+              <span className="sm:hidden">Scan S3</span>
+            </Button>
           </CardHeader>
           <CardContent>
             {isLoadingBackups ? (
