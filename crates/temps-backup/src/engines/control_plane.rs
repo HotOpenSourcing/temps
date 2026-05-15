@@ -51,6 +51,7 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use super::ring_buffer::RingBuffer;
+use super::shell::{detect_shell, ShellKind};
 use temps_backup_core::{BackupContext, BackupEngine, BackupEngineError, StepCursor, StepEvent};
 
 /// How frequently the engine emits a `Heartbeat` during long-running operations.
@@ -657,15 +658,41 @@ async fn step_pg_dumpall(
         format!("'{}'", s.replace('\'', "'\\''"))
     }
 
-    let pg_dump_cmd = format!(
-        "pg_dumpall --clean --if-exists --no-password --host={} --port={} --username={} --database={} 2>{} | gzip > {}",
-        shell_escape_local(&host),
-        shell_escape_local(&port_str),
-        shell_escape_local(&username),
-        shell_escape_local(&database),
-        stderr_path,
-        container_dump_path,
-    );
+    // Detect whether the sidecar ships bash. With bash we use `set -o
+    // pipefail` so a `pg_dumpall | gzip` pipeline surfaces pg_dumpall's
+    // failure (otherwise gzip succeeds on empty input and we'd write a
+    // 20-byte empty-gzip "backup"). Without bash — `dash`/`ash`/busybox —
+    // we use the POSIX-portable `pg_dumpall > tmp && gzip tmp` form;
+    // `&&` short-circuits so a pg_dumpall failure skips gzip and the
+    // compound exit code is pg_dumpall's real one.
+    let shell_kind = detect_shell(&docker, &container_name).await;
+    let uncompressed_in_container = container_dump_path
+        .strip_suffix(".gz")
+        .unwrap_or(&container_dump_path)
+        .to_string();
+
+    let pg_dump_cmd = match shell_kind {
+        ShellKind::Bash => format!(
+            "set -o pipefail; pg_dumpall --clean --if-exists --no-password --host={} --port={} --username={} --database={} 2>{} | gzip > {}",
+            shell_escape_local(&host),
+            shell_escape_local(&port_str),
+            shell_escape_local(&username),
+            shell_escape_local(&database),
+            stderr_path,
+            container_dump_path,
+        ),
+        ShellKind::Sh => format!(
+            "pg_dumpall --clean --if-exists --no-password --host={} --port={} --username={} --database={} 2>{} > {} && gzip {}",
+            shell_escape_local(&host),
+            shell_escape_local(&port_str),
+            shell_escape_local(&username),
+            shell_escape_local(&database),
+            stderr_path,
+            shell_escape_local(&uncompressed_in_container),
+            shell_escape_local(&uncompressed_in_container),
+        ),
+    };
+    let shell_cmd: &'static str = shell_kind.as_str();
 
     // Capture both stdout and stderr. The shell command already redirects
     // stderr to a file inside the container (`2>{stderr_path}`) for
@@ -675,7 +702,7 @@ async fn step_pg_dumpall(
         .create_exec(
             &container_name,
             CreateExecOptions {
-                cmd: Some(vec!["sh", "-c", &pg_dump_cmd]),
+                cmd: Some(vec![shell_cmd, "-c", &pg_dump_cmd]),
                 attach_stdout: Some(true),
                 attach_stderr: Some(true),
                 env: Some(vec![pgpassword_env.as_str()]),

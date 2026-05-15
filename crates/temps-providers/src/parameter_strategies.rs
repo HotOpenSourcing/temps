@@ -93,7 +93,15 @@ fn validate_postgres_credentials(params: &HashMap<String, JsonValue>) -> Result<
         }
     }
     if let Some(JsonValue::String(pw)) = params.get("password") {
-        is_valid_pg_password(pw).map_err(|reason| format!("invalid 'password': {}", reason))?;
+        // Empty string is a sentinel meaning "auto-generate me later" —
+        // the `auto_generate_missing` step (which runs immediately after
+        // validation) fills it with a `generate_secure_password()` value.
+        // Treating empty as a validation failure here would block the
+        // auto-generate flow that both the UI and the schema documentation
+        // explicitly promise users.
+        if !pw.is_empty() {
+            is_valid_pg_password(pw).map_err(|reason| format!("invalid 'password': {}", reason))?;
+        }
     }
     Ok(())
 }
@@ -1266,5 +1274,41 @@ mod tests {
 
         let ok = pg_params("postgres", "myapp", Some("strong_password_456!"));
         assert!(strategy.validate_for_creation(&ok).is_ok());
+    }
+
+    /// Regression: the UI and the parameter schema both promise users that
+    /// leaving the password field empty triggers auto-generation. That only
+    /// works if validation does not reject empty passwords — the
+    /// auto-generator runs in `auto_generate_missing` AFTER
+    /// `validate_for_creation`. An earlier bug returned 400 "password
+    /// cannot be empty" before the generator could run.
+    #[test]
+    fn validate_credentials_accepts_empty_password_for_auto_generation() {
+        let mut params = pg_params("postgres", "myapp", None);
+        params.insert("password".into(), JsonValue::String(String::new()));
+        assert!(
+            validate_postgres_credentials(&params).is_ok(),
+            "empty password must be allowed; the auto-generator fills it"
+        );
+
+        // The full strategy run must also accept empty and produce a non-empty
+        // password after auto_generate_missing has run.
+        let strategy = PostgresParameterStrategy;
+        let mut full = pg_params("postgres", "myapp", None);
+        full.insert("password".into(), JsonValue::String(String::new()));
+        assert!(strategy.validate_for_creation(&full).is_ok());
+        strategy.auto_generate_missing(&mut full).unwrap();
+        let generated = full
+            .get("password")
+            .and_then(|v| v.as_str())
+            .expect("password must be set after auto_generate_missing");
+        assert!(
+            !generated.is_empty(),
+            "auto_generate_missing must fill an empty password"
+        );
+        assert!(
+            is_valid_pg_password(generated).is_ok(),
+            "auto-generated password must itself pass validation"
+        );
     }
 }
