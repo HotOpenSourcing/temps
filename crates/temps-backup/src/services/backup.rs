@@ -4239,6 +4239,94 @@ OFFSET $3
     /// when a run for this schedule already has `finished_at IS NULL`.
     ///
     /// Returns [`BackupError::Validation`] when the schedule is disabled.
+    /// Cancel a single backup by `backups.id`. Flips the row + its latest
+    /// `backup_jobs` row to `failed` with a "cancelled by user" reason.
+    /// Returns the number of rows updated — `0` means the backup was already
+    /// terminal (which the caller should treat as an idempotent success,
+    /// not a 404). The runner's in-process cancellation token is observed
+    /// on the next heartbeat tick (≤5s) so the engine exits cleanly and
+    /// `rollback` reaps the sidecar.
+    pub async fn cancel_backup(
+        &self,
+        backup_id: i32,
+        triggered_by_user_id: Option<i32>,
+    ) -> Result<u64, BackupError> {
+        // Verify the backup exists so the caller gets a real 404 (not an
+        // "everything looks fine, nothing happened" silent no-op) when the
+        // id is wrong. Then delegate to `temps_backup_core::cancel_backup`
+        // which owns the actual DB writes.
+        temps_entities::backups::Entity::find_by_id(backup_id)
+            .one(self.db.as_ref())
+            .await?
+            .ok_or_else(|| BackupError::NotFound {
+                resource: "Backup".to_string(),
+                detail: format!("Backup {} not found", backup_id),
+            })?;
+
+        let reason = match triggered_by_user_id {
+            Some(uid) => format!("cancelled by user {}", uid),
+            None => "cancelled".to_string(),
+        };
+
+        let rows = temps_backup_core::cancel_backup(self.db.as_ref(), backup_id, &reason)
+            .await
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to cancel backup {}: {}", backup_id, e),
+            })?;
+
+        info!(
+            backup_id,
+            rows_affected = rows,
+            triggered_by_user_id = ?triggered_by_user_id,
+            "BackupService: cancel_backup completed",
+        );
+
+        Ok(rows)
+    }
+
+    /// Cancel every non-terminal child backup belonging to a scheduler run.
+    /// Returns the number of children that were flipped to `failed`. The
+    /// parent `schedule_runs.finished_at` is stamped automatically once no
+    /// live children remain (which is true after a successful cancel).
+    pub async fn cancel_schedule_run(
+        &self,
+        schedule_run_id: i64,
+        triggered_by_user_id: Option<i32>,
+    ) -> Result<u64, BackupError> {
+        // Verify the run exists so the caller gets a real 404.
+        temps_entities::schedule_runs::Entity::find_by_id(schedule_run_id)
+            .one(self.db.as_ref())
+            .await?
+            .ok_or_else(|| BackupError::NotFound {
+                resource: "ScheduleRun".to_string(),
+                detail: format!("Schedule run {} not found", schedule_run_id),
+            })?;
+
+        let reason = match triggered_by_user_id {
+            Some(uid) => format!(
+                "cancelled by user {} (run {} cancelled)",
+                uid, schedule_run_id
+            ),
+            None => format!("cancelled (run {} cancelled)", schedule_run_id),
+        };
+
+        let cancelled =
+            temps_backup_core::cancel_schedule_run(self.db.as_ref(), schedule_run_id, &reason)
+                .await
+                .map_err(|e| BackupError::Internal {
+                    message: format!("Failed to cancel schedule run {}: {}", schedule_run_id, e),
+                })?;
+
+        info!(
+            schedule_run_id,
+            cancelled,
+            triggered_by_user_id = ?triggered_by_user_id,
+            "BackupService: cancel_schedule_run completed",
+        );
+
+        Ok(cancelled)
+    }
+
     pub async fn run_schedule_now(
         &self,
         runner: &temps_backup_core::BackupRunner,

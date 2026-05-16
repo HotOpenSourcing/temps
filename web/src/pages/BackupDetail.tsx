@@ -6,6 +6,16 @@ import {
   listUsersOptions,
 } from '@/api/client/@tanstack/react-query.gen'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -34,12 +44,14 @@ import { TimeAgo } from '@/components/utils/TimeAgo'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { usePageTitle } from '@/hooks/usePageTitle'
 import { listBackupChildrenOptions } from '@/lib/backup-children'
+import { cancelBackup } from '@/lib/schedule-runs'
 import { cn, formatBytes } from '@/lib/utils'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { format, formatDistanceToNow } from 'date-fns'
 import {
   AlertCircle,
   ArrowLeft,
+  Ban,
   CheckCircle2,
   Clock,
   Database,
@@ -48,8 +60,9 @@ import {
   Loader2,
   XCircle,
 } from 'lucide-react'
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
+import { toast } from 'sonner'
 
 type BackupState = 'completed' | 'failed' | 'running' | (string & {})
 
@@ -254,6 +267,37 @@ export function BackupDetail() {
 
   usePageTitle(shortBackupLabel)
 
+  // ── Cancel mutation ─────────────────────────────────────────────────────
+  //
+  // Soft cancel: flips the DB row to `failed` immediately and sets the
+  // in-process cancellation token. The engine notices on the next heartbeat
+  // tick (≤5s) and exits cleanly; rollback reaps any sidecar container.
+  //
+  // Idempotent server-side — cancelling an already-terminal backup returns
+  // `cancelled: 0` which we treat as a friendly "nothing to do" toast.
+  const queryClient = useQueryClient()
+  const [showCancelDialog, setShowCancelDialog] = useState(false)
+
+  const cancelMutation = useMutation({
+    mutationFn: () => cancelBackup(backup!.id),
+    onSuccess: (data) => {
+      toast.success('Backup cancelled', {
+        description:
+          data.cancelled === 0
+            ? 'Backup was already terminal — nothing to cancel.'
+            : 'Engine will stop on the next heartbeat tick (within ~5s).',
+      })
+      void queryClient.invalidateQueries({
+        queryKey: ['getBackup', { path: { id: backupId! } }],
+      })
+      setShowCancelDialog(false)
+    },
+    onError: (err: unknown) => {
+      const message = err instanceof Error ? err.message : 'Unknown error'
+      toast.error('Failed to cancel backup', { description: message })
+    },
+  })
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center py-16">
@@ -374,6 +418,25 @@ export function BackupDetail() {
                 <CopyButton value={backup.s3_location} className="gap-2">
                   Copy S3 path
                 </CopyButton>
+                {/* Cancel — only live backups can be cancelled. Soft cancel:
+                    the DB row flips immediately + the engine sees the
+                    cancellation token on its next heartbeat tick. */}
+                {(state === 'pending' || state === 'running') && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setShowCancelDialog(true)}
+                    disabled={cancelMutation.isPending}
+                    className="gap-2"
+                  >
+                    {cancelMutation.isPending ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Ban className="h-4 w-4" />
+                    )}
+                    Cancel
+                  </Button>
+                )}
               </div>
             </div>
           </CardHeader>
@@ -714,6 +777,48 @@ export function BackupDetail() {
           </Card>
         ) : null}
       </div>
+
+      {/* Cancel-confirm dialog. Open via the header "Cancel" button. */}
+      <AlertDialog
+        open={showCancelDialog}
+        onOpenChange={(open) => {
+          if (!cancelMutation.isPending) setShowCancelDialog(open)
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Cancel this backup?</AlertDialogTitle>
+            <AlertDialogDescription>
+              The backup will be flipped to <strong>failed</strong>. If the
+              engine is mid-dump it stops on the next heartbeat tick
+              (within ~5 seconds) and any partial S3 object is cleaned up
+              by rollback.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={cancelMutation.isPending}>
+              Keep running
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault()
+                cancelMutation.mutate()
+              }}
+              disabled={cancelMutation.isPending}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {cancelMutation.isPending ? (
+                <span className="flex items-center gap-2">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Cancelling…
+                </span>
+              ) : (
+                'Cancel backup'
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

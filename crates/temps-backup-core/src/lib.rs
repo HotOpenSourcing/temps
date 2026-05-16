@@ -31,6 +31,9 @@ pub use config::RunnerConfig;
 pub use engine::{BackupContext, BackupEngine, BackupEngineError, StepCursor, StepEvent};
 pub use error::BackupRunnerError;
 pub use notifier::{BackupFailureContext, BackupFailureNotifier};
-pub use queue::{backoff_delay, mark_schedule_run_finished_if_done, BackupJobRow};
+pub use queue::{
+    backoff_delay, cancel_backup, cancel_schedule_run, mark_schedule_run_finished_if_done,
+    reclaim_orphan_jobs_on_startup, BackupJobRow,
+};
 pub use runner::{BackupRunner, EnqueueJobParams};
 pub use timeouts::{default_max_runtime_secs, resolve_max_runtime};

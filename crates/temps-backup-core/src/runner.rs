@@ -402,6 +402,25 @@ RETURNING id
             "BackupRunner started",
         );
 
+        // Reclaim orphan jobs left running by a previous boot before we start
+        // the regular poll loop. Without this, jobs claimed by a worker that
+        // crashed mid-execution sit as `state='running'` until their lease
+        // expires AND the poll loop happens to pick them up — meanwhile the
+        // schedule_runs UI shows the run as forever "running".
+        match crate::queue::reclaim_orphan_jobs_on_startup(self.db.as_ref()).await {
+            Ok(0) => {}
+            Ok(n) => info!(
+                instance_id = %self.config.instance_id,
+                reclaimed = n,
+                "BackupRunner reclaimed orphan jobs from previous boot",
+            ),
+            Err(e) => error!(
+                instance_id = %self.config.instance_id,
+                error = %e,
+                "BackupRunner orphan reclaim failed; per-poll reclaim will catch up",
+            ),
+        }
+
         let mut interval = tokio::time::interval(self.config.poll_interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 

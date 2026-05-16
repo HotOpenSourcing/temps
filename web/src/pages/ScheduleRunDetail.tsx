@@ -4,6 +4,16 @@ import {
   getBackupScheduleOptions,
   getS3SourceOptions,
 } from '@/api/client/@tanstack/react-query.gen'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -13,6 +23,12 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
   Table,
@@ -30,18 +46,25 @@ import {
 } from '@/components/ui/tooltip'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { usePageTitle } from '@/hooks/usePageTitle'
-import { listScheduleRunJobsOptions } from '@/lib/schedule-runs'
+import {
+  cancelBackup,
+  cancelScheduleRun,
+  listScheduleRunJobsOptions,
+} from '@/lib/schedule-runs'
 import { formatBytes } from '@/lib/utils'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { format } from 'date-fns'
 import {
   ArrowLeft,
+  Ban,
   DatabaseBackup,
   Loader2,
+  MoreHorizontal,
   RefreshCw,
 } from 'lucide-react'
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
+import { toast } from 'sonner'
 
 // ── Local helpers ────────────────────────────────────────────────────────────
 
@@ -153,6 +176,59 @@ export function ScheduleRunDetail() {
     return () => setBreadcrumbs([])
   }, [schedule, s3Source, runIdNum, setBreadcrumbs])
 
+  // ── Cancel mutations + confirm dialogs ───────────────────────────────────
+
+  const [showCancelRunDialog, setShowCancelRunDialog] = useState(false)
+  const [jobToCancel, setJobToCancel] = useState<{
+    backup_id: number
+    service_name: string
+  } | null>(null)
+
+  // Cancel the whole run. Bulk-flips every pending/running child via the
+  // backend `cancel_schedule_run` and closes the parent schedule_runs row.
+  const cancelRunMutation = useMutation({
+    mutationFn: () => cancelScheduleRun(runIdNum!),
+    onSuccess: (data) => {
+      toast.success('Run cancelled', {
+        description:
+          data.cancelled === 0
+            ? 'No live jobs to cancel — run was already terminal.'
+            : `Cancelled ${data.cancelled} job${data.cancelled === 1 ? '' : 's'}.`,
+      })
+      void queryClient.invalidateQueries({
+        queryKey: jobsQueryOptions.queryKey,
+      })
+      setShowCancelRunDialog(false)
+    },
+    onError: (err: unknown) => {
+      const message = err instanceof Error ? err.message : 'Unknown error'
+      toast.error('Failed to cancel run', { description: message })
+    },
+  })
+
+  // Cancel one job. Soft cancel: the engine sees the token on the next
+  // heartbeat tick and exits cleanly. The DB row is flipped immediately so
+  // the UI updates without waiting for the engine.
+  const cancelJobMutation = useMutation({
+    mutationFn: (backupId: number) => cancelBackup(backupId),
+    onSuccess: (data, backupId) => {
+      toast.success('Job cancelled', {
+        description:
+          data.cancelled === 0
+            ? `Backup #${backupId} was already terminal.`
+            : `Backup #${backupId} cancelled.`,
+      })
+      void queryClient.invalidateQueries({
+        queryKey: jobsQueryOptions.queryKey,
+      })
+      setJobToCancel(null)
+    },
+    onError: (err: unknown) => {
+      const message = err instanceof Error ? err.message : 'Unknown error'
+      toast.error('Failed to cancel job', { description: message })
+    },
+  })
+
   // ── Derived state from jobs ──────────────────────────────────────────────
 
   const total = jobs?.length ?? 0
@@ -241,30 +317,52 @@ export function ScheduleRunDetail() {
             </div>
           </div>
 
-          <Tooltip>
-            <TooltipTrigger asChild>
+          <div className="flex items-center gap-2">
+            {/* Cancel run — only when at least one child is still live.
+                Refreshing while cancelling is fine, the mutation invalidates
+                the jobs query on success. */}
+            {(aggregateState === 'running' || aggregateState === 'pending') && (
               <Button
                 variant="outline"
-                size="icon"
-                onClick={() => {
-                  void queryClient.invalidateQueries({
-                    queryKey: jobsQueryOptions.queryKey,
-                  })
-                }}
-                disabled={isJobsFetching}
-                aria-label="Refresh run"
+                size="sm"
+                onClick={() => setShowCancelRunDialog(true)}
+                disabled={cancelRunMutation.isPending}
+                className="gap-2"
               >
-                <RefreshCw
-                  className={`h-4 w-4 ${isJobsFetching ? 'animate-spin' : ''}`}
-                />
+                {cancelRunMutation.isPending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Ban className="h-4 w-4" />
+                )}
+                Cancel run
               </Button>
-            </TooltipTrigger>
-            <TooltipContent side="bottom">
-              {aggregateState === 'running' || aggregateState === 'pending'
-                ? 'Refresh (auto-refreshing every 5s)'
-                : 'Refresh'}
-            </TooltipContent>
-          </Tooltip>
+            )}
+
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  onClick={() => {
+                    void queryClient.invalidateQueries({
+                      queryKey: jobsQueryOptions.queryKey,
+                    })
+                  }}
+                  disabled={isJobsFetching}
+                  aria-label="Refresh run"
+                >
+                  <RefreshCw
+                    className={`h-4 w-4 ${isJobsFetching ? 'animate-spin' : ''}`}
+                  />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">
+                {aggregateState === 'running' || aggregateState === 'pending'
+                  ? 'Refresh (auto-refreshing every 5s)'
+                  : 'Refresh'}
+              </TooltipContent>
+            </Tooltip>
+          </div>
         </div>
 
         {/* ── Summary stats ──────────────────────────────────────────── */}
@@ -358,6 +456,7 @@ export function ScheduleRunDetail() {
                       <TableHead className="hidden xl:table-cell">
                         Error
                       </TableHead>
+                      <TableHead className="w-10" />
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -439,6 +538,44 @@ export function ScheduleRunDetail() {
                               </span>
                             )}
                           </TableCell>
+                          <TableCell className="w-10 p-0 align-middle">
+                            {/* Kebab menu — only when the job is still
+                                live. Terminal jobs have no actionable verbs
+                                today, so the column shows blank rather
+                                than a disabled menu. */}
+                            {(job.state === 'running' ||
+                              job.state === 'pending') && (
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-8 w-8"
+                                    aria-label={`Actions for ${job.service_name}`}
+                                  >
+                                    <MoreHorizontal className="h-4 w-4" />
+                                  </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end">
+                                  <DropdownMenuItem
+                                    onSelect={(e) => {
+                                      // Prevent the menu from auto-closing
+                                      // before the AlertDialog mounts.
+                                      e.preventDefault()
+                                      setJobToCancel({
+                                        backup_id: job.backup_id,
+                                        service_name: job.service_name,
+                                      })
+                                    }}
+                                    className="text-destructive focus:text-destructive"
+                                  >
+                                    <Ban className="mr-2 h-4 w-4" />
+                                    Cancel
+                                  </DropdownMenuItem>
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+                            )}
+                          </TableCell>
                         </TableRow>
                       )
                     })}
@@ -449,6 +586,99 @@ export function ScheduleRunDetail() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Cancel-the-whole-run confirmation. Open via the header button. */}
+      <AlertDialog
+        open={showCancelRunDialog}
+        onOpenChange={(open) => {
+          // Don't allow the dialog to close while the mutation is in flight;
+          // we want the spinner to stay visible until the request settles.
+          if (!cancelRunMutation.isPending) {
+            setShowCancelRunDialog(open)
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Cancel this run?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Every pending and running backup in this scheduler tick will be
+              flipped to <strong>failed</strong>. Engines that are mid-dump
+              will stop cleanly on the next heartbeat tick (within ~5
+              seconds). Already-completed backups stay completed.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={cancelRunMutation.isPending}>
+              Keep running
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault()
+                cancelRunMutation.mutate()
+              }}
+              disabled={cancelRunMutation.isPending}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {cancelRunMutation.isPending ? (
+                <span className="flex items-center gap-2">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Cancelling…
+                </span>
+              ) : (
+                'Cancel run'
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Cancel-one-job confirmation. Open via the row kebab menu. */}
+      <AlertDialog
+        open={jobToCancel !== null}
+        onOpenChange={(open) => {
+          if (!cancelJobMutation.isPending && !open) {
+            setJobToCancel(null)
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Cancel backup for {jobToCancel?.service_name}?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              The backup will be flipped to <strong>failed</strong>. If the
+              engine is mid-dump it stops on the next heartbeat tick (~5
+              seconds). Other backups in this run keep going.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={cancelJobMutation.isPending}>
+              Keep running
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault()
+                if (jobToCancel) {
+                  cancelJobMutation.mutate(jobToCancel.backup_id)
+                }
+              }}
+              disabled={cancelJobMutation.isPending}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {cancelJobMutation.isPending ? (
+                <span className="flex items-center gap-2">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Cancelling…
+                </span>
+              ) : (
+                'Cancel backup'
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </TooltipProvider>
   )
 }

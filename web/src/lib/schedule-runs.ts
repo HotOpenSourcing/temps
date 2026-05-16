@@ -221,3 +221,47 @@ export async function runScheduleNow(
   )
   return readJsonOrThrow<ScheduleRunResponse>(response)
 }
+
+/** Response from cancel endpoints. */
+export interface CancelBackupResponse {
+  /**
+   * Number of rows actually flipped to `failed`. `0` is a valid success and
+   * means the target was already terminal — cancel is idempotent.
+   */
+  cancelled: number
+}
+
+/**
+ * Cancel one in-flight backup by `backups.id`. Sets the in-process
+ * cancellation token + flips the DB row to `failed` with a "cancelled" reason.
+ * Returns `cancelled: 0` if the backup was already terminal.
+ */
+export async function cancelBackup(
+  backupId: number,
+): Promise<CancelBackupResponse> {
+  const response = await fetch(`/api/backups/${backupId}/cancel`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+  })
+  return readJsonOrThrow<CancelBackupResponse>(response)
+}
+
+/**
+ * Cancel every non-terminal child backup belonging to a scheduler run.
+ * Closes the parent `schedule_runs` row once no live children remain.
+ * Returns the number of children cancelled.
+ */
+export async function cancelScheduleRun(
+  runId: number,
+): Promise<CancelBackupResponse> {
+  const response = await fetch(
+    `/api/backups/schedule-runs/${runId}/cancel`,
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+    },
+  )
+  return readJsonOrThrow<CancelBackupResponse>(response)
+}

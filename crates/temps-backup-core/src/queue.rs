@@ -485,6 +485,186 @@ UPDATE backups
     Ok(())
 }
 
+// ── Startup reclaim ───────────────────────────────────────────────────────────
+
+/// On runner start-up, requeue any `state='running'` jobs whose lease already
+/// expired. These are orphans left behind by a worker that died (kill -9, OOM,
+/// host reboot) between claiming the row and renewing the lease.
+///
+/// Per-poll claim already reclaims expired-lease rows (`claim_one_job` matches
+/// `state='running' AND leased_until < NOW()`), but only one at a time and
+/// only while the runner is actively polling. On a clean boot we want to
+/// surface every orphan up-front so the schedule_runs aggregate UI is correct
+/// immediately instead of after `lease_ttl_secs × orphan_count` of waiting.
+///
+/// Safe against concurrent workers via the existing claim_token fencing: a
+/// reclaimed job gets a fresh token on its next claim, so a previously-leased
+/// runner that wakes up will see `LeaseLost` and abort.
+///
+/// Returns the number of rows reset to `pending`.
+pub async fn reclaim_orphan_jobs_on_startup(
+    db: &DatabaseConnection,
+) -> Result<u64, BackupRunnerError> {
+    let sql = r#"
+UPDATE backup_jobs
+   SET state           = 'pending',
+       leased_until    = NULL,
+       claim_token     = NULL,
+       claimed_by      = NULL,
+       next_attempt_at = NOW(),
+       updated_at      = NOW()
+ WHERE state            = 'running'
+   AND (leased_until IS NULL OR leased_until < NOW())
+    "#;
+
+    let result = db
+        .execute(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            sql,
+            vec![],
+        ))
+        .await
+        .map_err(|e| BackupRunnerError::Database {
+            operation: "reclaim_orphan_jobs_on_startup",
+            source: e,
+        })?;
+
+    Ok(result.rows_affected())
+}
+
+// ── Cancellation ──────────────────────────────────────────────────────────────
+
+/// Cancel one backup by `backups.id`. Flips the latest `backup_jobs` row to
+/// `failed` and the parent `backups` row to `failed` with a "cancelled by user"
+/// error message. Returns the number of rows updated (0 if the backup was
+/// already terminal, 1 if cancellation took effect).
+///
+/// The in-process engine watches its `CancellationToken` so a job currently
+/// running in this process exits cleanly on the next heartbeat tick (≤5s);
+/// the engine's `rollback` then cleans up the sidecar. If the job is running
+/// on a different worker, the DB flip + claim_token rotation acts as a
+/// fence — the other worker's next `extend_lease` returns `LeaseLost`.
+pub async fn cancel_backup(
+    db: &DatabaseConnection,
+    backup_id: i32,
+    reason: &str,
+) -> Result<u64, BackupRunnerError> {
+    use sea_orm::TransactionTrait;
+
+    let txn = db.begin().await.map_err(|e| BackupRunnerError::Database {
+        operation: "cancel_backup:begin",
+        source: e,
+    })?;
+
+    // Flip every non-terminal backup_jobs row for this backup. There should
+    // only ever be one but `state IN ('pending','running')` is the safe
+    // predicate — historical rows from the retry path stay untouched.
+    let job_sql = r#"
+UPDATE backup_jobs
+   SET state         = 'failed',
+       error_message = $1,
+       finished_at   = COALESCE(finished_at, NOW()),
+       claim_token   = gen_random_uuid(),
+       updated_at    = NOW()
+ WHERE backup_id     = $2
+   AND state IN ('pending', 'running')
+    "#;
+
+    txn.execute(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        job_sql,
+        vec![SValue::from(reason.to_owned()), SValue::from(backup_id)],
+    ))
+    .await
+    .map_err(|e| BackupRunnerError::Database {
+        operation: "cancel_backup:update_job",
+        source: e,
+    })?;
+
+    // Flip the parent. `rows_affected == 0` means the backup was already
+    // terminal (completed/failed) — caller treats that as a no-op success.
+    let backup_sql = r#"
+UPDATE backups
+   SET state         = 'failed',
+       error_message = $1,
+       finished_at   = COALESCE(finished_at, NOW())
+ WHERE id            = $2
+   AND state IN ('pending', 'running')
+    "#;
+
+    let result = txn
+        .execute(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            backup_sql,
+            vec![SValue::from(reason.to_owned()), SValue::from(backup_id)],
+        ))
+        .await
+        .map_err(|e| BackupRunnerError::Database {
+            operation: "cancel_backup:update_backup",
+            source: e,
+        })?;
+
+    txn.commit()
+        .await
+        .map_err(|e| BackupRunnerError::Database {
+            operation: "cancel_backup:commit",
+            source: e,
+        })?;
+
+    // Close the parent schedule_runs row if this was the last live child.
+    mark_schedule_run_finished_if_done(db, backup_id).await?;
+
+    Ok(result.rows_affected())
+}
+
+/// Cancel every non-terminal backup belonging to a schedule_run. Returns the
+/// number of child backups that were flipped to `failed`. After the bulk
+/// update the parent `schedule_runs.finished_at` is stamped if no live
+/// children remain (typically all of them flipped, so this closes the run).
+///
+/// Implementation note: we deliberately reuse the `cancel_backup` row-level
+/// logic by iterating live children rather than doing one giant UPDATE.
+/// The per-row path keeps `claim_token` rotation, the `backup_jobs` UPDATE,
+/// and the `schedule_runs.finished_at` reconcile in lock-step. A single bulk
+/// UPDATE would have to duplicate every one of those side-effects.
+pub async fn cancel_schedule_run(
+    db: &DatabaseConnection,
+    schedule_run_id: i64,
+    reason: &str,
+) -> Result<u64, BackupRunnerError> {
+    use sea_orm::FromQueryResult;
+
+    #[derive(FromQueryResult)]
+    struct BackupId {
+        id: i32,
+    }
+
+    let select_sql = r#"
+SELECT id FROM backups
+ WHERE schedule_run_id = $1
+   AND state IN ('pending', 'running')
+    "#;
+
+    let rows = BackupId::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        select_sql,
+        vec![SValue::from(schedule_run_id)],
+    ))
+    .all(db)
+    .await
+    .map_err(|e| BackupRunnerError::Database {
+        operation: "cancel_schedule_run:select",
+        source: e,
+    })?;
+
+    let mut cancelled: u64 = 0;
+    for row in rows {
+        cancelled += cancel_backup(db, row.id, reason).await?;
+    }
+
+    Ok(cancelled)
+}
+
 // ── Schedule-run completion ───────────────────────────────────────────────────
 
 /// Mark the parent `schedule_runs` row as finished when all its child backups

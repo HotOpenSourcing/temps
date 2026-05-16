@@ -112,6 +112,8 @@ impl From<BackupError> for Problem {
         list_schedule_run_jobs,
         run_backup_for_source,
         run_schedule_now,
+        cancel_backup,
+        cancel_schedule_run,
         list_source_backups,
         list_external_service_backups,
         get_backup,
@@ -149,6 +151,7 @@ impl From<BackupError> for Problem {
             ScheduleRunJobEntry,
             ScheduleRunResponse,
             EnqueuedJob,
+            CancelBackupResponse,
             ChildBackupEntryResponse,
             ChildBackupListResponse,
         )
@@ -995,6 +998,11 @@ pub fn configure_routes() -> Router<Arc<BackupAppState>> {
             "/backups/schedule-runs/{id}/jobs",
             get(list_schedule_run_jobs),
         )
+        .route(
+            "/backups/schedule-runs/{id}/cancel",
+            post(cancel_schedule_run),
+        )
+        .route("/backups/{id}/cancel", post(cancel_backup))
         .route("/backups/s3-sources/{id}/backups", get(list_source_backups))
         .route(
             "/backups/external-services/{id}/backups",
@@ -1648,6 +1656,101 @@ async fn run_schedule_now(
     );
 
     Ok((StatusCode::ACCEPTED, Json(response)).into_response())
+}
+
+/// Response body for cancel endpoints.
+#[derive(Serialize, ToSchema)]
+pub struct CancelBackupResponse {
+    /// Number of rows that were actually flipped to `failed`. `0` is a valid
+    /// success and means the backup was already terminal — the call is
+    /// idempotent.
+    pub cancelled: u64,
+}
+
+/// Cancel a single in-flight backup.
+///
+/// Flips the parent `backups` row + its latest `backup_jobs` row to
+/// `failed` with reason `"cancelled by user <uid>"`. The in-process
+/// `CancellationToken` is observed on the next heartbeat tick (≤5s), so the
+/// engine exits cleanly and rollback reaps the sidecar. Idempotent: cancelling
+/// an already-terminal backup is a 200 with `cancelled = 0`.
+#[utoipa::path(
+    tag = "Backups",
+    post,
+    path = "/backups/{id}/cancel",
+    responses(
+        (status = 200, description = "Cancel processed (idempotent)", body = CancelBackupResponse),
+        (status = 401, description = "Unauthorized", body = ProblemDetails),
+        (status = 403, description = "Insufficient permissions", body = ProblemDetails),
+        (status = 404, description = "Backup not found", body = ProblemDetails),
+        (status = 500, description = "Internal server error", body = ProblemDetails),
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn cancel_backup(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<BackupAppState>>,
+    Path(id): Path<i32>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, BackupsDelete);
+
+    let cancelled = app_state
+        .backup_service
+        .cancel_backup(id, Some(auth.user_id()))
+        .await
+        .map_err(Problem::from)?;
+
+    tracing::info!(
+        backup_id = id,
+        cancelled,
+        user_id = auth.user_id(),
+        "cancel_backup: completed",
+    );
+
+    Ok((StatusCode::OK, Json(CancelBackupResponse { cancelled })).into_response())
+}
+
+/// Cancel every non-terminal child backup belonging to a schedule run.
+///
+/// Loops over `state IN ('pending','running')` children and flips each via
+/// the same path as the per-backup cancel endpoint. The parent
+/// `schedule_runs.finished_at` is stamped automatically once no live
+/// children remain. Idempotent: cancelling a run with no live children is
+/// a 200 with `cancelled = 0`.
+#[utoipa::path(
+    tag = "Backups",
+    post,
+    path = "/backups/schedule-runs/{id}/cancel",
+    responses(
+        (status = 200, description = "Cancel processed (idempotent)", body = CancelBackupResponse),
+        (status = 401, description = "Unauthorized", body = ProblemDetails),
+        (status = 403, description = "Insufficient permissions", body = ProblemDetails),
+        (status = 404, description = "Schedule run not found", body = ProblemDetails),
+        (status = 500, description = "Internal server error", body = ProblemDetails),
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn cancel_schedule_run(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<BackupAppState>>,
+    Path(id): Path<i64>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, BackupsDelete);
+
+    let cancelled = app_state
+        .backup_service
+        .cancel_schedule_run(id, Some(auth.user_id()))
+        .await
+        .map_err(Problem::from)?;
+
+    tracing::info!(
+        schedule_run_id = id,
+        cancelled,
+        user_id = auth.user_id(),
+        "cancel_schedule_run: completed",
+    );
+
+    Ok((StatusCode::OK, Json(CancelBackupResponse { cancelled })).into_response())
 }
 
 /// Run a backup immediately for an S3 source.
