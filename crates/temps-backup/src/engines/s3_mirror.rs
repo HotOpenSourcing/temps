@@ -451,8 +451,9 @@ async fn step_sync(
         dest_endpoint
     };
 
-    // Pull mc image (best-effort, container may already be present).
-    pull_mc_image(job_id, &deps.docker).await?;
+    // Ensure the mc image is present. Shared helper inspects first and only
+    // streams the pull on miss, so warm hosts pay nothing for the check.
+    super::image_pull::ensure_image_pulled(job_id, &deps.docker, MC_IMAGE, "sync").await?;
 
     let container_name = format!("temps-s3mirror-backup-{}", Uuid::new_v4());
 
@@ -854,30 +855,6 @@ fn build_dest_prefix(bucket_path: &str, service_name: &str, backup_uuid: &str) -
             base, service_name, backup_uuid
         )
     }
-}
-
-async fn pull_mc_image(job_id: i64, docker: &bollard::Docker) -> Result<(), BackupEngineError> {
-    use bollard::query_parameters::CreateImageOptionsBuilder;
-    use futures::StreamExt;
-
-    let (image_name, tag) = MC_IMAGE.split_once(':').unwrap_or((MC_IMAGE, "latest"));
-
-    let mut stream = docker.create_image(
-        Some(
-            CreateImageOptionsBuilder::new()
-                .from_image(image_name)
-                .tag(tag)
-                .build(),
-        ),
-        None,
-        None,
-    );
-    while let Some(result) = stream.next().await {
-        if let Err(e) = result {
-            warn!(job_id, error = %e, "S3MirrorEngine pull_mc_image: pull warning (may still work if image is cached)");
-        }
-    }
-    Ok(())
 }
 
 async fn build_s3_client(

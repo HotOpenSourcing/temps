@@ -410,6 +410,12 @@ async fn step_dump(
             .await;
     };
 
+    // Ensure the sidecar image is locally cached. Fresh prod hosts don't
+    // have `gotempsh/postgres-walg:18-bookworm` (or any user-supplied tag)
+    // pre-pulled, so `create_container` would otherwise 404 with "No such
+    // image". Same pattern as `control_plane`.
+    super::image_pull::ensure_image_pulled(job_id, &deps.docker, &sidecar_image, "dump").await?;
+
     deps.docker
         .create_container(
             Some(

@@ -151,16 +151,18 @@ function Stat({
   icon: React.ComponentType<{ className?: string }>
 }) {
   return (
-    <div className="flex flex-col gap-1 p-4">
-      <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground uppercase tracking-wide">
-        <Icon className="h-3.5 w-3.5" />
-        {label}
+    <div className="flex flex-col gap-1 p-3 sm:p-4 min-w-0">
+      <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+        <Icon className="h-3.5 w-3.5 shrink-0" />
+        <span className="truncate">{label}</span>
       </div>
-      <div className="text-2xl font-semibold tabular-nums text-foreground">
+      <div className="text-base font-semibold tabular-nums text-foreground sm:text-lg truncate">
         {value}
       </div>
       {sub ? (
-        <div className="text-xs text-muted-foreground tabular-nums">{sub}</div>
+        <div className="text-xs text-muted-foreground tabular-nums truncate">
+          {sub}
+        </div>
       ) : null}
     </div>
   )
@@ -231,6 +233,14 @@ export function BackupDetail() {
   })
   const children = childrenData?.children ?? []
 
+  // `backup.name` is `"Backup <full-uuid>"` which is too long for
+  // breadcrumbs and the tab title. Show the friendlier short form
+  // (`Backup #<first 8 chars>`) instead; the full UUID stays available
+  // in the Details card with a copy button.
+  const shortBackupLabel = backup?.backup_id
+    ? `Backup #${backup.backup_id.slice(0, 8)}`
+    : 'Backup Details'
+
   useEffect(() => {
     setBreadcrumbs([
       { label: 'Backups', href: '/backups' },
@@ -238,11 +248,11 @@ export function BackupDetail() {
         label: source?.name || 'S3 Source',
         href: `/backups/s3-sources/${id}`,
       },
-      { label: backup?.name || 'Backup Details' },
+      { label: shortBackupLabel },
     ])
-  }, [setBreadcrumbs, id, backup?.name, source?.name])
+  }, [setBreadcrumbs, id, shortBackupLabel, source?.name])
 
-  usePageTitle(backup?.name || 'Backup Details')
+  usePageTitle(shortBackupLabel)
 
   if (isLoading) {
     return (
@@ -317,9 +327,14 @@ export function BackupDetail() {
           <CardHeader>
             <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
               <div className="space-y-1.5 min-w-0">
-                <CardTitle className="flex items-center gap-2">
+                <CardTitle className="flex items-center gap-2 min-w-0">
                   <FileArchive className="h-5 w-5 shrink-0" />
-                  <span className="truncate">{backup.name}</span>
+                  <span className="truncate">
+                    Backup{' '}
+                    <span className="font-mono text-base text-muted-foreground">
+                      #{backup.backup_id.slice(0, 8)}
+                    </span>
+                  </span>
                 </CardTitle>
                 <CardDescription className="flex flex-wrap items-center gap-x-2 gap-y-1">
                   <span className="inline-flex items-center gap-1.5">
@@ -327,13 +342,18 @@ export function BackupDetail() {
                     <TimeAgo date={backup.started_at} />
                   </span>
                   <span aria-hidden>·</span>
-                  <span>{format(startedAt, 'PPp')}</span>
+                  <span className="hidden sm:inline">
+                    {format(startedAt, 'PPp')}
+                  </span>
+                  <span className="sm:hidden">
+                    {format(startedAt, 'MMM d, p')}
+                  </span>
                   {source ? (
                     <>
                       <span aria-hidden>·</span>
                       <Link
                         to={`/backups/s3-sources/${id}`}
-                        className="text-foreground hover:underline"
+                        className="text-foreground hover:underline truncate"
                       >
                         {source.name}
                       </Link>
@@ -341,7 +361,7 @@ export function BackupDetail() {
                   ) : null}
                 </CardDescription>
               </div>
-              <div className="flex items-center gap-2 shrink-0">
+              <div className="flex flex-wrap items-center gap-2 sm:shrink-0">
                 <StatusBadge state={state} />
                 {isStalled ? (
                   <Badge
@@ -351,10 +371,7 @@ export function BackupDetail() {
                     Stalled — worker not responding
                   </Badge>
                 ) : null}
-                <CopyButton
-                  value={backup.s3_location}
-                  className="gap-2"
-                >
+                <CopyButton value={backup.s3_location} className="gap-2">
                   Copy S3 path
                 </CopyButton>
               </div>
@@ -390,7 +407,13 @@ export function BackupDetail() {
                 value={durationMs !== null ? formatDuration(durationMs) : '—'}
                 sub={
                   completedAt
-                    ? `${format(startedAt, 'p')} → ${format(completedAt, 'p')}`
+                    ? // Collapse `5:22 PM → 5:22 PM` to a single time when the
+                      // start and end land in the same minute (the common case
+                      // for sub-60s backups). Saves visual noise on narrow
+                      // screens.
+                      format(startedAt, 'p') === format(completedAt, 'p')
+                      ? format(startedAt, 'p')
+                      : `${format(startedAt, 'p')} → ${format(completedAt, 'p')}`
                     : 'Not finished'
                 }
               />

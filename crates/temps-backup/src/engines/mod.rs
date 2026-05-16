@@ -23,6 +23,7 @@
 
 pub mod control_plane;
 pub mod dispatch;
+pub mod image_pull;
 pub mod mongodb;
 pub mod postgres_cluster;
 pub mod postgres_pgdump;
