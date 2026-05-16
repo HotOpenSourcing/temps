@@ -18,6 +18,7 @@ import {
   ServiceHealthBadge,
   ServiceHealthCard,
 } from '@/components/storage/ServiceHealthCard'
+import { WalHealthPanel } from '@/components/storage/WalHealthPanel'
 import { TriggerBackupDialog } from '@/components/storage/TriggerBackupDialog'
 import { UpgradeServiceDialog } from '@/components/storage/UpgradeServiceDialog'
 import { listPgUpgrades, phaseIndex, PG_UPGRADE_PHASES, isTerminal } from '@/lib/pg-upgrades'
@@ -795,6 +796,19 @@ export function ServiceDetail() {
           */}
           {service.service.status === 'running' ? (
             <ServiceHealthCard serviceId={parseInt(id!)} />
+          ) : null}
+
+          {/*
+            Postgres-only WAL bloat / archive misconfiguration surface. Renders
+            nothing when there are no warnings, so it's safe to mount
+            unconditionally for non-Postgres services (the component itself
+            checks the type and bails before fetching).
+          */}
+          {service.service.status === 'running' ? (
+            <WalHealthPanel
+              serviceId={parseInt(id!)}
+              serviceType={service.service.service_type}
+            />
           ) : null}
 
           {/* Cluster Creation Progress */}

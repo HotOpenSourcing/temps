@@ -5053,12 +5053,21 @@ mod tests {
             last_health_check_at: None,
             last_health_error: None,
             consecutive_health_failures: 0,
+            wal_health_snapshot: None,
         };
         // Build a MockDatabase for the `pool` slot — restore_pitr for
         // Postgres doesn't touch it in the legacy-reject path.
         let mock_db =
             sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres).into_connection();
-        let s3_client = {
+        // Build the S3 client. The AWS SDK eagerly initialises its rustls
+        // TrustStore at `Client::from_conf` time, and on hosts without any
+        // system root CAs (some CI runners, minimal containers, macOS
+        // without keychain access) it panics with "TrustStore configured
+        // to enable native roots but no valid root certificates parsed!".
+        // We wrap construction in `catch_unwind` and skip the test on that
+        // specific panic — mirroring the pattern in
+        // `externalsvc/test_utils.rs::MinioTestContainer::start`.
+        let s3_client = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let aws_creds = aws_sdk_s3::config::Credentials::new("k", "s", None, None, "test");
             let conf = aws_sdk_s3::Config::builder()
                 .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
@@ -5066,6 +5075,27 @@ mod tests {
                 .credentials_provider(aws_creds)
                 .build();
             aws_sdk_s3::Client::from_conf(conf)
+        })) {
+            Ok(c) => c,
+            Err(panic_payload) => {
+                let panic_msg = panic_payload
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| {
+                        panic_payload
+                            .downcast_ref::<&'static str>()
+                            .map(|s| s.to_string())
+                    })
+                    .unwrap_or_else(|| "(non-string panic payload)".to_string());
+                if panic_msg.contains("TrustStore") || panic_msg.contains("certificate") {
+                    println!(
+                        "Skipping test: AWS SDK panicked initialising rustls TrustStore: {}",
+                        panic_msg
+                    );
+                    return;
+                }
+                panic!("AWS SDK panic constructing S3 client: {}", panic_msg);
+            }
         };
         let ctx = crate::externalsvc::RestoreContext {
             s3_client: &s3_client,

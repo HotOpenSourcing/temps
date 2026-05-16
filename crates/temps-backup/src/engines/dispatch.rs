@@ -161,6 +161,7 @@ mod tests {
             last_health_check_at: None,
             last_health_error: None,
             consecutive_health_failures: 0,
+            wal_health_snapshot: None,
         }
     }
 
