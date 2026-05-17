@@ -26,7 +26,6 @@ temps-analytics-session-replay = { path = "../temps-analytics-session-replay" }
 temps-audit = { path = "../temps-audit" }
 temps-auth = { path = "../temps-auth" }
 temps-agents = { path = "../temps-agents" }
-temps-workspace = { path = "../temps-workspace" }
 temps-sandbox = { path = "../temps-sandbox" }
 temps-backup = { path = "../temps-backup" }
 temps-revenue = { path = "../temps-revenue" }
@@ -90,7 +89,9 @@ utoipa-swagger-ui = { workspace = true }
 async-trait = { workspace = true }
 sea-orm = { workspace = true }
 include_dir = "0.7"
+ipnet = "2.10"
 mime_guess = "2.0"
+thiserror = { workspace = true }
 aws-sdk-s3 = { workspace = true }
 url = { workspace = true }
 urlencoding = { workspace = true }

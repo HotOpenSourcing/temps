@@ -16,6 +16,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { ServiceLogo } from '@/components/ui/service-logo'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { useKeyboardShortcut } from '@/hooks/useKeyboardShortcut'
@@ -24,6 +25,7 @@ import { useMutation, useQuery } from '@tanstack/react-query'
 import {
   ChevronRight,
   Database,
+  Info,
   Link2,
   Link2Off,
   MoreHorizontal,
@@ -337,6 +339,20 @@ export function ProjectStorage({ project }: { project: ProjectResponse }) {
       <div className="flex-1 overflow-auto">
         <div className="space-y-6 p-4 md:p-6">
           {header}
+          <Alert>
+            <Info className="h-4 w-4" />
+            <AlertTitle>How databases work in Temps</AlertTitle>
+            <AlertDescription className="text-muted-foreground">
+              One service (e.g. Postgres) hosts databases for{' '}
+              <strong>all your projects</strong>. When you link a service
+              here, Temps automatically creates a dedicated{' '}
+              <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">
+                {`<project>_<env>`}
+              </code>{' '}
+              database for each environment — you don&apos;t need a separate
+              Postgres for every project (unlike Heroku/Render).
+            </AlertDescription>
+          </Alert>
           <EmptyStateStorage />
         </div>
       </div>
@@ -354,6 +370,21 @@ export function ProjectStorage({ project }: { project: ProjectResponse }) {
     <div className="flex-1 overflow-auto">
       <div className="space-y-8 p-4 md:p-6">
         {header}
+
+        <Alert>
+          <Info className="h-4 w-4" />
+          <AlertTitle>How databases work in Temps</AlertTitle>
+          <AlertDescription className="text-muted-foreground">
+            One service (e.g. Postgres) hosts databases for{' '}
+            <strong>all your projects</strong>. When you link a service here,
+            Temps automatically creates a dedicated{' '}
+            <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">
+              {`<project>_<env>`}
+            </code>{' '}
+            database for each environment — you don&apos;t need a separate
+            Postgres for every project (unlike Heroku/Render).
+          </AlertDescription>
+        </Alert>
 
         {linkedServices.length > 0 ? (
           <section>

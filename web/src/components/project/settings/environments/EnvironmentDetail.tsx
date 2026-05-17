@@ -1,7 +1,8 @@
-import { ProjectResponse } from '@/api/client'
+import { EnvironmentResponse, ProjectResponse } from '@/api/client'
 import {
   deleteEnvironmentMutation,
   getEnvironmentOptions,
+  updateEnvironmentSubdomainMutation,
 } from '@/api/client/@tanstack/react-query.gen'
 import { Button } from '@/components/ui/button'
 import {
@@ -20,11 +21,14 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ErrorAlert } from '@/components/utils/ErrorAlert'
+import { useSettings } from '@/hooks/useSettings'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { RefreshCw, Trash2 } from 'lucide-react'
-import { useState } from 'react'
+import { Globe, Loader2, RefreshCw, Trash2 } from 'lucide-react'
+import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { toast } from 'sonner'
 import { EnvironmentConfigurationCard } from './EnvironmentConfigurationCard'
@@ -32,7 +36,7 @@ import { EnvironmentConfigurationCard } from './EnvironmentConfigurationCard'
 interface EnvironmentDetailProps {
   project: ProjectResponse
   environmentId?: number // Optional: if not provided, will use useParams
-  initialEnvironment?: any // Optional: initial environment data to use as default
+  initialEnvironment?: EnvironmentResponse // Optional: initial environment data to use as default
   onDelete?: () => void // Optional: callback after successful deletion
 }
 
@@ -71,6 +75,125 @@ function EnvironmentDetailSkeleton() {
         </CardContent>
       </Card>
     </div>
+  )
+}
+
+const SUBDOMAIN_PATTERN = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
+
+function SubdomainCard({
+  project,
+  environment,
+  onUpdate,
+}: {
+  project: ProjectResponse
+  environment: EnvironmentResponse
+  onUpdate: () => void
+}) {
+  const { data: settings } = useSettings()
+  const previewDomain = (settings?.preview_domain ?? '').replace(/^\*\./, '')
+
+  // The stored host label (e.g. "myproject-production"). Prefer the dedicated
+  // `subdomain` field; if the API hasn't been updated yet, fall back to
+  // extracting it from `main_url` by stripping the protocol and preview suffix.
+  const currentLabel =
+    (environment as EnvironmentResponse & { subdomain?: string }).subdomain ??
+    environment.main_url
+      .replace(/^https?:\/\//, '')
+      .replace(new RegExp(`\\.${previewDomain.replace(/\./g, '\\.')}$`), '')
+
+  const [value, setValue] = useState(currentLabel)
+
+  useEffect(() => {
+    setValue(currentLabel)
+  }, [currentLabel])
+
+  const trimmed = value.trim().toLowerCase()
+  const isUnchanged = trimmed === currentLabel
+  const isValid = SUBDOMAIN_PATTERN.test(trimmed) && trimmed.length <= 63
+
+  const mutation = useMutation({
+    ...updateEnvironmentSubdomainMutation(),
+    meta: { errorTitle: 'Failed to rename subdomain' },
+    onSuccess: () => {
+      toast.success('Subdomain updated. The previous hostname will stop resolving shortly.')
+      onUpdate()
+    },
+  })
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!isValid || isUnchanged) return
+    mutation.mutate({
+      path: {
+        project_id: project.id,
+        env_id: environment.id,
+      },
+      body: { subdomain: trimmed },
+    })
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Globe className="h-5 w-5" />
+          Subdomain
+        </CardTitle>
+        <CardDescription>
+          Rename the auto-managed hostname for this environment. The previous
+          subdomain stops resolving as soon as the change is applied. Custom
+          domains attached to this environment are unaffected.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div>
+            <Label htmlFor="subdomain-input">Subdomain</Label>
+            <div className="mt-2 flex flex-col sm:flex-row sm:items-stretch gap-2">
+              <div className="flex flex-1 items-stretch rounded-md border border-input bg-background focus-within:ring-2 focus-within:ring-ring overflow-hidden">
+                <Input
+                  id="subdomain-input"
+                  value={value}
+                  onChange={(e) => setValue(e.target.value)}
+                  placeholder="e.g., myapp"
+                  className="border-0 focus-visible:ring-0 focus-visible:ring-offset-0 rounded-none"
+                  maxLength={63}
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                {previewDomain && (
+                  <span className="flex items-center px-3 text-sm text-muted-foreground bg-muted/40 border-l whitespace-nowrap">
+                    .{previewDomain}
+                  </span>
+                )}
+              </div>
+              <Button
+                type="submit"
+                disabled={!isValid || isUnchanged || mutation.isPending}
+                className="sm:w-auto"
+              >
+                {mutation.isPending && (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                )}
+                Save
+              </Button>
+            </div>
+            {!isValid && trimmed.length > 0 && (
+              <p className="text-xs text-destructive mt-2">
+                Use 1–63 lowercase letters, digits, or hyphens. Cannot start or
+                end with a hyphen.
+              </p>
+            )}
+            {isValid && (
+              <p className="text-xs text-muted-foreground mt-2">
+                DNS-safe slug: lowercase letters, digits, and hyphens (max 63
+                chars). Casing is normalized server-side.
+              </p>
+            )}
+          </div>
+        </form>
+      </CardContent>
+    </Card>
   )
 }
 
@@ -219,6 +342,15 @@ export function EnvironmentDetail({
         environment={environment}
         onUpdate={() => {
           queryClient.invalidateQueries({ queryKey: ['environment'] })
+        }}
+      />
+
+      <SubdomainCard
+        project={project}
+        environment={environment}
+        onUpdate={() => {
+          queryClient.invalidateQueries({ queryKey: ['environment'] })
+          queryClient.invalidateQueries({ queryKey: ['environments'] })
         }}
       />
 

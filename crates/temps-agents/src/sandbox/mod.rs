@@ -417,10 +417,10 @@ mod tests {
     }
 
     /// Compile-time assertion that `SandboxProvider` is object-safe — i.e.
-    /// `Arc<dyn SandboxProvider>` is legal. Every consumer in the workspace
-    /// holds the trait behind dynamic dispatch; breaking object-safety
-    /// (by adding a generic method or a `Self` return type) would cascade
-    /// through `temps-agents`, `temps-sandbox`, and `temps-workspace`.
+    /// `Arc<dyn SandboxProvider>` is legal. Every consumer holds the trait
+    /// behind dynamic dispatch; breaking object-safety (by adding a generic
+    /// method or a `Self` return type) would cascade through `temps-agents`
+    /// and `temps-sandbox`.
     ///
     /// This test does not run any code at runtime — the assertion is that
     /// this function type-checks at all.

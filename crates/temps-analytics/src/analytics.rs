@@ -2,7 +2,7 @@ use crate::traits::Analytics;
 use crate::types::responses::{
     self, DropOffPoint, EnrichVisitorResponse, EventCount, PageFlowEntry, PageFlowResponse,
     PageTransition, SessionDetails, SessionEventsResponse, SessionLogsResponse, VisitorDetails,
-    VisitorSessionsResponse, VisitorsResponse,
+    VisitorFacetValue, VisitorFacets, VisitorSessionsResponse, VisitorsResponse,
 };
 use crate::types::{AnalyticsError, Page};
 use async_trait::async_trait;
@@ -22,6 +22,218 @@ impl AnalyticsService {
     pub fn new(db: Arc<DatabaseConnection>, cookie_crypto: Arc<CookieCrypto>) -> Self {
         AnalyticsService { db, cookie_crypto }
     }
+
+    /// Build the visitor-row WHERE clause + parameter list shared by the
+    /// facet queries. Returns the predicates joined with ` AND `, the bound
+    /// values, the next `$N` parameter index, and whether an
+    /// `ip_geolocations` join is required.
+    fn build_visitor_segment_predicates(
+        start_date: UtcDateTime,
+        end_date: UtcDateTime,
+        project_id: i32,
+        environment_id: Option<i32>,
+        include_crawlers: Option<bool>,
+        has_activity_only: Option<bool>,
+        segment: &crate::types::requests::VisitorSegmentFilters,
+    ) -> (String, Vec<sea_orm::Value>, usize, bool) {
+        let mut where_conditions: Vec<String> = vec!["v.project_id = $1".to_string()];
+        let mut values: Vec<sea_orm::Value> = vec![project_id.into()];
+        let mut param_index = 2;
+
+        if let Some(env_id) = environment_id {
+            where_conditions.push(format!("v.environment_id = ${}", param_index));
+            values.push(env_id.into());
+            param_index += 1;
+        }
+        if include_crawlers == Some(false) {
+            where_conditions.push("v.is_crawler = false".to_string());
+        }
+        if has_activity_only == Some(true) {
+            where_conditions.push("v.has_activity = true".to_string());
+        }
+
+        where_conditions.push(format!("v.last_seen >= ${}", param_index));
+        values.push(start_date.into());
+        param_index += 1;
+        where_conditions.push(format!("v.last_seen <= ${}", param_index));
+        values.push(end_date.into());
+        param_index += 1;
+
+        let needs_geo_join = segment.filter_country.is_some()
+            || segment.filter_region.is_some()
+            || segment.filter_city.is_some();
+
+        if let Some(country) = &segment.filter_country {
+            where_conditions.push(format!("ig.country = ${}", param_index));
+            values.push(country.clone().into());
+            param_index += 1;
+        }
+        if let Some(region) = &segment.filter_region {
+            where_conditions.push(format!("ig.region = ${}", param_index));
+            values.push(region.clone().into());
+            param_index += 1;
+        }
+        if let Some(city) = &segment.filter_city {
+            where_conditions.push(format!("ig.city = ${}", param_index));
+            values.push(city.clone().into());
+            param_index += 1;
+        }
+
+        if let Some(channel) = &segment.filter_channel {
+            where_conditions.push(format!("v.first_channel = ${}", param_index));
+            values.push(channel.clone().into());
+            param_index += 1;
+        }
+        if let Some(referrer) = &segment.filter_referrer {
+            if referrer == "Direct" {
+                where_conditions.push("v.first_referrer_hostname IS NULL".to_string());
+            } else {
+                where_conditions.push(format!("v.first_referrer_hostname = ${}", param_index));
+                values.push(referrer.clone().into());
+                param_index += 1;
+            }
+        }
+
+        (
+            where_conditions.join(" AND "),
+            values,
+            param_index,
+            needs_geo_join,
+        )
+    }
+
+    /// Aggregate a visitor-row dimension (country/region/city/channel/referrer).
+    ///
+    /// `code_expr` is an optional second SELECT expression used to carry an
+    /// auxiliary code alongside the value (country_code for country flags).
+    async fn facet_visitor_dimension(
+        &self,
+        value_expr: &str,
+        code_expr: Option<&str>,
+        geo_mode: FacetGeoMode,
+        scope: &FacetScope<'_>,
+        segment: &crate::types::requests::VisitorSegmentFilters,
+    ) -> Result<Vec<VisitorFacetValue>, AnalyticsError> {
+        let (where_clause, mut values, next_index, needs_geo_join) =
+            Self::build_visitor_segment_predicates(
+                scope.start_date,
+                scope.end_date,
+                scope.project_id,
+                scope.environment_id,
+                scope.include_crawlers,
+                scope.has_activity_only,
+                segment,
+            );
+
+        let join_geo = matches!(geo_mode, FacetGeoMode::Always) || needs_geo_join;
+        let geo_join = if join_geo {
+            "LEFT JOIN ip_geolocations ig ON v.ip_address_id = ig.id"
+        } else {
+            ""
+        };
+
+        let code_select = code_expr
+            .map(|c| format!(", {} AS code", c))
+            .unwrap_or_default();
+        let code_group = code_expr.map(|c| format!(", {}", c)).unwrap_or_default();
+
+        let sql = format!(
+            r#"
+            SELECT {value} AS value{code_select}, COUNT(DISTINCT v.id) AS count
+            FROM visitor v
+            {geo_join}
+            WHERE {where_clause}
+              AND {value} IS NOT NULL
+              AND {value} <> ''
+            GROUP BY {value}{code_group}
+            ORDER BY count DESC, value ASC
+            LIMIT ${limit_idx}
+            "#,
+            value = value_expr,
+            code_select = code_select,
+            geo_join = geo_join,
+            where_clause = where_clause,
+            code_group = code_group,
+            limit_idx = next_index,
+        );
+        values.push((scope.limit as i64).into());
+
+        #[derive(FromQueryResult)]
+        struct Row {
+            value: Option<String>,
+            code: Option<String>,
+            count: i64,
+        }
+
+        // The `code` column may not exist in the SELECT; sea_orm's
+        // FromQueryResult will tolerate a missing column when the field is
+        // `Option<T>`, but we still need a row type that compiles. So we use
+        // a separate query type when there's no code.
+        if code_expr.is_some() {
+            let rows = Row::find_by_statement(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                &sql,
+                values,
+            ))
+            .all(self.db.as_ref())
+            .await?;
+            Ok(rows
+                .into_iter()
+                .filter_map(|r| {
+                    r.value.map(|v| VisitorFacetValue {
+                        value: v,
+                        code: r.code,
+                        count: r.count,
+                    })
+                })
+                .collect())
+        } else {
+            #[derive(FromQueryResult)]
+            struct RowNoCode {
+                value: Option<String>,
+                count: i64,
+            }
+            let rows = RowNoCode::find_by_statement(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                &sql,
+                values,
+            ))
+            .all(self.db.as_ref())
+            .await?;
+            Ok(rows
+                .into_iter()
+                .filter_map(|r| {
+                    r.value.map(|v| VisitorFacetValue {
+                        value: v,
+                        code: None,
+                        count: r.count,
+                    })
+                })
+                .collect())
+        }
+    }
+}
+
+/// Controls whether `facet_visitor_dimension` joins `ip_geolocations`
+/// unconditionally. Used so country/region/city facets join even when no
+/// geo segment is set.
+#[derive(Clone, Copy)]
+enum FacetGeoMode {
+    Always,
+    IfFiltered,
+}
+
+/// Shared scope of a single `get_visitor_facets` call. Threaded through every
+/// per-dimension query so the helpers stay under the clippy arg-count limit.
+struct FacetScope<'a> {
+    start_date: UtcDateTime,
+    end_date: UtcDateTime,
+    project_id: i32,
+    environment_id: Option<i32>,
+    include_crawlers: Option<bool>,
+    has_activity_only: Option<bool>,
+    limit: i32,
+    _marker: std::marker::PhantomData<&'a ()>,
 }
 
 #[async_trait]
@@ -307,74 +519,6 @@ impl Analytics for AnalyticsService {
             }
         }
 
-        // Event-side filters bundled into one EXISTS subquery so we touch the
-        // events hypertable once per visitor row (uses idx_events_visitor_*).
-        let mut event_conditions: Vec<String> = Vec::new();
-        if let Some(event_name) = &segment.filter_event {
-            event_conditions.push(format!(
-                "COALESCE(e.event_name, e.event_type) = ${}",
-                param_index
-            ));
-            values.push(event_name.clone().into());
-            param_index += 1;
-        }
-        if let Some(browser) = &segment.filter_browser {
-            event_conditions.push(format!("e.browser = ${}", param_index));
-            values.push(browser.clone().into());
-            param_index += 1;
-        }
-        if let Some(os) = &segment.filter_os {
-            event_conditions.push(format!("e.operating_system = ${}", param_index));
-            values.push(os.clone().into());
-            param_index += 1;
-        }
-        if let Some(device) = &segment.filter_device {
-            event_conditions.push(format!("e.device_type = ${}", param_index));
-            values.push(device.clone().into());
-            param_index += 1;
-        }
-        if let Some(language) = &segment.filter_language {
-            event_conditions.push(format!("e.language = ${}", param_index));
-            values.push(language.clone().into());
-            param_index += 1;
-        }
-        for (column, value) in [
-            ("utm_source", &segment.filter_utm_source),
-            ("utm_medium", &segment.filter_utm_medium),
-            ("utm_campaign", &segment.filter_utm_campaign),
-            ("utm_term", &segment.filter_utm_term),
-            ("utm_content", &segment.filter_utm_content),
-        ] {
-            if let Some(v) = value {
-                event_conditions.push(format!("e.{} = ${}", column, param_index));
-                values.push(v.clone().into());
-                param_index += 1;
-            }
-        }
-
-        if !event_conditions.is_empty() {
-            // Constrain the EXISTS to the same date window so a visitor only
-            // qualifies if they had a matching event in the chosen range.
-            event_conditions.push(format!("e.timestamp >= ${}", param_index));
-            values.push(start_date.into());
-            param_index += 1;
-            event_conditions.push(format!("e.timestamp <= ${}", param_index));
-            values.push(end_date.into());
-            param_index += 1;
-
-            // Including `e.project_id = v.project_id` lets the planner prune
-            // hypertable chunks by project before the visitor-id seek, and
-            // short-circuits via the events composite indexes on
-            // (project_id, visitor_id, timestamp).
-            where_conditions.push(format!(
-                "EXISTS (SELECT 1 FROM events e \
-                 WHERE e.visitor_id = v.id \
-                 AND e.project_id = v.project_id \
-                 AND {})",
-                event_conditions.join(" AND ")
-            ));
-        }
-
         let limit_val = limit.unwrap_or(50).min(100);
         let offset_val = offset.unwrap_or(0);
 
@@ -539,6 +683,101 @@ impl Analytics for AnalyticsService {
             filtered_count: total_count,
         })
     }
+
+    async fn get_visitor_facets(
+        &self,
+        start_date: UtcDateTime,
+        end_date: UtcDateTime,
+        project_id: i32,
+        environment_id: Option<i32>,
+        include_crawlers: Option<bool>,
+        has_activity_only: Option<bool>,
+        per_facet_limit: Option<i32>,
+        segment: crate::types::requests::VisitorSegmentFilters,
+    ) -> Result<VisitorFacets, AnalyticsError> {
+        let per_facet_limit = per_facet_limit.unwrap_or(50).clamp(1, 200);
+
+        // Every dimension aggregates the visitor pool with all *other*
+        // segment filters applied, so a selected dimension doesn't collapse
+        // its own dropdown to a single option.
+        //
+        // Only visitor-row dimensions (country/region/city/channel/referrer)
+        // are supported on purpose: they aggregate directly off `visitor` +
+        // `ip_geolocations`, which are small relative to events and have
+        // proper indexes. Adding event-row dimensions would pull in the
+        // events hypertable and reintroduce 100+ ms of per-query cost.
+
+        macro_rules! without {
+            ($field:ident) => {{
+                let mut s = segment.clone();
+                s.$field = None;
+                s
+            }};
+        }
+
+        let scope = FacetScope {
+            start_date,
+            end_date,
+            project_id,
+            environment_id,
+            include_crawlers,
+            has_activity_only,
+            limit: per_facet_limit,
+            _marker: std::marker::PhantomData,
+        };
+
+        // Fan the 5 visitor-row queries out concurrently — each is fast
+        // (~5–15 ms) but running them in parallel still meaningfully cuts
+        // wall-clock vs awaiting sequentially.
+        let seg_country = without!(filter_country);
+        let seg_region = without!(filter_region);
+        let seg_city = without!(filter_city);
+        let seg_channel = without!(filter_channel);
+        let seg_referrer = without!(filter_referrer);
+
+        let (country, region, city, channel, referrer) = tokio::try_join!(
+            self.facet_visitor_dimension(
+                "ig.country",
+                Some("ig.country_code"),
+                FacetGeoMode::Always,
+                &scope,
+                &seg_country,
+            ),
+            self.facet_visitor_dimension(
+                "ig.region",
+                None,
+                FacetGeoMode::Always,
+                &scope,
+                &seg_region,
+            ),
+            self.facet_visitor_dimension("ig.city", None, FacetGeoMode::Always, &scope, &seg_city,),
+            self.facet_visitor_dimension(
+                "v.first_channel",
+                None,
+                FacetGeoMode::IfFiltered,
+                &scope,
+                &seg_channel,
+            ),
+            // Referrer: NULL means "Direct" — the SQL collapses it to that
+            // literal so the UI doesn't have to special-case empty rows.
+            self.facet_visitor_dimension(
+                "COALESCE(v.first_referrer_hostname, 'Direct')",
+                None,
+                FacetGeoMode::IfFiltered,
+                &scope,
+                &seg_referrer,
+            ),
+        )?;
+
+        Ok(VisitorFacets {
+            country,
+            region,
+            city,
+            channel,
+            referrer,
+        })
+    }
+
     /// Get visitor basic info from database
     async fn get_visitor_info(
         &self,

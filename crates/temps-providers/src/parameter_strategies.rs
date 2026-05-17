@@ -93,7 +93,15 @@ fn validate_postgres_credentials(params: &HashMap<String, JsonValue>) -> Result<
         }
     }
     if let Some(JsonValue::String(pw)) = params.get("password") {
-        is_valid_pg_password(pw).map_err(|reason| format!("invalid 'password': {}", reason))?;
+        // Empty string is a sentinel meaning "auto-generate me later" —
+        // the `auto_generate_missing` step (which runs immediately after
+        // validation) fills it with a `generate_secure_password()` value.
+        // Treating empty as a validation failure here would block the
+        // auto-generate flow that both the UI and the schema documentation
+        // explicitly promise users.
+        if !pw.is_empty() {
+            is_valid_pg_password(pw).map_err(|reason| format!("invalid 'password': {}", reason))?;
+        }
     }
     Ok(())
 }
@@ -968,8 +976,13 @@ fn find_available_port(start_port: u16) -> Option<u16> {
 fn generate_secure_password() -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
+    // Charset must be a subset of what `is_valid_pg_password` accepts.
+    // `$` is intentionally excluded because the cluster startup script
+    // uses shell expansion on env-injected passwords — see the matching
+    // rule in `is_valid_pg_password`. Including it caused ~35% of
+    // auto-generated passwords to fail their own validation.
     let charset: &[u8] =
-        b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*_-+=";
+        b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#%^&*_-+=";
     (0..32)
         .map(|_| charset[rng.gen_range(0..charset.len())] as char)
         .collect()
@@ -1266,5 +1279,41 @@ mod tests {
 
         let ok = pg_params("postgres", "myapp", Some("strong_password_456!"));
         assert!(strategy.validate_for_creation(&ok).is_ok());
+    }
+
+    /// Regression: the UI and the parameter schema both promise users that
+    /// leaving the password field empty triggers auto-generation. That only
+    /// works if validation does not reject empty passwords — the
+    /// auto-generator runs in `auto_generate_missing` AFTER
+    /// `validate_for_creation`. An earlier bug returned 400 "password
+    /// cannot be empty" before the generator could run.
+    #[test]
+    fn validate_credentials_accepts_empty_password_for_auto_generation() {
+        let mut params = pg_params("postgres", "myapp", None);
+        params.insert("password".into(), JsonValue::String(String::new()));
+        assert!(
+            validate_postgres_credentials(&params).is_ok(),
+            "empty password must be allowed; the auto-generator fills it"
+        );
+
+        // The full strategy run must also accept empty and produce a non-empty
+        // password after auto_generate_missing has run.
+        let strategy = PostgresParameterStrategy;
+        let mut full = pg_params("postgres", "myapp", None);
+        full.insert("password".into(), JsonValue::String(String::new()));
+        assert!(strategy.validate_for_creation(&full).is_ok());
+        strategy.auto_generate_missing(&mut full).unwrap();
+        let generated = full
+            .get("password")
+            .and_then(|v| v.as_str())
+            .expect("password must be set after auto_generate_missing");
+        assert!(
+            !generated.is_empty(),
+            "auto_generate_missing must fill an empty password"
+        );
+        assert!(
+            is_valid_pg_password(generated).is_ok(),
+            "auto-generated password must itself pass validation"
+        );
     }
 }

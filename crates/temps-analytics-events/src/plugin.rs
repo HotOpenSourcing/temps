@@ -72,15 +72,37 @@ impl TempsPlugin for EventsPlugin {
                 events_service.clone()
             };
 
-        let routes =
-            crate::handlers::configure_routes().with_state(Arc::new(crate::handlers::AppState {
-                events_service: events_backend,
-                events_writer: events_service,
-                route_table,
-                ip_address_service,
-                cookie_crypto,
-            }));
+        let state = Arc::new(crate::handlers::AppState {
+            events_service: events_backend,
+            events_writer: events_service,
+            route_table,
+            ip_address_service,
+            cookie_crypto,
+        });
 
+        let routes = crate::handlers::configure_routes().with_state(state);
+        Some(PluginRoutes { router: routes })
+    }
+
+    fn configure_public_routes(&self, context: &PluginContext) -> Option<PluginRoutes> {
+        let events_service = context.require_service::<crate::services::AnalyticsEventsService>();
+        let route_table = context.require_service::<temps_proxy::CachedPeerTable>();
+        let ip_address_service = context.require_service::<temps_geo::IpAddressService>();
+        let cookie_crypto = context.require_service::<temps_core::CookieCrypto>();
+
+        // Public ingest only needs the write path — the read trait can be the
+        // PG-backed service since these endpoints don't query.
+        let events_backend: Arc<dyn crate::services::AnalyticsEvents> = events_service.clone();
+
+        let state = Arc::new(crate::handlers::AppState {
+            events_service: events_backend,
+            events_writer: events_service,
+            route_table,
+            ip_address_service,
+            cookie_crypto,
+        });
+
+        let routes = crate::handlers::configure_public_routes().with_state(state);
         Some(PluginRoutes { router: routes })
     }
 

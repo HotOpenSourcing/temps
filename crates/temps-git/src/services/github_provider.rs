@@ -42,27 +42,39 @@ pub struct ScopedTokenRequest {
 
 impl ScopedTokenRequest {
     /// Token for cloning / fetching a single repo. `contents:read` is the
-    /// minimum permission a `git clone` over HTTPS needs; we also include
-    /// `metadata:read` because GitHub adds it implicitly anyway and being
-    /// explicit avoids confusing 422s on some App configurations.
-    pub fn for_repo_read(repo_full_name: &str) -> Self {
+    /// minimum permission a `git clone` over HTTPS needs.
+    ///
+    /// Only `contents` is listed: `metadata:read` is granted implicitly by
+    /// GitHub to every installation token that has any repository
+    /// permission, and listing it explicitly here causes GitHub to *strip
+    /// the entire `permissions` block* (silently returning an empty-
+    /// permissions token, which surfaces as `pull:false, push:false` on
+    /// every minted token). The endpoint validates each requested key
+    /// against the App's *declared* permissions, and `metadata` is not in
+    /// that set — it's implicit. Don't add it back.
+    ///
+    /// `repo_name` is the bare repo name (e.g. `temps-landing-new`), NOT
+    /// `owner/repo` — GitHub's access_tokens endpoint expects the unqualified
+    /// form because the owner is fixed by the installation.
+    pub fn for_repo_read(repo_name: &str) -> Self {
         let mut perms = std::collections::HashMap::new();
         perms.insert("contents".to_string(), "read".to_string());
-        perms.insert("metadata".to_string(), "read".to_string());
         Self {
-            repositories: Some(vec![repo_full_name.to_string()]),
+            repositories: Some(vec![repo_name.to_string()]),
             permissions: Some(perms),
         }
     }
 
     /// Token for pushing to a single repo. `contents:write` covers
-    /// `git push`; we keep `metadata:read` for parity with the read variant.
-    pub fn for_repo_write(repo_full_name: &str) -> Self {
+    /// `git push`. See [`Self::for_repo_read`] for why `metadata` is
+    /// deliberately NOT requested.
+    ///
+    /// `repo_name` is the bare repo name (see [`Self::for_repo_read`]).
+    pub fn for_repo_write(repo_name: &str) -> Self {
         let mut perms = std::collections::HashMap::new();
         perms.insert("contents".to_string(), "write".to_string());
-        perms.insert("metadata".to_string(), "read".to_string());
         Self {
-            repositories: Some(vec![repo_full_name.to_string()]),
+            repositories: Some(vec![repo_name.to_string()]),
             permissions: Some(perms),
         }
     }
@@ -337,6 +349,12 @@ impl GitHubProvider {
                 let app_id_param = octocrab::models::AppId(*app_id as u64);
                 let key = jsonwebtoken::EncodingKey::from_rsa_pem(private_key.as_bytes()).map_err(
                     |e| {
+                        error!(
+                            installation_id,
+                            app_id = *app_id,
+                            error = %e,
+                            "GitHub App scoped token mint failed: invalid private key"
+                        );
                         GitProviderError::InvalidConfiguration(format!(
                             "Invalid private key: {}",
                             e
@@ -345,6 +363,12 @@ impl GitHubProvider {
                 )?;
 
                 let jwt = octocrab::auth::create_jwt(app_id_param, &key).map_err(|e| {
+                    error!(
+                        installation_id,
+                        app_id = *app_id,
+                        error = %e,
+                        "GitHub App scoped token mint failed: JWT creation error"
+                    );
                     GitProviderError::ApiError(format!("Failed to create JWT: {}", e))
                 })?;
 
@@ -353,6 +377,12 @@ impl GitHubProvider {
                     .personal_token(jwt)
                     .build()
                     .map_err(|e| {
+                        error!(
+                            installation_id,
+                            app_id = *app_id,
+                            error = %e,
+                            "GitHub App scoped token mint failed: octocrab client build error"
+                        );
                         GitProviderError::ApiError(format!(
                             "Failed to create GitHub App client: {}",
                             e
@@ -365,17 +395,37 @@ impl GitHubProvider {
                     .installation(octocrab::models::InstallationId(installation_id as u64))
                     .await
                     .map_err(|e| {
+                        error!(
+                            installation_id,
+                            app_id = *app_id,
+                            error = %e,
+                            "GitHub App scoped token mint failed: cannot fetch installation \
+                             (check that app_id matches installation_id and the App is still \
+                             installed)"
+                        );
                         GitProviderError::ApiError(format!("Failed to get installation: {}", e))
                     })?;
 
                 let gh_access_tokens_url = reqwest::Url::parse(
                     installation.access_tokens_url.as_ref().ok_or_else(|| {
+                        error!(
+                            installation_id,
+                            app_id = *app_id,
+                            "GitHub App scoped token mint failed: installation response had no \
+                             access_tokens_url"
+                        );
                         GitProviderError::ApiError(
                             "No access_tokens_url in installation".to_string(),
                         )
                     })?,
                 )
                 .map_err(|e| {
+                    error!(
+                        installation_id,
+                        app_id = *app_id,
+                        error = %e,
+                        "GitHub App scoped token mint failed: malformed access_tokens_url"
+                    );
                     GitProviderError::ApiError(format!("Failed to parse access_tokens_url: {}", e))
                 })?;
 
@@ -387,6 +437,16 @@ impl GitHubProvider {
                     .post(gh_access_tokens_url.path(), Some(request))
                     .await
                     .map_err(|e| {
+                        error!(
+                            installation_id,
+                            app_id = *app_id,
+                            repos = ?request.repositories,
+                            perms = ?request.permissions,
+                            error = %e,
+                            "GitHub App scoped token mint failed: GitHub rejected access_tokens \
+                             request (common causes: requested repo not selected on the \
+                             installation, or App lacks the requested permission)"
+                        );
                         GitProviderError::ApiError(format!(
                             "Failed to create installation token: {}",
                             e
@@ -713,10 +773,14 @@ impl GitProviderService for GitHubProvider {
             ))
         })?;
 
-        let repo_full_name = format!("{}/{}", owner, repo);
+        // GitHub's `POST /app/installations/{id}/access_tokens` expects bare
+        // repo names in `repositories`, NOT `owner/repo`. Passing the full
+        // name causes a 422 even when the App has access to the repo —
+        // `owner` is determined by the installation itself.
+        let _ = owner;
         let request = match operation {
-            ScopedTokenOp::Fetch => ScopedTokenRequest::for_repo_read(&repo_full_name),
-            ScopedTokenOp::Push => ScopedTokenRequest::for_repo_write(&repo_full_name),
+            ScopedTokenOp::Fetch => ScopedTokenRequest::for_repo_read(repo),
+            ScopedTokenOp::Push => ScopedTokenRequest::for_repo_write(repo),
         };
 
         let (token, expires_at) = self
@@ -2136,41 +2200,53 @@ mod scoped_token_tests {
     }
 
     /// `for_repo_read` must produce a body that both narrows to a single
-    /// repo AND drops permissions to `contents:read` + `metadata:read`.
-    /// This is the per-`git clone` shape: the credential daemon mints
-    /// exactly this for every fetch.
+    /// repo AND drops permissions to `contents:read` only.
+    ///
+    /// Critically: `metadata` MUST NOT appear in the permissions map.
+    /// GitHub strips the entire `permissions` block (silently!) when any
+    /// requested key isn't in the App's declared permission set, and
+    /// `metadata` is implicit, not declared. The strip surfaces as a token
+    /// with `push:false, pull:false` on every repo — the failure mode we
+    /// hit in production.
     #[test]
     fn for_repo_read_narrows_repo_and_perms() {
-        let req = ScopedTokenRequest::for_repo_read("acme/web");
+        let req = ScopedTokenRequest::for_repo_read("web");
         let v: serde_json::Value = serde_json::to_value(&req).unwrap();
 
-        assert_eq!(v["repositories"], serde_json::json!(["acme/web"]));
+        assert_eq!(v["repositories"], serde_json::json!(["web"]));
         assert_eq!(v["permissions"]["contents"], "read");
-        assert_eq!(v["permissions"]["metadata"], "read");
-        // No write permissions sneaking in.
-        assert!(v["permissions"].as_object().unwrap().len() == 2);
+        // metadata must NOT be present — see doc on for_repo_read.
+        assert!(v["permissions"].get("metadata").is_none());
+        // Exactly one permission: contents.
+        assert_eq!(v["permissions"].as_object().unwrap().len(), 1);
     }
 
     /// `for_repo_write` must elevate `contents` to `write` while leaving
     /// every other dimension narrowed. Used for `git push` flows.
+    /// Same `metadata` rule as the read variant — never list it explicitly.
     #[test]
     fn for_repo_write_grants_write_only_on_contents() {
-        let req = ScopedTokenRequest::for_repo_write("acme/web");
+        let req = ScopedTokenRequest::for_repo_write("web");
         let v: serde_json::Value = serde_json::to_value(&req).unwrap();
 
-        assert_eq!(v["repositories"], serde_json::json!(["acme/web"]));
+        assert_eq!(v["repositories"], serde_json::json!(["web"]));
         assert_eq!(v["permissions"]["contents"], "write");
-        assert_eq!(v["permissions"]["metadata"], "read");
-        // Still capped at the two perms — no implicit pull_requests/issues.
-        assert_eq!(v["permissions"].as_object().unwrap().len(), 2);
+        assert!(v["permissions"].get("metadata").is_none());
+        assert_eq!(v["permissions"].as_object().unwrap().len(), 1);
     }
 
-    /// Repos must be passed by full name, not bare slug. Regression guard
-    /// against any future helper that "just takes the repo name" — GitHub
-    /// 422s on bare names.
+    /// GitHub's `POST /app/installations/{id}/access_tokens` expects bare
+    /// repo names in `repositories`, NOT `owner/repo`. The owner is fixed
+    /// by the installation. Regression guard for the original bug where
+    /// we sent `kfsoftware/temps-landing-new` and GitHub 422'd even though
+    /// the App had access to the repo.
     #[test]
-    fn for_repo_uses_full_name() {
-        let req = ScopedTokenRequest::for_repo_read("acme/web");
-        assert_eq!(req.repositories.as_ref().unwrap()[0], "acme/web");
+    fn for_repo_uses_bare_repo_name() {
+        let req = ScopedTokenRequest::for_repo_read("temps-landing-new");
+        assert_eq!(req.repositories.as_ref().unwrap()[0], "temps-landing-new");
+        assert!(
+            !req.repositories.as_ref().unwrap()[0].contains('/'),
+            "GitHub rejects `owner/repo` form; pass bare repo name only"
+        );
     }
 }

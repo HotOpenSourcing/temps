@@ -21,6 +21,10 @@ pub struct Model {
     pub updated_at: DBDateTime,
     pub description: Option<String>,
     pub tags: String,
+    /// Optional per-schedule wall-clock timeout override (seconds).
+    ///
+    /// `None` means "use the engine default."
+    pub max_runtime_secs: Option<i64>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

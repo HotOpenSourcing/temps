@@ -1508,6 +1508,40 @@ fn build_mongodb_url(
     )
 }
 
+impl MongodbService {
+    /// Build the `MONGODB_*` env vars for a given per-tenant database name.
+    /// Shared between `get_runtime_env_vars` and `preview_runtime_env_vars`.
+    async fn build_runtime_env_vars(&self, db_name: &str) -> Result<HashMap<String, String>> {
+        let config_guard = self.config.read().await;
+        let config = config_guard
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("MongoDB not configured"))?;
+
+        let effective_host = self.get_container_name();
+        let effective_port = MONGODB_INTERNAL_PORT.to_string();
+
+        let mut env_vars = HashMap::new();
+        env_vars.insert("MONGODB_HOST".to_string(), effective_host.clone());
+        env_vars.insert("MONGODB_PORT".to_string(), effective_port.clone());
+        env_vars.insert("MONGODB_DATABASE".to_string(), db_name.to_string());
+        env_vars.insert("MONGODB_USERNAME".to_string(), config.username.clone());
+        env_vars.insert("MONGODB_PASSWORD".to_string(), config.password.clone());
+        env_vars.insert(
+            "MONGODB_URL".to_string(),
+            build_mongodb_url(
+                &config.username,
+                &config.password,
+                &effective_host,
+                &effective_port,
+                db_name,
+                config.replica_set.as_deref(),
+            ),
+        );
+
+        Ok(env_vars)
+    }
+}
+
 #[async_trait]
 impl ExternalService for MongodbService {
     fn get_effective_address(&self, service_config: ServiceConfig) -> Result<(String, String)> {
@@ -2019,35 +2053,18 @@ impl ExternalService for MongodbService {
 
         // Create the database if it doesn't exist
         self.create_database(&db_name).await?;
+        self.build_runtime_env_vars(&db_name).await
+    }
 
-        let config_guard = self.config.read().await;
-        let config = config_guard
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("MongoDB not configured"))?;
-
-        // Always use container name and internal port for container-to-container communication
-        let effective_host = self.get_container_name();
-        let effective_port = MONGODB_INTERNAL_PORT.to_string();
-
-        let mut env_vars = HashMap::new();
-        env_vars.insert("MONGODB_HOST".to_string(), effective_host.clone());
-        env_vars.insert("MONGODB_PORT".to_string(), effective_port.clone());
-        env_vars.insert("MONGODB_DATABASE".to_string(), db_name.clone());
-        env_vars.insert("MONGODB_USERNAME".to_string(), config.username.clone());
-        env_vars.insert("MONGODB_PASSWORD".to_string(), config.password.clone());
-        env_vars.insert(
-            "MONGODB_URL".to_string(),
-            build_mongodb_url(
-                &config.username,
-                &config.password,
-                &effective_host,
-                &effective_port,
-                &db_name,
-                config.replica_set.as_deref(),
-            ),
-        );
-
-        Ok(env_vars)
+    async fn preview_runtime_env_vars(
+        &self,
+        _config: ServiceConfig,
+        project_id: &str,
+        environment: &str,
+    ) -> Result<HashMap<String, String>> {
+        let db_name = format!("{}_{}", project_id, environment);
+        // Preview: skip create_database so the UI doesn't provision DBs.
+        self.build_runtime_env_vars(&db_name).await
     }
 
     fn get_local_address(&self, service_config: ServiceConfig) -> Result<String> {
@@ -2890,9 +2907,29 @@ mod tests {
     /// Test backup and restore of MongoDB to/from S3 using real Docker containers
     /// This test uses MongoDB and MinIO (S3-compatible) containers
     /// Demonstrates the use of test_utils for backup/restore testing
+    ///
+    /// `flavor = "multi_thread"` is required because `MinioTestContainer`'s
+    /// `Drop` impl calls `tokio::task::block_in_place`, which panics on the
+    /// default current-thread runtime.
     #[cfg(feature = "docker-tests")]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_mongodb_backup_and_restore_to_s3() {
+        // Whole-test wall-clock budget. Anything above this is a hang — fail
+        // loudly with a diagnostic instead of stalling the CI runner for 90 min.
+        // See incident: GitHub run 25806816492 (PR #89) burned 90 min on this
+        // test plus the Redis counterpart because something downstream of the
+        // MinIO/Mongo container startup never returned.
+        const TEST_TIMEOUT: Duration = Duration::from_secs(300);
+
+        tokio::time::timeout(TEST_TIMEOUT, run_mongodb_backup_and_restore_to_s3())
+            .await
+            .expect("test_mongodb_backup_and_restore_to_s3 exceeded 300s — likely hung on MinIO/Mongo/S3 wait");
+    }
+
+    /// Body of `test_mongodb_backup_and_restore_to_s3`, extracted so the outer
+    /// test can wrap it in `tokio::time::timeout`.
+    #[cfg(feature = "docker-tests")]
+    async fn run_mongodb_backup_and_restore_to_s3() {
         use super::super::test_utils::{
             create_mock_backup, create_mock_db, create_mock_external_service, MinioTestContainer,
         };

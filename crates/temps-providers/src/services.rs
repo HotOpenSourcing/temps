@@ -911,6 +911,9 @@ impl ExternalServiceManager {
                     ("POSTGRES_DB".to_string(), database),
                     ("POSTGRES_HOST_AUTH_METHOD".to_string(), "md5".to_string()),
                 ]);
+                // archive_mode=off until enable_wal_archiving() flips it on
+                // together with archive_command. See externalsvc/postgres.rs
+                // for the same invariant on the create-container path.
                 let cmd = vec![
                     "postgres".to_string(),
                     "-c".to_string(),
@@ -918,7 +921,7 @@ impl ExternalServiceManager {
                     "-c".to_string(),
                     "wal_level=replica".to_string(),
                     "-c".to_string(),
-                    "archive_mode=on".to_string(),
+                    "archive_mode=off".to_string(),
                     "-c".to_string(),
                     "archive_timeout=60".to_string(),
                 ];
@@ -1113,7 +1116,7 @@ impl ExternalServiceManager {
         slug_param: &str,
     ) -> Result<external_services::Model, ExternalServiceError> {
         let service = external_services::Entity::find()
-            .filter(external_services::Column::Name.eq(slug_param))
+            .filter(external_services::Column::Slug.eq(slug_param))
             .one(self.db.as_ref())
             .await?;
 
@@ -1539,9 +1542,16 @@ impl ExternalServiceManager {
                 reason: format!("Failed to encrypt config: {}", e),
             })?;
 
-        // Update service config in database
+        // Update service config (and optionally name/slug) in database.
+        // `name` was previously accepted by the request but silently dropped;
+        // applying it here keeps the API contract honest.
         let mut service_update: external_services::ActiveModel = service.clone().into();
         service_update.config = Set(Some(encrypted_config));
+        if let Some(new_name) = request.name {
+            let new_slug = Self::generate_slug(&new_name);
+            service_update.name = Set(new_name);
+            service_update.slug = Set(Some(new_slug));
+        }
         service_update.updated_at = Set(Utc::now());
         service_update.update(self.db.as_ref()).await?;
 
@@ -1846,6 +1856,38 @@ impl ExternalServiceManager {
             .ok_or(ExternalServiceError::ServiceNotFound { id: service_id })
     }
 
+    /// Read the Postgres WAL health snapshot from `health_metadata.postgres_wal`.
+    ///
+    /// Returns `Ok(None)` when the service exists but has no snapshot yet
+    /// (e.g., probe hasn't run, or service isn't Postgres). Returns
+    /// `ServiceNotFound` only when the row doesn't exist at all.
+    pub async fn get_postgres_wal_health(
+        &self,
+        service_id: i32,
+    ) -> Result<
+        Option<crate::externalsvc::postgres_wal_health::PostgresWalHealth>,
+        ExternalServiceError,
+    > {
+        let service = self.get_service(service_id).await?;
+        let Some(metadata) = service.health_metadata else {
+            return Ok(None);
+        };
+        let Some(snapshot) = metadata.get("postgres_wal") else {
+            return Ok(None);
+        };
+        match serde_json::from_value(snapshot.clone()) {
+            Ok(parsed) => Ok(Some(parsed)),
+            Err(e) => {
+                tracing::warn!(
+                    "health_metadata.postgres_wal for service {} did not parse: {}",
+                    service_id,
+                    e
+                );
+                Ok(None)
+            }
+        }
+    }
+
     async fn get_service_info(
         &self,
         service_id: i32,
@@ -1974,7 +2016,14 @@ impl ExternalServiceManager {
         }
         let health = self.cluster_health(service).await;
         if health.monitor_error.is_some() {
-            return Ok(false);
+            // Monitor is unreachable. Fall back to the persisted role label
+            // so we still refuse to delete the node that was last known to
+            // be primary — otherwise the "monitor down" branch turns
+            // `remove_cluster_member` into an unconditional escape hatch
+            // and can silently delete the writable node. The operator
+            // override path is to first manually flip the role column or
+            // run `pg_autoctl perform failover` once the monitor recovers.
+            return Ok(is_role_primary(&member.role));
         }
         Ok(health
             .members
@@ -3994,7 +4043,6 @@ echo "[restore] Pre-seed complete"
     ) -> Result<(), ExternalServiceError> {
         info!("Initializing cluster for service {}", service_id);
         let service = self.get_service(service_id).await?;
-        let parameters = self.get_service_parameters(service_id).await?;
         let service_type = ServiceType::from_str(&service.service_type).map_err(|_| {
             ExternalServiceError::InvalidServiceType {
                 id: service_id,
@@ -4002,6 +4050,10 @@ echo "[restore] Pre-seed complete"
             }
         })?;
 
+        // Topology + role validation happens BEFORE parameter decryption so
+        // bad-input requests fail with the correct error variant (and a
+        // helpful message) instead of a generic "Service has no config".
+        // Older ordering decrypted first and ate the validation error.
         let cluster_instance = self
             .create_cluster_service_instance(service.name.clone(), service_type)
             .ok_or_else(|| ExternalServiceError::InitializationFailed {
@@ -4025,6 +4077,11 @@ echo "[restore] Pre-seed complete"
                 });
             }
         }
+
+        // Parameter decryption only after validation has passed; otherwise
+        // operators creating a cluster with an unsupported type or invalid
+        // role get a misleading "service has no config" surface error.
+        let parameters = self.get_service_parameters(service_id).await?;
 
         // Build member specs with ordinals and hostnames.
         //
@@ -6643,7 +6700,67 @@ echo "[restore] Pre-seed complete"
         service_update.updated_at = Set(Utc::now());
         service_update.update(self.db.as_ref()).await?;
 
+        // Refresh the WAL health snapshot immediately for Postgres services.
+        // The reconcile-on-start path may have recreated the container with a
+        // different archive_mode; without this refresh, the UI would keep
+        // showing the pre-recreate snapshot for up to one health-monitor
+        // cycle (~30s). Failure is non-fatal — the background monitor will
+        // converge on its own.
+        if service_type_enum == ServiceType::Postgres {
+            if let Err(e) = self.refresh_postgres_wal_health(service_id).await {
+                tracing::debug!(
+                    "Failed to refresh WAL health snapshot for service {} after start: {} (non-fatal)",
+                    service_id,
+                    e
+                );
+            }
+        }
+
         self.get_service_info(service_id).await
+    }
+
+    /// Wipe `health_metadata.postgres_wal` then immediately run the WAL probe
+    /// and persist the fresh snapshot. Called from `start_service` after a
+    /// Postgres recreate so the UI doesn't show pre-recreate data while the
+    /// background monitor catches up.
+    async fn refresh_postgres_wal_health(
+        &self,
+        service_id: i32,
+    ) -> Result<(), ExternalServiceError> {
+        use crate::externalsvc::postgres_wal_health;
+
+        // Reload the service row (status is now 'running'); skip if it isn't
+        // actually a standalone Postgres service.
+        let service = self.get_service(service_id).await?;
+        if service.service_type != "postgres" || service.topology != "standalone" {
+            return Ok(());
+        }
+
+        // Clear the stale snapshot first. Even if the probe below fails, the
+        // UI will see "no snapshot yet" rather than wrong data.
+        let cleared = clear_health_metadata_key(service.health_metadata.as_ref(), "postgres_wal");
+        let mut active: external_services::ActiveModel = service.clone().into();
+        active.health_metadata = Set(cleared);
+        active.update(self.db.as_ref()).await?;
+
+        // Probe fresh against the new container. Best-effort.
+        let service_config = self.get_service_config(service_id).await?;
+        let Some(conn_str) = postgres_wal_health::build_conn_str(&service_config.parameters) else {
+            return Ok(());
+        };
+        let Some(snapshot) = postgres_wal_health::probe_wal_health(&conn_str).await else {
+            return Ok(());
+        };
+
+        // Reload again, merge the fresh snapshot under postgres_wal.
+        let service = self.get_service(service_id).await?;
+        let merged =
+            merge_health_metadata_key(service.health_metadata.as_ref(), "postgres_wal", &snapshot);
+        let mut active: external_services::ActiveModel = service.into();
+        active.health_metadata = Set(Some(merged));
+        active.update(self.db.as_ref()).await?;
+
+        Ok(())
     }
 
     pub async fn stop_service(
@@ -7354,6 +7471,122 @@ echo "[restore] Pre-seed complete"
         }
 
         Ok(result)
+    }
+
+    /// Preview the env vars a deployment in `environment_id` would receive
+    /// from every service linked to `project_id`. Side-effect-free: skips
+    /// `CREATE DATABASE` / bucket creation that the real runtime path
+    /// performs. Used by the resolved env vars UI so users can switch
+    /// between environments and see the actual `<project>_<env>` values.
+    pub async fn preview_project_service_environment_variables(
+        &self,
+        project_id_val: i32,
+        environment_id: i32,
+    ) -> Result<HashMap<i32, HashMap<String, String>>, ExternalServiceError> {
+        let project = projects::Entity::find_by_id(project_id_val)
+            .one(self.db.as_ref())
+            .await?
+            .ok_or(ExternalServiceError::ProjectNotFound { id: project_id_val })?;
+        let environment = temps_entities::environments::Entity::find_by_id(environment_id)
+            .one(self.db.as_ref())
+            .await?
+            .ok_or_else(|| ExternalServiceError::InternalError {
+                reason: format!("Environment {} not found", environment_id),
+            })?;
+
+        let linked_services = project_services::Entity::find()
+            .filter(project_services::Column::ProjectId.eq(project_id_val))
+            .all(self.db.as_ref())
+            .await?;
+
+        let mut result = HashMap::new();
+        for linked in linked_services {
+            match self
+                .preview_service_environment_variables(
+                    linked.service_id,
+                    &project.slug,
+                    &environment.slug,
+                )
+                .await
+            {
+                Ok(env_vars) => {
+                    result.insert(linked.service_id, env_vars);
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to preview environment variables for service {}: {}",
+                        linked.service_id, e
+                    );
+                    continue;
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Side-effect-free per-service env var preview. Mirrors
+    /// `get_service_environment_variables` but calls
+    /// `preview_runtime_env_vars` on the service instance so no databases
+    /// or buckets get provisioned. Cluster services fall back to their
+    /// regular env var path because `build_cluster_env_vars` reads from
+    /// `service_members` and doesn't provision anything.
+    async fn preview_service_environment_variables(
+        &self,
+        service_id_val: i32,
+        project_slug: &str,
+        environment_slug: &str,
+    ) -> Result<HashMap<String, String>, ExternalServiceError> {
+        let service = self.get_service(service_id_val).await?;
+        let service_type = ServiceType::from_str(&service.service_type).map_err(|_| {
+            ExternalServiceError::InvalidServiceType {
+                id: service_id_val,
+                service_type: service.service_type.clone(),
+            }
+        })?;
+        let parameters = self.get_service_parameters(service_id_val).await?;
+
+        let resource_name = crate::externalsvc::postgres::PostgresService::normalize_database_name(
+            &format!("{}_{}", project_slug, environment_slug),
+        );
+
+        if service.topology == "cluster" && service.service_type == "postgres" {
+            if let Some(cluster_vars) = self
+                .build_cluster_env_vars_for_resource(&service, &parameters, Some(&resource_name))
+                .await?
+            {
+                return Ok(cluster_vars);
+            }
+        }
+        if let Some(cluster_vars) = self.build_cluster_env_vars(&service, &parameters).await? {
+            return Ok(cluster_vars);
+        }
+
+        let service_instance = self.create_service_instance(service.name.clone(), service_type);
+        let service_config = ServiceConfig {
+            name: service.name.clone(),
+            service_type,
+            version: service.version,
+            parameters: serde_json::to_value(&parameters).map_err(|e| {
+                ExternalServiceError::InternalError {
+                    reason: format!("Failed to serialize parameters: {}", e),
+                }
+            })?,
+        };
+
+        service_instance
+            .init(service_config.clone())
+            .await
+            .map_err(|e| ExternalServiceError::InternalError {
+                reason: format!("Failed to initialize service: {}", e),
+            })?;
+
+        service_instance
+            .preview_runtime_env_vars(service_config, project_slug, environment_slug)
+            .await
+            .map_err(|e| ExternalServiceError::InternalError {
+                reason: format!("Failed to preview runtime environment variables: {}", e),
+            })
     }
 
     pub async fn get_service_type_schema(
@@ -8112,25 +8345,34 @@ echo "[restore] Pre-seed complete"
         &self,
         service_id: i32,
     ) -> Result<ServiceStatsReport, ExternalServiceError> {
-        use futures::StreamExt;
-
+        // Stream consumption + sampling now lives in
+        // `sample_container_stats_twice`. This caller just iterates
+        // containers and projects the result.
         let service = self.get_service(service_id).await?;
         let containers = self.resolve_member_containers(&service).await?;
 
         let mut members = Vec::with_capacity(containers.len());
         for (role, name) in containers {
-            let opts = bollard::query_parameters::StatsOptionsBuilder::default()
-                .stream(false)
-                .one_shot(true)
-                .build();
-            let mut stream = self.docker.stats(&name, Some(opts));
-            let sample = match stream.next().await {
-                Some(Ok(s)) => Some(s),
-                Some(Err(_)) | None => None,
-            };
-
-            let stats = match sample {
-                Some(s) => compute_stats_sample(role.clone(), name.clone(), s),
+            // Docker's `one_shot` stats response carries `precpu_stats` as
+            // zeros — the CPU formula needs deltas, so a single one_shot
+            // sample produces either 0% or the "cumulative since container
+            // start" ratio (which was the pre-fix bug: a container at
+            // 108% real load read back as 0.6% because total/system over
+            // the container's full lifetime is dominated by idle history).
+            //
+            // Take two one_shot samples 1s apart and compute the delta
+            // ourselves. Matches `docker stats` exactly. The 1s window is
+            // the same default the Docker CLI uses for its "default"
+            // streaming interval.
+            let stats = match sample_container_stats_twice(&self.docker, &name).await {
+                Some((first, second)) => {
+                    // `first` is the earlier sample, `second` is the later one.
+                    // `compute_stats_sample` wants (current=later, previous=earlier)
+                    // so the delta is positive — passing them reversed makes
+                    // `cpu_delta` negative and CPU reads back as `None` (the UI
+                    // shows "—" while memory still works from `current`).
+                    compute_stats_sample(role.clone(), name.clone(), &second, Some(&first))
+                }
                 None => ContainerStatsSample {
                     role,
                     container_name: name,
@@ -8414,34 +8656,173 @@ fn build_container_update_body(
     }
 }
 
-/// Bollard's stats response is full of `Option<u64>`s. This helper
-/// projects the fields we care about onto `ContainerStatsSample`,
-/// returning `None` for any value where the upstream is missing.
+/// Sample the same container twice ~1s apart so we have a delta window for
+/// the CPU formula. Returns `None` on any error or if Docker returns no
+/// frames (container missing / stopped). The 1-second pause matches the
+/// Docker CLI's default sampling interval.
+async fn sample_container_stats_twice(
+    docker: &bollard::Docker,
+    name: &str,
+) -> Option<(
+    bollard::models::ContainerStatsResponse,
+    bollard::models::ContainerStatsResponse,
+)> {
+    use futures::StreamExt;
+
+    let opts = bollard::query_parameters::StatsOptionsBuilder::default()
+        .stream(false)
+        .one_shot(true)
+        .build();
+
+    let mut first_stream = docker.stats(name, Some(opts.clone()));
+    let first = first_stream.next().await?.ok()?;
+    drop(first_stream);
+
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+    let mut second_stream = docker.stats(name, Some(opts));
+    let second = second_stream.next().await?.ok()?;
+
+    Some((first, second))
+}
+
+/// Compute the docker-CLI-equivalent CPU percent from two consecutive
+/// stats samples. Returns `None` when either sample is missing the
+/// counters we need, the deltas are zero/negative (container just
+/// started / stopped), or the result isn't finite.
+///
+/// Formula (matches `docker stats`):
+/// ```
+/// Remove a single key from an `external_services.health_metadata` JSONB
+/// blob. Returns `None` when the result would be an empty object (so the
+/// column goes back to NULL instead of `{}`).
+fn clear_health_metadata_key(
+    existing: Option<&sea_orm::JsonValue>,
+    key: &str,
+) -> Option<sea_orm::JsonValue> {
+    let map = match existing {
+        Some(serde_json::Value::Object(m)) => m,
+        _ => return None,
+    };
+    let mut next = map.clone();
+    next.remove(key);
+    if next.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(next))
+    }
+}
+
+/// Merge a single typed snapshot under `key` into an
+/// `external_services.health_metadata` JSONB blob, preserving sibling keys.
+fn merge_health_metadata_key<T: serde::Serialize>(
+    existing: Option<&sea_orm::JsonValue>,
+    key: &str,
+    snapshot: &T,
+) -> sea_orm::JsonValue {
+    let value = serde_json::to_value(snapshot).unwrap_or(serde_json::Value::Null);
+    let mut map = match existing {
+        Some(serde_json::Value::Object(m)) => m.clone(),
+        _ => serde_json::Map::new(),
+    };
+    map.insert(key.to_string(), value);
+    serde_json::Value::Object(map)
+}
+
+/// cpu_delta    = current.total_usage     - previous.total_usage
+/// system_delta = current.system_cpu_usage - previous.system_cpu_usage
+/// percent      = (cpu_delta / system_delta) * online_cpus * 100
+/// ```
+fn cpu_percent_from_delta(
+    current: &bollard::models::ContainerCpuStats,
+    previous: &bollard::models::ContainerCpuStats,
+) -> Option<f64> {
+    let cur_total = current.cpu_usage.as_ref()?.total_usage? as i128;
+    let prev_total = previous.cpu_usage.as_ref()?.total_usage? as i128;
+    let cur_system = current.system_cpu_usage? as i128;
+    let prev_system = previous.system_cpu_usage? as i128;
+
+    let cpu_delta = cur_total - prev_total;
+    let system_delta = cur_system - prev_system;
+
+    // The system delta is the increment of CPU time available across ALL
+    // cores; multiplying by online_cpus rescales the ratio so a fully
+    // pinned 4-core container reads as 400%, not 100%.
+    let cpus = current.online_cpus.unwrap_or(1).max(1) as f64;
+
+    // `system_delta <= 0` means we have no elapsed wall-clock CPU time to
+    // divide against — either Docker returned identical samples (just
+    // started, missing counters) or the counter wrapped. Either way we
+    // can't compute a meaningful percent.
+    if system_delta <= 0 {
+        return None;
+    }
+
+    // `cpu_delta < 0` indicates a counter reset (container restart between
+    // samples). `cpu_delta == 0` is the legitimate idle case — the
+    // container did zero CPU work during the sample window. Report 0.0%
+    // explicitly rather than `None`, otherwise idle services render as
+    // "—" in the UI and look like a sampling bug.
+    if cpu_delta < 0 {
+        return None;
+    }
+
+    let percent = (cpu_delta as f64 / system_delta as f64) * cpus * 100.0;
+    if percent.is_finite() && percent >= 0.0 {
+        Some(percent)
+    } else {
+        None
+    }
+}
+
+/// Subtract page cache from raw memory usage so the number matches
+/// `docker stats`'s "MEM USAGE" column.
+///
+/// Docker reports `usage` straight from cgroups, which includes page
+/// cache. A Postgres container with an 8 GB working set + 8 GB of file
+/// cache reads back as `usage == limit` on a 16 GB cap, even though only
+/// half is real RSS. The Docker CLI compensates by subtracting:
+/// - cgroup v1: `stats.cache`
+/// - cgroup v2: `stats.inactive_file`
+///
+/// We try cgroup v2 first (modern hosts), fall back to v1. If neither
+/// key is present, return the raw usage unchanged — better to slightly
+/// over-report than to crash on a missing field.
+fn memory_usage_excluding_cache(mem: &bollard::models::ContainerMemoryStats) -> Option<u64> {
+    let raw_usage = mem.usage?;
+    let cache = mem.stats.as_ref().and_then(|s| {
+        // cgroup v2 uses `inactive_file`; older v1 hosts use `cache`.
+        // Prefer v2; fall back to v1. Some hosts report both, in which
+        // case `inactive_file` is the better signal (matches docker
+        // CLI exactly).
+        s.get("inactive_file").or_else(|| s.get("cache")).copied()
+    });
+    match cache {
+        Some(c) if c <= raw_usage => Some(raw_usage - c),
+        _ => Some(raw_usage),
+    }
+}
+
+/// Project two consecutive stats responses onto `ContainerStatsSample`.
+/// `previous` is `None` when only a single sample is available — in that
+/// case CPU is reported as `None` since the delta formula needs two
+/// samples; memory is still computed from the latest sample.
 fn compute_stats_sample(
     role: String,
     container_name: String,
-    s: bollard::models::ContainerStatsResponse,
+    current: &bollard::models::ContainerStatsResponse,
+    previous: Option<&bollard::models::ContainerStatsResponse>,
 ) -> ContainerStatsSample {
-    let cpu_stats = s.cpu_stats.as_ref();
-    let online_cpus = cpu_stats.and_then(|c| c.online_cpus);
-    let cpu_percent = cpu_stats.and_then(|c| {
-        let cpu_usage = c.cpu_usage.as_ref()?;
-        let total = cpu_usage.total_usage? as f64;
-        let system = c.system_cpu_usage? as f64;
-        // Docker's reference formula. Negative deltas can happen on
-        // stopped containers; clamp to zero so we never surface a
-        // misleading negative percent.
-        let cpus = c.online_cpus.unwrap_or(1).max(1) as f64;
-        let percent = (total / system) * cpus * 100.0;
-        if percent.is_finite() && percent >= 0.0 {
-            Some(percent)
-        } else {
-            None
-        }
-    });
+    let cur_cpu = current.cpu_stats.as_ref();
+    let online_cpus = cur_cpu.and_then(|c| c.online_cpus);
 
-    let mem_stats = s.memory_stats.as_ref();
-    let memory_usage_bytes = mem_stats.and_then(|m| m.usage);
+    let cpu_percent = match (cur_cpu, previous.and_then(|p| p.cpu_stats.as_ref())) {
+        (Some(c), Some(p)) => cpu_percent_from_delta(c, p),
+        _ => None,
+    };
+
+    let mem_stats = current.memory_stats.as_ref();
+    let memory_usage_bytes = mem_stats.and_then(memory_usage_excluding_cache);
     let memory_limit_bytes = mem_stats.and_then(|m| m.limit);
     let memory_percent = match (memory_usage_bytes, memory_limit_bytes) {
         (Some(usage), Some(limit)) if limit > 0 => Some((usage as f64 / limit as f64) * 100.0),
@@ -8495,6 +8876,240 @@ fn rewrite_env_vars_for_cross_node(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Container stats helpers ──────────────────────────────────────────────
+
+    fn cpu_stats_at(
+        total: u64,
+        system: u64,
+        online_cpus: u32,
+    ) -> bollard::models::ContainerCpuStats {
+        bollard::models::ContainerCpuStats {
+            cpu_usage: Some(bollard::models::ContainerCpuUsage {
+                total_usage: Some(total),
+                ..Default::default()
+            }),
+            system_cpu_usage: Some(system),
+            online_cpus: Some(online_cpus),
+            ..Default::default()
+        }
+    }
+
+    /// 50% on a 2-CPU host: cpu_delta = 1e9 (1 second of CPU time at the
+    /// nanosecond resolution Docker reports), system_delta = 4e9 (the
+    /// host's "system CPU" counter advances at `wall_ticks * cpus`).
+    /// (cpu_delta / system_delta) * online_cpus = 0.25 * 2 = 0.5 = 50%.
+    /// Matches docker stats output for a container at half utilization
+    /// on 2 cores.
+    #[test]
+    fn cpu_percent_delta_50pct_two_cpus() {
+        let prev = cpu_stats_at(0, 0, 2);
+        let curr = cpu_stats_at(1_000_000_000, 4_000_000_000, 2);
+        let pct = cpu_percent_from_delta(&curr, &prev).unwrap();
+        assert!((pct - 50.0).abs() < 0.01, "expected ~50%, got {pct}");
+    }
+
+    /// A container fully saturating both of its 2 CPUs reads as 200%
+    /// (matches docker stats display for multi-core saturation).
+    #[test]
+    fn cpu_percent_delta_fully_pinned_two_cpus_reads_200pct() {
+        let prev = cpu_stats_at(0, 0, 2);
+        // cpu_delta == system_delta means the container used every
+        // available CPU-second the system gave it across all cores.
+        let curr = cpu_stats_at(2_000_000_000, 2_000_000_000, 2);
+        let pct = cpu_percent_from_delta(&curr, &prev).unwrap();
+        assert!((pct - 200.0).abs() < 0.01, "expected ~200%, got {pct}");
+    }
+
+    /// Zero/negative deltas (container just started, stopped, or clock
+    /// went backwards) must report `None` instead of NaN/Inf/negative.
+    /// The pre-fix code returned a misleading "cumulative since boot"
+    /// ratio here — usually ~0% for any long-running container.
+    #[test]
+    fn cpu_percent_delta_zero_returns_none() {
+        let prev = cpu_stats_at(5_000_000_000, 10_000_000_000, 4);
+        let same = cpu_stats_at(5_000_000_000, 10_000_000_000, 4);
+        assert!(cpu_percent_from_delta(&same, &prev).is_none());
+    }
+
+    /// Idle running container: zero cpu_delta but positive system_delta
+    /// (the host's wall clock kept ticking, the container did no work).
+    /// Must report 0.0% — returning None here is what caused idle
+    /// services to render as "—" in the UI instead of "0.0%".
+    #[test]
+    fn cpu_percent_delta_idle_container_reads_zero() {
+        let prev = cpu_stats_at(5_000_000_000, 10_000_000_000, 4);
+        // Same cpu_total, advanced system_total by 4s on 4 cores.
+        let curr = cpu_stats_at(5_000_000_000, 14_000_000_000, 4);
+        let pct = cpu_percent_from_delta(&curr, &prev).unwrap();
+        assert_eq!(pct, 0.0, "idle container must read 0.0%, got {pct}");
+    }
+
+    /// A backwards cpu_delta (counter reset / container restart between
+    /// samples) is still `None` — we can't compute a meaningful percent
+    /// across a restart.
+    #[test]
+    fn cpu_percent_delta_negative_cpu_returns_none() {
+        let prev = cpu_stats_at(10_000_000_000, 50_000_000_000, 4);
+        let curr = cpu_stats_at(1_000_000_000, 54_000_000_000, 4);
+        assert!(cpu_percent_from_delta(&curr, &prev).is_none());
+    }
+
+    #[test]
+    fn cpu_percent_delta_missing_counters_returns_none() {
+        let prev = bollard::models::ContainerCpuStats {
+            cpu_usage: None,
+            system_cpu_usage: Some(0),
+            online_cpus: Some(1),
+            ..Default::default()
+        };
+        let curr = cpu_stats_at(1_000_000_000, 1_000_000_000, 1);
+        assert!(cpu_percent_from_delta(&curr, &prev).is_none());
+    }
+
+    fn mem_stats(
+        usage: u64,
+        limit: u64,
+        cache: Option<(&'static str, u64)>,
+    ) -> bollard::models::ContainerMemoryStats {
+        let mut stats_map = std::collections::HashMap::new();
+        if let Some((key, val)) = cache {
+            stats_map.insert(key.to_string(), val);
+        }
+        bollard::models::ContainerMemoryStats {
+            usage: Some(usage),
+            limit: Some(limit),
+            stats: if cache.is_some() {
+                Some(stats_map)
+            } else {
+                None
+            },
+            ..Default::default()
+        }
+    }
+
+    /// cgroup v2 `inactive_file` is preferred over the v1 `cache` key.
+    /// A Postgres container with 8 GB working set + 8 GB page cache on a
+    /// 16 GB limit must read as 8 GB usage (matching docker stats), not
+    /// 16 GB / 16 GB which was the pre-fix bug.
+    #[test]
+    fn memory_usage_subtracts_inactive_file_cgroup_v2() {
+        let mem = mem_stats(
+            16 * 1024 * 1024 * 1024, // 16 GB raw usage
+            16 * 1024 * 1024 * 1024, // 16 GB limit
+            Some(("inactive_file", 8 * 1024 * 1024 * 1024)),
+        );
+        let usage = memory_usage_excluding_cache(&mem).unwrap();
+        assert_eq!(usage, 8 * 1024 * 1024 * 1024);
+    }
+
+    /// cgroup v1 hosts surface the cache as `cache`. Subtract it.
+    #[test]
+    fn memory_usage_subtracts_cache_cgroup_v1() {
+        let mem = mem_stats(
+            10 * 1024 * 1024 * 1024,
+            16 * 1024 * 1024 * 1024,
+            Some(("cache", 3 * 1024 * 1024 * 1024)),
+        );
+        let usage = memory_usage_excluding_cache(&mem).unwrap();
+        assert_eq!(usage, 7 * 1024 * 1024 * 1024);
+    }
+
+    /// When both keys are present (some hosts report both), prefer
+    /// `inactive_file` — that's what the Docker CLI does and it's the
+    /// more accurate signal on cgroup v2.
+    #[test]
+    fn memory_usage_prefers_inactive_file_over_cache_when_both_present() {
+        let mut stats_map = std::collections::HashMap::new();
+        stats_map.insert("inactive_file".to_string(), 4 * 1024 * 1024 * 1024);
+        stats_map.insert("cache".to_string(), 6 * 1024 * 1024 * 1024);
+        let mem = bollard::models::ContainerMemoryStats {
+            usage: Some(10 * 1024 * 1024 * 1024),
+            limit: Some(16 * 1024 * 1024 * 1024),
+            stats: Some(stats_map),
+            ..Default::default()
+        };
+        // 10 GB - 4 GB inactive_file = 6 GB. If the helper preferred
+        // `cache` we'd see 4 GB.
+        let expected: u64 = 6 * 1024 * 1024 * 1024;
+        assert_eq!(memory_usage_excluding_cache(&mem).unwrap(), expected);
+    }
+
+    /// Without cache info, return raw usage rather than crashing.
+    #[test]
+    fn memory_usage_returns_raw_when_no_cache_info() {
+        let mem = mem_stats(5 * 1024 * 1024 * 1024, 16 * 1024 * 1024 * 1024, None);
+        assert_eq!(
+            memory_usage_excluding_cache(&mem).unwrap(),
+            5u64 * 1024 * 1024 * 1024
+        );
+    }
+
+    /// Defensive: if `cache` is somehow larger than `usage` (sentinel
+    /// values, stat skew), don't underflow — return raw usage.
+    #[test]
+    fn memory_usage_handles_cache_larger_than_usage() {
+        let mem = mem_stats(
+            1024 * 1024,
+            16 * 1024 * 1024 * 1024,
+            Some(("cache", 10 * 1024 * 1024 * 1024)),
+        );
+        // cache > usage → fall through to raw usage rather than wrap.
+        assert_eq!(memory_usage_excluding_cache(&mem).unwrap(), 1024 * 1024);
+    }
+
+    fn stats_response_at(
+        total: u64,
+        system: u64,
+        online_cpus: u32,
+    ) -> bollard::models::ContainerStatsResponse {
+        bollard::models::ContainerStatsResponse {
+            cpu_stats: Some(bollard::models::ContainerCpuStats {
+                cpu_usage: Some(bollard::models::ContainerCpuUsage {
+                    total_usage: Some(total),
+                    ..Default::default()
+                }),
+                system_cpu_usage: Some(system),
+                online_cpus: Some(online_cpus),
+                ..Default::default()
+            }),
+            memory_stats: Some(mem_stats(
+                100 * 1024 * 1024,
+                1024 * 1024 * 1024,
+                Some(("inactive_file", 10 * 1024 * 1024)),
+            )),
+            ..Default::default()
+        }
+    }
+
+    /// Regression: `compute_stats_sample(current=later, previous=earlier)` is
+    /// the correct argument order. The earlier production bug had the call
+    /// site swapped, which made `cpu_delta` negative and read back as `None`
+    /// — UI showed "—" for CPU while memory still rendered (it doesn't need
+    /// the delta).
+    #[test]
+    fn compute_stats_sample_correct_argument_order_reports_positive_cpu() {
+        let earlier = stats_response_at(0, 0, 2);
+        let later = stats_response_at(1_000_000_000, 4_000_000_000, 2);
+
+        let sample = compute_stats_sample("primary".into(), "test".into(), &later, Some(&earlier));
+        assert_eq!(sample.cpu_percent, Some(50.0));
+        assert_eq!(sample.online_cpus, Some(2));
+    }
+
+    /// Reversed args (the pre-fix bug shape) produce `None`, not garbage.
+    /// Documenting this so the kill-switch is obvious if someone reintroduces
+    /// the swap.
+    #[test]
+    fn compute_stats_sample_swapped_arguments_reads_none() {
+        let earlier = stats_response_at(0, 0, 2);
+        let later = stats_response_at(1_000_000_000, 4_000_000_000, 2);
+
+        let sample = compute_stats_sample("primary".into(), "test".into(), &earlier, Some(&later));
+        assert_eq!(sample.cpu_percent, None);
+    }
+
+    // ── End container stats helpers ──────────────────────────────────────────
 
     #[cfg(feature = "docker-tests")]
     use bollard::Docker;
@@ -8667,8 +9282,22 @@ mod tests {
     async fn test_stop_and_start_service() {
         let (manager, _test_db) = setup_test_manager().await;
         let random_unused_port = get_unused_port();
-        // Create a service first
+        // Create a service first. Postgres requires database/username/password
+        // at the parameter-validation layer (parameter_strategies), so they
+        // must be present even when the test only cares about lifecycle.
         let mut params = HashMap::new();
+        params.insert(
+            "database".to_string(),
+            JsonValue::String("testdb".to_string()),
+        );
+        params.insert(
+            "username".to_string(),
+            JsonValue::String("testuser".to_string()),
+        );
+        params.insert(
+            "password".to_string(),
+            JsonValue::String("testpass".to_string()),
+        );
         params.insert(
             "port".to_string(),
             JsonValue::String(random_unused_port.to_string()),
@@ -8776,30 +9405,33 @@ mod tests {
         let service = manager.create_service(request).await.unwrap();
         let service_id = service.id;
 
-        // Update service parameters
-        let mut new_params = HashMap::new();
-        new_params.insert(
-            "database".to_string(),
-            JsonValue::String("updated_db".to_string()),
-        );
-        new_params.insert(
-            "username".to_string(),
-            JsonValue::String("updated_user".to_string()),
-        );
-        new_params.insert(
-            "password".to_string(),
-            JsonValue::String("updated_pass".to_string()),
-        );
-
+        // Update only updateable fields — Postgres marks `database`,
+        // `username`, `password`, and `host` as readonly (see
+        // parameter_strategies.rs), so the request must not touch them or
+        // the strategy rejects the whole update with a validation error.
+        // The test asserts the rename + docker_image path works.
         let update_request = UpdateExternalServiceRequest {
             name: Some("test-update-renamed".to_string()),
-            parameters: new_params,
-            docker_image: None,
+            parameters: HashMap::new(),
+            docker_image: Some("gotempsh/postgres-walg:18-bookworm".to_string()),
         };
 
         let updated_service = manager.update_service(service_id, update_request).await;
-        assert!(updated_service.is_ok());
-        assert_eq!(updated_service.unwrap().name, "test-update-renamed");
+        assert!(
+            updated_service.is_ok(),
+            "update_service failed: {:?}",
+            updated_service.err()
+        );
+        let updated = updated_service.unwrap();
+        assert_eq!(updated.name, "test-update-renamed");
+
+        // Sensitive readonly fields must NOT have been mutated.
+        let params_after = manager.get_service_parameters(service_id).await.unwrap();
+        assert_eq!(
+            params_after.get("database").and_then(|v| v.as_str()),
+            Some("original_db"),
+            "readonly `database` must be preserved across update"
+        );
 
         // Cleanup
         let _ = manager.delete_service(service_id).await;
@@ -8844,15 +9476,29 @@ mod tests {
     async fn test_get_service_by_slug() {
         let (manager, _test_db) = setup_test_manager().await;
 
-        // Create a service with a name that will be slugified
+        // Use a name that slugifies to something different (uppercase + hyphens)
+        // but still produces a Docker-compatible resource name. Whitespace in
+        // the name was previously tested here, but `*Service::new` interpolates
+        // the raw name into Docker volume/container names, which forbid
+        // whitespace — so the create call would explode before this test
+        // could even reach the slug lookup. Picking a Docker-safe name that
+        // still differs from its slug keeps slugification under test without
+        // colliding with Docker's resource-name regex.
         let mut params = HashMap::new();
         params.insert(
             "password".to_string(),
             JsonValue::String("test".to_string()),
         );
 
+        let raw_name = "Service-By-Slug-Test";
+        let expected_slug = ExternalServiceManager::generate_slug(raw_name);
+        assert_ne!(
+            raw_name, expected_slug,
+            "test relies on raw name differing from slug to prove the lookup uses the slug column"
+        );
+
         let request = CreateExternalServiceRequest {
-            name: "Service With Spaces".to_string(),
+            name: raw_name.to_string(),
             service_type: ServiceType::Redis,
             version: None,
             parameters: params,
@@ -8864,10 +9510,21 @@ mod tests {
         let service = manager.create_service(request).await.unwrap();
         let service_id = service.id;
 
-        // Get service by slug
-        let found_service = manager.get_service_by_slug("Service With Spaces").await;
-        assert!(found_service.is_ok());
-        assert_eq!(found_service.unwrap().id, service.id);
+        // Lookup must succeed by slug, not raw name.
+        let found_service = manager
+            .get_service_by_slug(&expected_slug)
+            .await
+            .expect("lookup by slug should succeed");
+        assert_eq!(found_service.id, service.id);
+
+        // Lookup by the raw name through the slug endpoint must NOT succeed —
+        // that would mean we're filtering by name instead of slug (the bug
+        // this test exists to guard against).
+        let by_name_through_slug = manager.get_service_by_slug(raw_name).await;
+        assert!(
+            by_name_through_slug.is_err(),
+            "get_service_by_slug must filter on the slug column, not name"
+        );
 
         // Cleanup
         let _ = manager.delete_service(service_id).await;

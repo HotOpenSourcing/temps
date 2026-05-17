@@ -12,6 +12,8 @@ export function Backups() {
 
   usePageTitle('Backups')
 
+  // Backup alerts are surfaced globally via the header's `BackupAlertsButton`
+  // so operators see overdue schedules / stalled jobs from any page.
   return (
     <div className="flex-1 overflow-auto">
       <S3SourcesManagement />

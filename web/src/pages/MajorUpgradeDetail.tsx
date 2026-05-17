@@ -98,7 +98,7 @@ export function MajorUpgradeDetail() {
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: 'Storage', href: '/storage' },
+      { label: 'Databases', href: '/storage' },
       { label: `Service ${id}`, href: `/storage/${id}` },
       { label: `Upgrade #${upgradeId}` },
     ])

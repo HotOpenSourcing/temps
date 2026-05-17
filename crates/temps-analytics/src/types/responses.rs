@@ -990,3 +990,32 @@ pub struct PageFlowResponse {
     /// Total sessions in the period
     pub total_sessions: i64,
 }
+
+/// A single facet value with its visitor count. Used to populate filter
+/// dropdowns on the visitors page (e.g. "Germany — 1,234 visitors").
+#[derive(Debug, Serialize, ToSchema)]
+pub struct VisitorFacetValue {
+    /// The dimension value (e.g. "United States", "Chrome", "google.com").
+    /// `None` is encoded as the literal string "Direct" for referrer and as
+    /// the empty string for the rest.
+    pub value: String,
+    /// Optional secondary code for the value. Currently only populated for
+    /// the `country` facet, where it carries the 2-letter ISO country code
+    /// so the UI can render a flag without re-mapping.
+    pub code: Option<String>,
+    /// Distinct visitor count matching this value in the current segment.
+    pub count: i64,
+}
+
+/// All filter dropdown contents in one response. Each list is the top N
+/// values for that dimension within the current date range and segment
+/// (excluding the dimension being queried so the dropdown still shows
+/// alternatives when a value is already selected).
+#[derive(Debug, Serialize, ToSchema, Default)]
+pub struct VisitorFacets {
+    pub country: Vec<VisitorFacetValue>,
+    pub region: Vec<VisitorFacetValue>,
+    pub city: Vec<VisitorFacetValue>,
+    pub channel: Vec<VisitorFacetValue>,
+    pub referrer: Vec<VisitorFacetValue>,
+}

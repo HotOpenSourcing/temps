@@ -6,6 +6,16 @@ import {
   listUsersOptions,
 } from '@/api/client/@tanstack/react-query.gen'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -16,24 +26,43 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import { CopyButton } from '@/components/ui/copy-button'
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
 import { TimeAgo } from '@/components/utils/TimeAgo'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { usePageTitle } from '@/hooks/usePageTitle'
+import { listBackupChildrenOptions } from '@/lib/backup-children'
+import { cancelBackup } from '@/lib/schedule-runs'
 import { cn, formatBytes } from '@/lib/utils'
-import { useQuery } from '@tanstack/react-query'
-import { format } from 'date-fns'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { format, formatDistanceToNow } from 'date-fns'
 import {
   AlertCircle,
   ArrowLeft,
+  Ban,
   CheckCircle2,
   Clock,
+  Database,
   FileArchive,
   HardDrive,
   Loader2,
   XCircle,
 } from 'lucide-react'
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
+import { toast } from 'sonner'
 
 type BackupState = 'completed' | 'failed' | 'running' | (string & {})
 
@@ -49,6 +78,16 @@ function formatDuration(ms: number): string {
   const hours = Math.floor(minutes / 60)
   const remMinutes = minutes % 60
   return remMinutes ? `${hours}h ${remMinutes}m` : `${hours}h`
+}
+
+/** Format a wall-clock timeout from seconds into a human-readable string. */
+function formatTimeoutSecs(secs: number): string {
+  if (secs <= 0) return '—'
+  const hours = Math.floor(secs / 3600)
+  const minutes = Math.floor((secs % 3600) / 60)
+  if (hours > 0 && minutes > 0) return `${hours}h ${minutes}m`
+  if (hours > 0) return `${hours}h`
+  return `${minutes}m`
 }
 
 function StatusIcon({ state }: { state: BackupState }) {
@@ -68,7 +107,10 @@ function StatusIcon({ state }: { state: BackupState }) {
 }
 
 function StatusBadge({ state }: { state: BackupState }) {
-  const base = 'gap-1.5 capitalize'
+  // Leading-icon padding per design guidelines: vertical = left padding,
+  // larger right padding for visual balance. Shared across every variant
+  // so all the state pills size identically in the table.
+  const base = 'gap-1.5 py-1 pl-1 pr-2 capitalize font-normal'
   switch (state) {
     case 'completed':
       return (
@@ -84,8 +126,17 @@ function StatusBadge({ state }: { state: BackupState }) {
         </Badge>
       )
     case 'failed':
+      // Muted red — tinted background + outlined border + colored text.
+      // The solid `destructive` variant clashes with the destructive-red
+      // error message that always sits in the next column for failed rows.
       return (
-        <Badge variant="destructive" className={base}>
+        <Badge
+          variant="outline"
+          className={cn(
+            base,
+            'border-destructive/30 bg-destructive/10 text-destructive dark:bg-destructive/20 dark:text-red-300',
+          )}
+        >
           <StatusIcon state={state} />
           Failed
         </Badge>
@@ -105,7 +156,13 @@ function StatusBadge({ state }: { state: BackupState }) {
       )
     default:
       return (
-        <Badge variant="secondary" className={base}>
+        <Badge
+          variant="outline"
+          className={cn(
+            base,
+            'border-muted-foreground/20 bg-muted/50 text-muted-foreground',
+          )}
+        >
           <StatusIcon state={state} />
           {state}
         </Badge>
@@ -125,16 +182,18 @@ function Stat({
   icon: React.ComponentType<{ className?: string }>
 }) {
   return (
-    <div className="flex flex-col gap-1 p-4">
-      <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground uppercase tracking-wide">
-        <Icon className="h-3.5 w-3.5" />
-        {label}
+    <div className="flex flex-col gap-1 p-3 sm:p-4 min-w-0">
+      <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+        <Icon className="h-3.5 w-3.5 shrink-0" />
+        <span className="truncate">{label}</span>
       </div>
-      <div className="text-2xl font-semibold tabular-nums text-foreground">
+      <div className="text-base font-semibold tabular-nums text-foreground sm:text-lg truncate">
         {value}
       </div>
       {sub ? (
-        <div className="text-xs text-muted-foreground tabular-nums">{sub}</div>
+        <div className="text-xs text-muted-foreground tabular-nums truncate">
+          {sub}
+        </div>
       ) : null}
     </div>
   )
@@ -180,6 +239,12 @@ export function BackupDetail() {
       path: { id: backupId! },
     }),
     enabled: !!id && !!backupId,
+    // Poll every 5 s while the backup is running so step transitions are
+    // visible without a manual refresh. Back off to no polling when done.
+    refetchInterval: (query) => {
+      const state = (query.state.data as { state?: string } | undefined)?.state
+      return state === 'running' ? 5_000 : false
+    },
   })
 
   const sourceId = id ? parseInt(id) : undefined
@@ -192,6 +257,21 @@ export function BackupDetail() {
     ...listUsersOptions({ query: { include_deleted: false } }),
   })
 
+  // Fetch child external-service backups using the integer row id once the
+  // parent backup has loaded. The query is a no-op until `backup` is defined.
+  const { data: childrenData } = useQuery({
+    ...listBackupChildrenOptions(backup?.id),
+  })
+  const children = childrenData?.children ?? []
+
+  // `backup.name` is `"Backup <full-uuid>"` which is too long for
+  // breadcrumbs and the tab title. Show the friendlier short form
+  // (`Backup #<first 8 chars>`) instead; the full UUID stays available
+  // in the Details card with a copy button.
+  const shortBackupLabel = backup?.backup_id
+    ? `Backup #${backup.backup_id.slice(0, 8)}`
+    : 'Backup Details'
+
   useEffect(() => {
     setBreadcrumbs([
       { label: 'Backups', href: '/backups' },
@@ -199,11 +279,42 @@ export function BackupDetail() {
         label: source?.name || 'S3 Source',
         href: `/backups/s3-sources/${id}`,
       },
-      { label: backup?.name || 'Backup Details' },
+      { label: shortBackupLabel },
     ])
-  }, [setBreadcrumbs, id, backup?.name, source?.name])
+  }, [setBreadcrumbs, id, shortBackupLabel, source?.name])
 
-  usePageTitle(backup?.name || 'Backup Details')
+  usePageTitle(shortBackupLabel)
+
+  // ── Cancel mutation ─────────────────────────────────────────────────────
+  //
+  // Soft cancel: flips the DB row to `failed` immediately and sets the
+  // in-process cancellation token. The engine notices on the next heartbeat
+  // tick (≤5s) and exits cleanly; rollback reaps any sidecar container.
+  //
+  // Idempotent server-side — cancelling an already-terminal backup returns
+  // `cancelled: 0` which we treat as a friendly "nothing to do" toast.
+  const queryClient = useQueryClient()
+  const [showCancelDialog, setShowCancelDialog] = useState(false)
+
+  const cancelMutation = useMutation({
+    mutationFn: () => cancelBackup(backup!.id),
+    onSuccess: (data) => {
+      toast.success('Backup cancelled', {
+        description:
+          data.cancelled === 0
+            ? 'Backup was already terminal — nothing to cancel.'
+            : 'Engine will stop on the next heartbeat tick (within ~5s).',
+      })
+      void queryClient.invalidateQueries({
+        queryKey: ['getBackup', { path: { id: backupId! } }],
+      })
+      setShowCancelDialog(false)
+    },
+    onError: (err: unknown) => {
+      const message = err instanceof Error ? err.message : 'Unknown error'
+      toast.error('Failed to cancel backup', { description: message })
+    },
+  })
 
   if (isLoading) {
     return (
@@ -278,9 +389,14 @@ export function BackupDetail() {
           <CardHeader>
             <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
               <div className="space-y-1.5 min-w-0">
-                <CardTitle className="flex items-center gap-2">
+                <CardTitle className="flex items-center gap-2 min-w-0">
                   <FileArchive className="h-5 w-5 shrink-0" />
-                  <span className="truncate">{backup.name}</span>
+                  <span className="truncate">
+                    Backup{' '}
+                    <span className="font-mono text-base text-muted-foreground">
+                      #{backup.backup_id.slice(0, 8)}
+                    </span>
+                  </span>
                 </CardTitle>
                 <CardDescription className="flex flex-wrap items-center gap-x-2 gap-y-1">
                   <span className="inline-flex items-center gap-1.5">
@@ -288,13 +404,18 @@ export function BackupDetail() {
                     <TimeAgo date={backup.started_at} />
                   </span>
                   <span aria-hidden>·</span>
-                  <span>{format(startedAt, 'PPp')}</span>
+                  <span className="hidden sm:inline">
+                    {format(startedAt, 'PPp')}
+                  </span>
+                  <span className="sm:hidden">
+                    {format(startedAt, 'MMM d, p')}
+                  </span>
                   {source ? (
                     <>
                       <span aria-hidden>·</span>
                       <Link
                         to={`/backups/s3-sources/${id}`}
-                        className="text-foreground hover:underline"
+                        className="text-foreground hover:underline truncate"
                       >
                         {source.name}
                       </Link>
@@ -302,7 +423,7 @@ export function BackupDetail() {
                   ) : null}
                 </CardDescription>
               </div>
-              <div className="flex items-center gap-2 shrink-0">
+              <div className="flex flex-wrap items-center gap-2 sm:shrink-0">
                 <StatusBadge state={state} />
                 {isStalled ? (
                   <Badge
@@ -312,12 +433,28 @@ export function BackupDetail() {
                     Stalled — worker not responding
                   </Badge>
                 ) : null}
-                <CopyButton
-                  value={backup.s3_location}
-                  className="gap-2"
-                >
+                <CopyButton value={backup.s3_location} className="gap-2">
                   Copy S3 path
                 </CopyButton>
+                {/* Cancel — only live backups can be cancelled. Soft cancel:
+                    the DB row flips immediately + the engine sees the
+                    cancellation token on its next heartbeat tick. */}
+                {(state === 'pending' || state === 'running') && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setShowCancelDialog(true)}
+                    disabled={cancelMutation.isPending}
+                    className="gap-2"
+                  >
+                    {cancelMutation.isPending ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Ban className="h-4 w-4" />
+                    )}
+                    Cancel
+                  </Button>
+                )}
               </div>
             </div>
           </CardHeader>
@@ -351,7 +488,13 @@ export function BackupDetail() {
                 value={durationMs !== null ? formatDuration(durationMs) : '—'}
                 sub={
                   completedAt
-                    ? `${format(startedAt, 'p')} → ${format(completedAt, 'p')}`
+                    ? // Collapse `5:22 PM → 5:22 PM` to a single time when the
+                      // start and end land in the same minute (the common case
+                      // for sub-60s backups). Saves visual noise on narrow
+                      // screens.
+                      format(startedAt, 'p') === format(completedAt, 'p')
+                      ? format(startedAt, 'p')
+                      : `${format(startedAt, 'p')} → ${format(completedAt, 'p')}`
                     : 'Not finished'
                 }
               />
@@ -435,6 +578,19 @@ export function BackupDetail() {
                   </span>
                 </Detail>
               ) : null}
+              {backup.external_service ? (
+                <Detail label="Service">
+                  <Link
+                    to={`/storage/${backup.external_service.id}`}
+                    className="text-foreground hover:underline"
+                  >
+                    {backup.external_service.name}
+                  </Link>{' '}
+                  <span className="text-muted-foreground capitalize">
+                    ({backup.external_service.service_type})
+                  </span>
+                </Detail>
+              ) : null}
               <Detail label="Created by">
                 {createdByUser ? (
                   <Link
@@ -451,6 +607,53 @@ export function BackupDetail() {
               {completedAt ? (
                 <Detail label="Finished at">
                   {format(completedAt, 'PPpp')}
+                </Detail>
+              ) : null}
+              {state === 'running' ? (
+                <Detail label="Step">
+                  <span className="inline-flex items-center gap-2">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-600 shrink-0" />
+                    <span className="font-mono text-xs">
+                      {backup.current_step ?? 'starting…'}
+                    </span>
+                  </span>
+                </Detail>
+              ) : null}
+              {state === 'running' && backup.last_heartbeat_at ? (
+                <Detail label="Last heartbeat">
+                  {isStalled ? (
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span className="text-destructive cursor-help">
+                            {formatDistanceToNow(
+                              new Date(backup.last_heartbeat_at),
+                              { addSuffix: true },
+                            )}
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          No heartbeat in over 5 minutes — engine may be
+                          wedged.
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  ) : (
+                    formatDistanceToNow(new Date(backup.last_heartbeat_at), {
+                      addSuffix: true,
+                    })
+                  )}
+                </Detail>
+              ) : null}
+              {typeof backup.attempts === 'number' &&
+              backup.attempts > 1 ? (
+                <Detail label="Attempt">
+                  {backup.attempts} of {backup.max_attempts ?? '?'}
+                </Detail>
+              ) : null}
+              {typeof backup.max_runtime_secs === 'number' ? (
+                <Detail label="Timeout">
+                  {formatTimeoutSecs(backup.max_runtime_secs)}
                 </Detail>
               ) : null}
               {backup.expires_at ? (
@@ -480,6 +683,114 @@ export function BackupDetail() {
           </CardContent>
         </Card>
 
+        {/* Services in this backup — only shown when children exist */}
+        {children.length > 0 ? (
+          <Card>
+            <CardHeader>
+              <CardTitle>Services in this backup</CardTitle>
+              <CardDescription>
+                External services whose data was captured in this backup run.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="p-0">
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Service</TableHead>
+                      <TableHead>Type</TableHead>
+                      <TableHead>State</TableHead>
+                      <TableHead className="hidden sm:table-cell">Size</TableHead>
+                      <TableHead className="hidden md:table-cell">Duration</TableHead>
+                      <TableHead className="hidden lg:table-cell">Error</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {children.map((child) => {
+                      const childStarted = new Date(child.started_at)
+                      const childFinished = child.finished_at
+                        ? new Date(child.finished_at)
+                        : null
+                      const childDurationMs = childFinished
+                        ? childFinished.getTime() - childStarted.getTime()
+                        : null
+                      // When the parent backup has finalized but the child is
+                      // still pending/running, the engine bailed before
+                      // updating the child row (typical: pre-flight S3 check
+                      // failed, parent was marked failed but children were
+                      // never visited). Surface the parent's state + error
+                      // instead of showing a stale "Pending" forever.
+                      const parentFinalized =
+                        state === 'failed' || state === 'cancelled'
+                      const childStale =
+                        child.state === 'pending' || child.state === 'running'
+                      const effectiveState =
+                        parentFinalized && childStale ? state : child.state
+                      const effectiveError =
+                        child.error_message ??
+                        (parentFinalized && childStale
+                          ? backup.error_message ?? null
+                          : null)
+                      return (
+                        <TableRow key={child.id}>
+                          <TableCell>
+                            <Link
+                              to={`/storage/${child.service_id}`}
+                              className="flex items-center gap-2 hover:underline"
+                            >
+                              <Database className="h-4 w-4 shrink-0 text-muted-foreground" />
+                              <span className="font-medium">{child.service_name}</span>
+                            </Link>
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant="outline" className="capitalize">
+                              {child.service_type}
+                            </Badge>
+                          </TableCell>
+                          <TableCell>
+                            <StatusBadge state={effectiveState} />
+                          </TableCell>
+                          <TableCell className="hidden sm:table-cell text-sm text-muted-foreground">
+                            {child.size_bytes !== null
+                              ? formatBytes(child.size_bytes)
+                              : '—'}
+                          </TableCell>
+                          <TableCell className="hidden md:table-cell text-sm text-muted-foreground">
+                            {childDurationMs !== null
+                              ? formatDuration(childDurationMs)
+                              : '—'}
+                          </TableCell>
+                          <TableCell className="hidden lg:table-cell max-w-[200px]">
+                            {effectiveError ? (
+                              <TooltipProvider>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <span className="block truncate text-xs text-destructive cursor-help">
+                                      {effectiveError}
+                                    </span>
+                                  </TooltipTrigger>
+                                  <TooltipContent
+                                    side="top"
+                                    className="max-w-sm whitespace-pre-wrap break-words"
+                                  >
+                                    {effectiveError}
+                                  </TooltipContent>
+                                </Tooltip>
+                              </TooltipProvider>
+                            ) : (
+                              <span className="text-muted-foreground">—</span>
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      )
+                    })}
+                  </TableBody>
+                </Table>
+              </div>
+            </CardContent>
+          </Card>
+        ) : null}
+
         {/* Tags */}
         {backup.tags.length > 0 ? (
           <Card>
@@ -501,6 +812,48 @@ export function BackupDetail() {
           </Card>
         ) : null}
       </div>
+
+      {/* Cancel-confirm dialog. Open via the header "Cancel" button. */}
+      <AlertDialog
+        open={showCancelDialog}
+        onOpenChange={(open) => {
+          if (!cancelMutation.isPending) setShowCancelDialog(open)
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Cancel this backup?</AlertDialogTitle>
+            <AlertDialogDescription>
+              The backup will be flipped to <strong>failed</strong>. If the
+              engine is mid-dump it stops on the next heartbeat tick
+              (within ~5 seconds) and any partial S3 object is cleaned up
+              by rollback.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={cancelMutation.isPending}>
+              Keep running
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault()
+                cancelMutation.mutate()
+              }}
+              disabled={cancelMutation.isPending}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {cancelMutation.isPending ? (
+                <span className="flex items-center gap-2">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Cancelling…
+                </span>
+              ) : (
+                'Cancel backup'
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

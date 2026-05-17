@@ -331,7 +331,7 @@ export function CreateService() {
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: 'Storage', href: '/storage' },
+      { label: 'Databases', href: '/storage' },
       { label: 'Create Service', href: '/storage/create' },
     ])
   }, [setBreadcrumbs])

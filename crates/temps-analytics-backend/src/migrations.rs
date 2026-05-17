@@ -134,10 +134,15 @@ async fn execute_multi(
     sql: &str,
 ) -> Result<(), AnalyticsBackendError> {
     for raw in sql.split(";\n") {
-        let stmt = raw.trim();
-        if stmt.is_empty() || stmt.starts_with("--") {
-            // Skip empty fragments and pure-comment fragments.
-            // Inline comments inside a real statement still travel with it.
+        // Peel leading whole-line `--` comments off each chunk before
+        // checking emptiness. Without this, a statement preceded by a
+        // header comment block looks like a "comment fragment" and gets
+        // silently skipped while still being recorded as applied — so
+        // the DDL never lands and the fan-out worker fails on missing
+        // tables. Inline `--` comments inside a statement are left
+        // intact because CH parses them as end-of-line comments.
+        let stmt = strip_leading_line_comments(raw).trim();
+        if stmt.is_empty() {
             continue;
         }
         client.query(stmt).execute().await.map_err(|e| {
@@ -154,6 +159,22 @@ async fn execute_multi(
     Ok(())
 }
 
+/// Drop leading whole-line `--` comments (and blank lines) from a SQL
+/// chunk. Stops at the first non-comment line so embedded `--` inside
+/// a statement is preserved.
+fn strip_leading_line_comments(raw: &str) -> &str {
+    let mut offset = 0;
+    for line in raw.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with("--") {
+            offset += line.len();
+        } else {
+            break;
+        }
+    }
+    &raw[offset..]
+}
+
 fn truncate(s: &str, n: usize) -> String {
     if s.len() <= n {
         s.to_string()
@@ -167,4 +188,67 @@ fn truncate(s: &str, n: usize) -> String {
 pub struct MigrationReport {
     pub applied: Vec<&'static str>,
     pub skipped: Vec<&'static str>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_leading_comment_block_before_ddl() {
+        let sql = "-- Events table: derived analytical replica.\n\
+                   -- Sort key intentionally puts project_id first.\n\
+                   CREATE TABLE foo (id Int64) ENGINE = MergeTree ORDER BY id";
+        let stripped = strip_leading_line_comments(sql).trim();
+        assert!(stripped.starts_with("CREATE TABLE foo"));
+    }
+
+    #[test]
+    fn preserves_inline_comments_after_first_real_line() {
+        let sql = "CREATE TABLE bar (\n\
+                   -- column comment\n\
+                   id Int64\n\
+                   ) ENGINE = MergeTree ORDER BY id";
+        let stripped = strip_leading_line_comments(sql);
+        assert!(stripped.contains("-- column comment"));
+    }
+
+    #[test]
+    fn returns_empty_for_pure_comment_chunk() {
+        let sql = "-- just a comment\n-- and another\n";
+        let stripped = strip_leading_line_comments(sql).trim();
+        assert!(stripped.is_empty());
+    }
+
+    #[test]
+    fn handles_blank_lines_between_comments() {
+        let sql = "-- header\n\
+                   \n\
+                   -- more header\n\
+                   \n\
+                   CREATE TABLE baz (id Int64) ENGINE = MergeTree ORDER BY id";
+        let stripped = strip_leading_line_comments(sql).trim();
+        assert!(stripped.starts_with("CREATE TABLE baz"));
+    }
+
+    /// Regression guard: every shipped CH migration must contain a real
+    /// DDL statement after the comment-stripping step. Catches a future
+    /// migration that's entirely comments before we silently record it
+    /// as applied with zero side-effect.
+    #[test]
+    fn every_migration_yields_at_least_one_runnable_statement() {
+        for migration in MIGRATIONS {
+            let runnable: Vec<&str> = migration
+                .sql
+                .split(";\n")
+                .map(|raw| strip_leading_line_comments(raw).trim())
+                .filter(|s| !s.is_empty())
+                .collect();
+            assert!(
+                !runnable.is_empty(),
+                "migration {} produced no runnable statements after comment strip",
+                migration.name
+            );
+        }
+    }
 }

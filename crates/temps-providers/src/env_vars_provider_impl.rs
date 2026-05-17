@@ -32,12 +32,20 @@ impl ProjectEnvVarsProvider for ExternalServicesEnvProvider {
     async fn get_project_integration_env_vars(
         &self,
         project_id: i32,
+        environment_id: Option<i32>,
     ) -> Result<Vec<ProjectIntegrationEnvVars>, Box<dyn std::error::Error + Send + Sync>> {
-        let per_service = self
-            .manager
-            .get_project_service_environment_variables(project_id)
-            .await
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+        let per_service = match environment_id {
+            Some(env_id) => self
+                .manager
+                .preview_project_service_environment_variables(project_id, env_id)
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?,
+            None => self
+                .manager
+                .get_project_service_environment_variables(project_id)
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?,
+        };
 
         if per_service.is_empty() {
             // Still return the empty shells for any linked service so the UI

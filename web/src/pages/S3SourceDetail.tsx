@@ -1,7 +1,6 @@
 'use client'
 
 import {
-  createBackupScheduleMutation,
   deleteBackupScheduleMutation,
   disableBackupScheduleMutation,
   enableBackupScheduleMutation,
@@ -30,14 +29,6 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from '@/components/ui/dialog'
-import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -45,16 +36,6 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { EmptyState } from '@/components/ui/empty-state'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import {
   Table,
   TableBody,
@@ -65,80 +46,56 @@ import {
 } from '@/components/ui/table'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { usePageTitle } from '@/hooks/usePageTitle'
-import { cn } from '@/lib/utils'
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { listSourceBackupsWithScan, testS3SourceConnection } from '@/lib/s3-sources'
+import { runScheduleNow } from '@/lib/schedule-runs'
+import { cn, formatBytes } from '@/lib/utils'
+import { iconForServiceType } from '@/lib/serviceIcons'
+import { Input } from '@/components/ui/input'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { format } from 'date-fns'
 import {
   ArrowLeft,
   CalendarDays,
+  CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   Database,
   DatabaseBackup,
+  HardDrive,
+  Loader2,
   MoreHorizontal,
+  Pencil,
+  Play,
+  Plug,
   Plus,
+  Radio,
+  ScanSearch,
+  Search,
+  XCircle,
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
 
-interface ScheduleOption {
-  label: string
-  value: string
-  description: string
-  customizable?: boolean
+/** Format a wall-clock timeout from seconds into a human-readable string.
+ * Mirrors the helper in `BackupDetail.tsx`; if this gets copied a third
+ * time it should move to `lib/utils.ts`. */
+function formatTimeoutSecs(secs: number): string {
+  if (secs <= 0) return '—'
+  const hours = Math.floor(secs / 3600)
+  const minutes = Math.floor((secs % 3600) / 60)
+  if (hours > 0 && minutes > 0) return `${hours}h ${minutes}m`
+  if (hours > 0) return `${hours}h`
+  return `${minutes}m`
 }
 
-const scheduleOptions: ScheduleOption[] = [
-  {
-    label: 'Every 12 hours',
-    value: '0 0 */12 * * *',
-    description: 'Runs at 00:00 and 12:00',
-  },
-  {
-    label: 'Daily',
-    value: '0 0 0 * * *',
-    description: 'Runs every day at midnight',
-  },
-  {
-    label: 'Weekly',
-    value: '0 0 0 * * 0',
-    description: 'Runs every Sunday at midnight',
-  },
-  {
-    label: 'Monthly',
-    value: '0 0 0 1 * *',
-    description: 'Runs on the first day of every month at midnight',
-  },
-  {
-    label: 'Custom',
-    value: 'custom',
-    description: 'Specify a custom cron expression',
-    customizable: true,
-  },
-]
-
-interface NewScheduleForm {
-  name: string
-  description?: string
-  backup_type: string
-  retention_period: number
-  enabled: boolean
-}
 
 export function S3SourceDetail() {
   const { id } = useParams<{ id: string }>()
   const sourceId = id ? parseInt(id) : undefined
   const { setBreadcrumbs } = useBreadcrumbs()
+  const navigate = useNavigate()
 
-  const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false)
-  const [newSchedule, setNewSchedule] = useState<Partial<NewScheduleForm>>({
-    backup_type: 'scheduled',
-    retention_period: 7,
-    enabled: true,
-  })
-  const [selectedSchedule, setSelectedSchedule] = useState<string>(
-    scheduleOptions[1].value,
-  )
-  const [customCron, setCustomCron] = useState('')
   const [scheduleToDelete, setScheduleToDelete] =
     useState<BackupScheduleResponse | null>(null)
 
@@ -169,20 +126,27 @@ export function S3SourceDetail() {
     [schedules, sourceId],
   )
 
-  const createMutation = useMutation({
-    ...createBackupScheduleMutation(),
-    meta: { errorTitle: 'Failed to create backup schedule' },
-    onSuccess: () => {
-      refetchSchedules()
-      setNewSchedule({
-        backup_type: 'scheduled',
-        retention_period: 7,
-        enabled: true,
-      })
-      setSelectedSchedule(scheduleOptions[1].value)
-      setCustomCron('')
-      setIsCreateDialogOpen(false)
-      toast.success('Backup schedule created successfully')
+  // Probes the S3 source's credentials, region, and bucket reachability
+  // via the existing POST /backups/s3-sources/{id}/test endpoint.
+  // Surfaces the server's `{ ok, message }` verbatim in a toast so operators
+  // can confirm a source works before relying on it for backups.
+  const testConnectionMutation = useMutation({
+    mutationFn: () => {
+      if (!sourceId) {
+        return Promise.reject(new Error('S3 source id is unknown'))
+      }
+      return testS3SourceConnection(sourceId)
+    },
+    onSuccess: (result) => {
+      if (result.ok) {
+        toast.success('S3 connection succeeded', { description: result.message })
+      } else {
+        toast.error('S3 connection failed', { description: result.message })
+      }
+    },
+    onError: (err: unknown) => {
+      const message = err instanceof Error ? err.message : 'Unknown error'
+      toast.error('S3 connection test failed', { description: message })
     },
   })
 
@@ -195,6 +159,37 @@ export function S3SourceDetail() {
     },
     onSettled: () => {
       setScheduleToDelete(null)
+    },
+  })
+
+  const queryClient = useQueryClient()
+
+  // "Discover orphan backups" — explicit opt-in S3 scan. Slow on some
+  // endpoints (5-30 s on OVH); only triggered by user action.
+  const discoverOrphansMutation = useMutation({
+    mutationFn: () => {
+      if (!sourceId) {
+        return Promise.reject(new Error('S3 source id is unknown'))
+      }
+      return listSourceBackupsWithScan(sourceId)
+    },
+    onSuccess: (result) => {
+      const scanned = result.backups.filter(
+        (b) => (b as { source?: string }).source === 's3_scan',
+      ).length
+      toast.success(
+        scanned > 0
+          ? `Found ${scanned} additional backup${scanned === 1 ? '' : 's'} in S3`
+          : 'No additional backups found in S3',
+      )
+      // Refresh the normal listing so newly discovered entries appear.
+      void queryClient.invalidateQueries({
+        queryKey: ['backups', 's3-source', sourceId],
+      })
+    },
+    onError: (err: unknown) => {
+      const message = err instanceof Error ? err.message : 'Unknown error'
+      toast.error('S3 scan failed', { description: message })
     },
   })
 
@@ -216,6 +211,18 @@ export function S3SourceDetail() {
     },
   })
 
+  const runNowMutation = useMutation({
+    mutationFn: (scheduleId: number) => runScheduleNow(scheduleId),
+    onSuccess: (_data, scheduleId) => {
+      toast.success('Backup run enqueued')
+      void navigate(`/backups/schedules/${scheduleId}`)
+    },
+    onError: (err: unknown) => {
+      const message = err instanceof Error ? err.message : 'Unknown error'
+      toast.error('Failed to start backup run', { description: message })
+    },
+  })
+
   useEffect(() => {
     setBreadcrumbs([
       { label: 'Backups', href: '/backups' },
@@ -234,38 +241,52 @@ export function S3SourceDetail() {
     [backupIndex],
   )
 
-  const handleScheduleChange = (value: string) => {
-    setSelectedSchedule(value)
-  }
+  // Client-side filter + pagination over the recent-backups list. The list
+  // is DB-first (ADR-014 §"Fast listings") and capped, so doing this on the
+  // client is fine — no backend pagination needed yet. If/when the cap goes
+  // away, swap this for `?page=&page_size=` on the API.
+  const [backupSearch, setBackupSearch] = useState('')
+  const [backupPage, setBackupPage] = useState(1)
+  const BACKUP_PAGE_SIZE = 10
 
-  const handleCreateSchedule = () => {
-    if (!newSchedule.name) {
-      toast.error('Schedule name is required')
-      return
-    }
-    if (!sourceId) return
-
-    const schedule_expression =
-      selectedSchedule === 'custom' ? customCron : selectedSchedule
-
-    if (!schedule_expression) {
-      toast.error('Please select a schedule or enter a custom cron expression')
-      return
-    }
-
-    createMutation.mutate({
-      body: {
-        name: newSchedule.name,
-        description: newSchedule.description,
-        backup_type: newSchedule.backup_type || 'scheduled',
-        schedule_expression,
-        retention_period: newSchedule.retention_period || 7,
-        s3_source_id: sourceId,
-        enabled: newSchedule.enabled ?? true,
-        tags: [],
-      },
+  const filteredBackups = useMemo(() => {
+    const q = backupSearch.trim().toLowerCase()
+    if (!q) return sortedBackups
+    return sortedBackups.filter((b) => {
+      // Match on the user-visible fields so a user can find a backup by
+      // service name, engine, state, format, or any prefix of the UUID.
+      return (
+        b.name.toLowerCase().includes(q) ||
+        (b.origin_service_name ?? '').toLowerCase().includes(q) ||
+        (b.engine ?? '').toLowerCase().includes(q) ||
+        b.state.toLowerCase().includes(q) ||
+        b.backup_id.toLowerCase().includes(q) ||
+        (b.format ?? '').toLowerCase().includes(q)
+      )
     })
-  }
+  }, [sortedBackups, backupSearch])
+
+  const backupTotalPages = Math.max(
+    1,
+    Math.ceil(filteredBackups.length / BACKUP_PAGE_SIZE),
+  )
+  // Clamp the page if the filter just shrunk the result set below the
+  // current page.
+  useEffect(() => {
+    if (backupPage > backupTotalPages) setBackupPage(backupTotalPages)
+  }, [backupPage, backupTotalPages])
+
+  const pagedBackups = useMemo(() => {
+    const start = (backupPage - 1) * BACKUP_PAGE_SIZE
+    return filteredBackups.slice(start, start + BACKUP_PAGE_SIZE)
+  }, [filteredBackups, backupPage])
+
+  const backupRangeStart =
+    filteredBackups.length === 0 ? 0 : (backupPage - 1) * BACKUP_PAGE_SIZE + 1
+  const backupRangeEnd = Math.min(
+    backupPage * BACKUP_PAGE_SIZE,
+    filteredBackups.length,
+  )
 
   const handleToggleSchedule = (schedule: BackupScheduleResponse) => {
     if (schedule.enabled) {
@@ -316,6 +337,19 @@ export function S3SourceDetail() {
             </Link>
           </Button>
         </div>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => testConnectionMutation.mutate()}
+          disabled={testConnectionMutation.isPending || !sourceId}
+        >
+          {testConnectionMutation.isPending ? (
+            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+          ) : (
+            <Plug className="mr-2 h-4 w-4" />
+          )}
+          Test connection
+        </Button>
       </div>
 
       <div className="grid gap-6">
@@ -392,150 +426,12 @@ export function S3SourceDetail() {
                 Scheduled backups writing to this S3 source
               </CardDescription>
             </div>
-            <Dialog
-              open={isCreateDialogOpen}
-              onOpenChange={setIsCreateDialogOpen}
-            >
-              <DialogTrigger asChild>
-                <Button size="sm">
-                  <Plus className="mr-2 h-4 w-4" />
-                  New Schedule
-                </Button>
-              </DialogTrigger>
-              <DialogContent className="max-h-screen flex flex-col">
-                <DialogHeader>
-                  <DialogTitle>Create Backup Schedule</DialogTitle>
-                </DialogHeader>
-                <div className="grid gap-4 py-4 flex-1 overflow-y-auto">
-                  <div className="grid gap-2">
-                    <Label htmlFor="name">Schedule Name</Label>
-                    <Input
-                      id="name"
-                      placeholder="Daily Backup"
-                      value={newSchedule.name || ''}
-                      onChange={(e) =>
-                        setNewSchedule({
-                          ...newSchedule,
-                          name: e.target.value,
-                        })
-                      }
-                    />
-                  </div>
-                  <div className="grid gap-2">
-                    <Label htmlFor="description">
-                      Description (Optional)
-                    </Label>
-                    <Input
-                      id="description"
-                      placeholder="Daily backup at midnight"
-                      value={newSchedule.description || ''}
-                      onChange={(e) =>
-                        setNewSchedule({
-                          ...newSchedule,
-                          description: e.target.value,
-                        })
-                      }
-                    />
-                  </div>
-                  <div className="grid gap-2">
-                    <Label htmlFor="type">Backup Type</Label>
-                    <Select
-                      value={newSchedule.backup_type}
-                      onValueChange={(value) =>
-                        setNewSchedule({
-                          ...newSchedule,
-                          backup_type: value,
-                        })
-                      }
-                    >
-                      <SelectTrigger>
-                        <SelectValue placeholder="Select type" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="manual">Manual</SelectItem>
-                        <SelectItem value="scheduled">Scheduled</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  {newSchedule.backup_type === 'scheduled' && (
-                    <div className="grid gap-2">
-                      <Label>Schedule</Label>
-                      <RadioGroup
-                        value={selectedSchedule}
-                        onValueChange={handleScheduleChange}
-                        className="gap-4"
-                      >
-                        {scheduleOptions.map((option) => (
-                          <div
-                            key={option.value}
-                            className="flex items-start space-x-3 space-y-0"
-                          >
-                            <RadioGroupItem
-                              value={option.value}
-                              id={option.value}
-                            />
-                            <div className="grid gap-1.5 leading-none">
-                              <Label
-                                htmlFor={option.value}
-                                className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
-                              >
-                                {option.label}
-                              </Label>
-                              <p className="text-sm text-muted-foreground">
-                                {option.description}
-                              </p>
-                            </div>
-                          </div>
-                        ))}
-                      </RadioGroup>
-                      {selectedSchedule === 'custom' && (
-                        <div className="mt-4">
-                          <Label htmlFor="customCron">
-                            Custom Cron Expression
-                          </Label>
-                          <Input
-                            id="customCron"
-                            placeholder="0 0 * * *"
-                            value={customCron}
-                            onChange={(e) => setCustomCron(e.target.value)}
-                          />
-                          <p className="text-xs text-muted-foreground mt-1">
-                            Format: minute hour day month weekday
-                          </p>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  <div className="grid gap-2">
-                    <Label htmlFor="retention">
-                      Retention Period (days)
-                    </Label>
-                    <Input
-                      id="retention"
-                      type="number"
-                      min={1}
-                      value={newSchedule.retention_period || 7}
-                      onChange={(e) =>
-                        setNewSchedule({
-                          ...newSchedule,
-                          retention_period: parseInt(e.target.value),
-                        })
-                      }
-                    />
-                  </div>
-                </div>
-                <DialogFooter className="shrink-0">
-                  <Button
-                    onClick={handleCreateSchedule}
-                    disabled={createMutation.isPending}
-                  >
-                    {createMutation.isPending
-                      ? 'Creating...'
-                      : 'Create Schedule'}
-                  </Button>
-                </DialogFooter>
-              </DialogContent>
-            </Dialog>
+            <Button size="sm" asChild>
+              <Link to={`/backups/s3-sources/${sourceId}/schedules/new`}>
+                <Plus className="mr-2 h-4 w-4" />
+                New Schedule
+              </Link>
+            </Button>
           </CardHeader>
           <CardContent>
             {isLoadingSchedules ? (
@@ -548,9 +444,13 @@ export function S3SourceDetail() {
                 title="No schedules for this source"
                 description="Create a schedule to back up automatically to this S3 target"
                 action={
-                  <Button onClick={() => setIsCreateDialogOpen(true)}>
-                    <Plus className="mr-2 h-4 w-4" />
-                    New Schedule
+                  <Button asChild>
+                    <Link
+                      to={`/backups/s3-sources/${sourceId}/schedules/new`}
+                    >
+                      <Plus className="mr-2 h-4 w-4" />
+                      New Schedule
+                    </Link>
                   </Button>
                 }
               />
@@ -567,6 +467,9 @@ export function S3SourceDetail() {
                         Retention
                       </TableHead>
                       <TableHead className="hidden md:table-cell">
+                        Timeout
+                      </TableHead>
+                      <TableHead className="hidden md:table-cell">
                         Last Run
                       </TableHead>
                       <TableHead className="hidden md:table-cell">
@@ -580,11 +483,20 @@ export function S3SourceDetail() {
                       <TableRow
                         key={schedule.id}
                         className={cn(
+                          'transition-colors hover:bg-accent/50',
                           !schedule.enabled && 'text-muted-foreground',
                         )}
                       >
                         <TableCell>
-                          <div className="flex items-center gap-3">
+                          {/* Anchor — supports ⌘-click / middle-click /
+                              right-click "Open in new tab". The whole-row
+                              click fallback got replaced because <a>
+                              inside <tr> with onClick eats modifier-key
+                              navigation. */}
+                          <Link
+                            to={`/backups/schedules/${schedule.id}`}
+                            className="flex items-center gap-3 hover:underline"
+                          >
                             <DatabaseBackup
                               className={cn(
                                 'h-4 w-4',
@@ -609,7 +521,7 @@ export function S3SourceDetail() {
                                 </div>
                               )}
                             </div>
-                          </div>
+                          </Link>
                         </TableCell>
                         <TableCell>
                           <Badge variant="outline">
@@ -631,6 +543,11 @@ export function S3SourceDetail() {
                         <TableCell className="hidden md:table-cell">
                           {schedule.retention_period} days
                         </TableCell>
+                        <TableCell className="hidden md:table-cell text-muted-foreground">
+                          {schedule.max_runtime_secs
+                            ? formatTimeoutSecs(schedule.max_runtime_secs)
+                            : 'engine default'}
+                        </TableCell>
                         <TableCell className="hidden md:table-cell">
                           {schedule.last_run
                             ? format(
@@ -647,7 +564,9 @@ export function S3SourceDetail() {
                               )
                             : '-'}
                         </TableCell>
-                        <TableCell>
+                        <TableCell
+                          onClick={(e) => e.stopPropagation()}
+                        >
                           <DropdownMenu>
                             <DropdownMenuTrigger asChild>
                               <Button variant="ghost" size="icon">
@@ -655,6 +574,28 @@ export function S3SourceDetail() {
                               </Button>
                             </DropdownMenuTrigger>
                             <DropdownMenuContent align="end">
+                              <DropdownMenuItem
+                                onClick={() =>
+                                  runNowMutation.mutate(schedule.id)
+                                }
+                                disabled={
+                                  !schedule.enabled ||
+                                  runNowMutation.isPending
+                                }
+                              >
+                                <Play className="mr-2 h-4 w-4" />
+                                Run now
+                              </DropdownMenuItem>
+                              <DropdownMenuSeparator />
+                              <DropdownMenuItem asChild>
+                                <Link
+                                  to={`/backups/s3-sources/${sourceId}/schedules/${schedule.id}/edit`}
+                                >
+                                  <Pencil className="mr-2 h-4 w-4" />
+                                  Edit
+                                </Link>
+                              </DropdownMenuItem>
+                              <DropdownMenuSeparator />
                               <DropdownMenuItem
                                 onClick={() =>
                                   handleToggleSchedule(schedule)
@@ -687,39 +628,222 @@ export function S3SourceDetail() {
         </Card>
 
         <Card>
-          <CardHeader>
-            <CardTitle>Recent Backups</CardTitle>
-            <CardDescription>
-              Backups that have been written to this S3 source
-            </CardDescription>
+          <CardHeader className="flex flex-row items-start justify-between gap-3 space-y-0">
+            <div>
+              <CardTitle>Recent Backups</CardTitle>
+              <CardDescription>
+                Backups that have been written to this S3 source
+              </CardDescription>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => discoverOrphansMutation.mutate()}
+              disabled={discoverOrphansMutation.isPending || !sourceId}
+              title="Scan S3 for backups not tracked in the database — useful after a Temps restore from a different instance"
+            >
+              {discoverOrphansMutation.isPending ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <ScanSearch className="mr-2 h-4 w-4" />
+              )}
+              <span className="hidden sm:inline">Discover orphan backups</span>
+              <span className="sm:hidden">Scan S3</span>
+            </Button>
           </CardHeader>
           <CardContent>
+            {/* Search bar — instant client filter across name, service,
+                engine, state, UUID, format. */}
+            {!isLoadingBackups && sortedBackups.length > 0 && (
+              <div className="relative mb-4">
+                <Search className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  type="search"
+                  placeholder="Search by service, engine, state, or UUID…"
+                  value={backupSearch}
+                  onChange={(e) => {
+                    setBackupSearch(e.target.value)
+                    setBackupPage(1)
+                  }}
+                  className="pl-9"
+                />
+              </div>
+            )}
+
             {isLoadingBackups ? (
-              <div className="flex items-center justify-center py-6">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+              <div className="space-y-2">
+                {[...Array(5)].map((_, i) => (
+                  <div
+                    key={i}
+                    className="h-16 animate-pulse rounded-lg border bg-muted/40"
+                  />
+                ))}
               </div>
             ) : sortedBackups.length === 0 ? (
               <p className="text-sm text-muted-foreground">
                 No backups found for this S3 source.
               </p>
+            ) : filteredBackups.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                No backups match &ldquo;{backupSearch}&rdquo;.
+              </p>
             ) : (
               <div className="space-y-2">
-                {sortedBackups.map((backup) => (
-                  <Link
-                    key={backup.backup_id}
-                    to={`/backups/s3-sources/${id}/backups/${backup.backup_id}`}
-                    className="block"
-                  >
-                    <div className="flex items-center justify-between p-4 border rounded-lg hover:bg-muted/50 transition-colors">
-                      <div className="flex items-center gap-4">
-                        <DatabaseBackup className="h-4 w-4" />
-                        <div className="text-sm">
-                          {format(new Date(backup.created_at), 'PPP p')}
+                {pagedBackups.map((backup) => {
+                  // The same `state` strings the BackupDetail page uses.
+                  const state = backup.state || 'unknown'
+                  const isCompleted = state === 'completed'
+                  const isFailed = state === 'failed'
+                  const isRunning = state === 'running' || state === 'pending'
+                  const isOrphan = backup.source === 's3_scan'
+
+                  // Prefer the friendly service name; fall back to the
+                  // engine label so users always see *something* useful.
+                  const displayName =
+                    backup.origin_service_name ||
+                    backup.engine ||
+                    backup.name ||
+                    'Backup'
+
+                  // Per-row icon based on the engine that produced the
+                  // backup. `iconForServiceType` understands the engine
+                  // vocabulary (`postgres_walg`, `s3_mirror`, …) and the
+                  // service-type vocabulary (`postgres`, `s3`, …); falls
+                  // back to a generic Database icon for unknown values.
+                  const ServiceIcon = iconForServiceType(backup.engine)
+
+                  return (
+                    <Link
+                      key={`${backup.source}-${backup.backup_id || backup.location}`}
+                      to={`/backups/s3-sources/${id}/backups/${backup.backup_id}`}
+                      className="block focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded-lg"
+                    >
+                      <div className="flex flex-col gap-3 rounded-lg border p-3 transition-colors hover:bg-muted/50 sm:flex-row sm:items-center sm:justify-between sm:p-4">
+                        {/* Left: name + meta */}
+                        <div className="flex min-w-0 items-center gap-3">
+                          <div
+                            className="flex size-8 shrink-0 items-center justify-center rounded-md border bg-muted/40 text-muted-foreground"
+                            aria-hidden
+                          >
+                            <ServiceIcon className="h-4 w-4" />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="truncate font-medium">
+                                {displayName}
+                              </span>
+                              {backup.engine ? (
+                                <Badge
+                                  variant="outline"
+                                  className="font-mono text-xs"
+                                >
+                                  {backup.engine}
+                                </Badge>
+                              ) : null}
+                              {backup.format === 'walg' ? (
+                                <Badge variant="secondary" className="text-xs">
+                                  PITR
+                                </Badge>
+                              ) : null}
+                              {isOrphan ? (
+                                <Badge variant="outline" className="text-xs">
+                                  orphan
+                                </Badge>
+                              ) : null}
+                            </div>
+                            <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
+                              <span className="font-mono">
+                                {format(
+                                  new Date(backup.created_at),
+                                  'MMM d, yyyy p',
+                                )}
+                              </span>
+                              {backup.size_bytes != null &&
+                              backup.size_bytes > 0 ? (
+                                <span className="inline-flex items-center gap-1">
+                                  <HardDrive className="h-3 w-3" />
+                                  {formatBytes(backup.size_bytes)}
+                                </span>
+                              ) : null}
+                              {backup.backup_id ? (
+                                <span className="font-mono">
+                                  #{backup.backup_id.slice(0, 8)}
+                                </span>
+                              ) : null}
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Right: status badge. Same vocabulary as the
+                            BackupDetail StatusBadge so users can scan both
+                            pages with the same mental model. */}
+                        <div className="flex items-center gap-2 sm:shrink-0">
+                          {isCompleted ? (
+                            <Badge
+                              variant="outline"
+                              className="border-emerald-500/50 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 gap-1"
+                            >
+                              <CheckCircle2 className="h-3 w-3" />
+                              Completed
+                            </Badge>
+                          ) : isFailed ? (
+                            <Badge variant="destructive" className="gap-1">
+                              <XCircle className="h-3 w-3" />
+                              Failed
+                            </Badge>
+                          ) : isRunning ? (
+                            <Badge variant="secondary" className="gap-1">
+                              <Radio className="h-3 w-3 animate-pulse" />
+                              {state === 'pending' ? 'Pending' : 'Running'}
+                            </Badge>
+                          ) : (
+                            <Badge variant="outline" className="text-xs">
+                              {state}
+                            </Badge>
+                          )}
                         </div>
                       </div>
-                    </div>
-                  </Link>
-                ))}
+                    </Link>
+                  )
+                })}
+              </div>
+            )}
+
+            {/* Pagination footer — only when more than one page. */}
+            {filteredBackups.length > BACKUP_PAGE_SIZE && (
+              <div className="mt-4 flex flex-col items-center justify-between gap-2 border-t pt-4 sm:flex-row">
+                <span className="hidden text-xs text-muted-foreground sm:inline">
+                  Showing {backupRangeStart}–{backupRangeEnd} of{' '}
+                  {filteredBackups.length}
+                </span>
+                <span className="text-xs text-muted-foreground sm:hidden">
+                  {backupPage} / {backupTotalPages}
+                </span>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setBackupPage((p) => Math.max(1, p - 1))}
+                    disabled={backupPage === 1}
+                  >
+                    <ChevronLeft className="h-4 w-4" />
+                    <span className="hidden sm:inline">Previous</span>
+                  </Button>
+                  <span className="hidden text-xs text-muted-foreground sm:inline">
+                    Page {backupPage} of {backupTotalPages}
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      setBackupPage((p) => Math.min(backupTotalPages, p + 1))
+                    }
+                    disabled={backupPage === backupTotalPages}
+                  >
+                    <span className="hidden sm:inline">Next</span>
+                    <ChevronRight className="h-4 w-4" />
+                  </Button>
+                </div>
               </div>
             )}
           </CardContent>

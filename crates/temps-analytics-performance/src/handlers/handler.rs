@@ -128,12 +128,18 @@ pub struct UpdateSpeedMetricsPayload {
 )]
 pub struct PerformanceApiDoc;
 
+/// Admin routes for performance metrics (dashboard queries).
 pub fn configure_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/performance/metrics", get(get_performance_metrics))
         .route("/performance/metrics-over-time", get(get_metrics_over_time))
         .route("/performance/page-metrics", get(get_grouped_page_metrics))
         .route("/performance/has-metrics", get(has_performance_metrics))
+}
+
+/// Public ingest routes for performance metrics — called by browser SDKs.
+pub fn configure_public_routes() -> Router<Arc<AppState>> {
+    Router::new()
         .route("/_temps/speed", post(record_speed_metrics))
         .route("/_temps/speed/update", post(update_speed_metrics))
 }

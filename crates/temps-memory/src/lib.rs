@@ -14,24 +14,19 @@
 //!
 //! ## Why this crate exists
 //!
-//! Memory is used by three different subsystems:
+//! Memory is used by two subsystems:
 //!
 //! 1. **Agents** — `temps-agents::executor` reads memory to build prompts.
-//! 2. **Workspace** — `temps-workspace::memory_service` is the canonical
-//!    read/write implementation, serving HTTP at
-//!    `/projects/{id}/workflows/{slug}/memory`.
-//! 3. **Sandboxes** — the bash script below runs inside every workflow
+//! 2. **Sandboxes** — the bash script below runs inside every workflow
 //!    sandbox so the AI can remember things between runs.
 //!
-//! Without a dedicated crate, these three have to share types through
-//! `temps-core`, which quickly becomes a dumping ground. Pulling memory
-//! into its own crate gives us a clean boundary to evolve (e.g., add
-//! embeddings in PR 2.4) without touching `temps-core`.
+//! No in-tree implementation of [`WorkflowMemoryProvider`] currently exists
+//! (the previous one lived in the now-removed `temps-workspace` crate). The
+//! agent executor handles a missing provider gracefully — runs proceed
+//! without memory injection.
 //!
 //! ## Not in this crate
 //!
-//! - The service implementation — lives in `temps-workspace` (will move
-//!   here in a later PR once the HTTP story is finalized).
 //! - The Sea-ORM entity — lives in `temps-entities::workflow_memory`.
 //! - The migration — lives in `temps-migrations`.
 //!
@@ -94,17 +89,15 @@ pub struct WriteFactRequest {
 }
 
 /// Trait the agent executor uses to read workflow memory before
-/// spawning an AI harness. The canonical implementation lives in
-/// `temps-workspace::MemoryService`, injected via the plugin DI
-/// registry.
+/// spawning an AI harness. No in-tree implementation currently registers
+/// one; the executor falls back to running without memory when absent.
 ///
 /// Required methods are **read-only** (`load_for_trigger`,
 /// `render_for_prompt`). Write methods (`write_fact`, `supersede_fact`,
 /// `search_facts`) are provided with default implementations that
 /// return [`WorkflowMemoryError`] `"not supported by this provider"` —
 /// this lets lightweight consumers (in-memory fakes for tests,
-/// read-only caches) implement only what they need. Real backends
-/// (the `MemoryService` in `temps-workspace`) override all of them.
+/// read-only caches) implement only what they need.
 ///
 /// Implementations **must** enforce scoping by `(project_id, agent_id)`.
 /// A memory leak across workflows is a correctness bug, not a

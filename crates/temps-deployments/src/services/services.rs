@@ -2196,18 +2196,17 @@ impl DeploymentService {
 
         // Build the result map
         let mut result = HashMap::new();
-        for (env, project) in environments {
+        for (env, _project) in environments {
             let mut domains = domains_by_env.remove(&env.id).unwrap_or_default();
 
-            // Compute the environment URL using project slug and environment slug
-            let project_slug = project
-                .as_ref()
-                .map(|p| p.slug.as_str())
-                .unwrap_or("unknown");
+            // Build the environment URL from the env's stored `subdomain`
+            // (the canonical hostname source). Reconstructing from project_slug
+            // and env_slug would produce stale URLs after a subdomain rename,
+            // since `environments.subdomain` can be renamed independently.
             let env_url = self
-                .compute_environment_url(project_slug, &env.slug)
+                .compute_environment_url(&env.subdomain)
                 .await
-                .unwrap_or_else(|_| format!("http://{}-{}.localhost", project_slug, env.slug));
+                .unwrap_or_else(|_| format!("http://{}.localhost", env.subdomain));
             domains.insert(0, env_url);
 
             result.insert(
@@ -2269,15 +2268,11 @@ impl DeploymentService {
         Ok(url)
     }
 
-    async fn compute_environment_url(
-        &self,
-        project_slug: &str,
-        environment_slug: &str,
-    ) -> anyhow::Result<String> {
+    async fn compute_environment_url(&self, env_subdomain: &str) -> anyhow::Result<String> {
         let settings = self.config_service.get_settings().await.unwrap_or_default();
 
         let base_domain = settings.preview_domain;
-        let domain = format!("{}-{}.{}", project_slug, environment_slug, base_domain);
+        let domain = format!("{}.{}", env_subdomain, base_domain);
 
         // Determine protocol and port from external_url if set, otherwise default to http
         let (protocol, port) = if let Some(ref url) = settings.external_url {

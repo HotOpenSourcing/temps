@@ -455,10 +455,12 @@ impl AnalyticsEvents for ClickHouseEventsBackend {
         let start_ms = to_unix_milli(q.range.start);
         let end_ms = to_unix_milli(q.range.end);
 
+        // CH 26+ requires toUnixTimestamp64Milli's argument to be DateTime64.
+        // toStartOfInterval returns DateTime, so wrap with toDateTime64(_, 3, 'UTC').
         let sql = format!(
             r#"
             SELECT
-                toUnixTimestamp64Milli(toStartOfInterval(timestamp, {interval})) AS bucket_ms,
+                toUnixTimestamp64Milli(toDateTime64(toStartOfInterval(timestamp, {interval}), 3, 'UTC')) AS bucket_ms,
                 {level_expr} AS count
             FROM events FINAL
             WHERE project_id = ?
@@ -469,8 +471,8 @@ impl AnalyticsEvents for ClickHouseEventsBackend {
             GROUP BY bucket_ms
             ORDER BY bucket_ms ASC
             WITH FILL
-                FROM toUnixTimestamp64Milli(toStartOfInterval(fromUnixTimestamp64Milli(?), {interval}))
-                TO toUnixTimestamp64Milli(toStartOfInterval(fromUnixTimestamp64Milli(?), {interval})) + 1
+                FROM toUnixTimestamp64Milli(toDateTime64(toStartOfInterval(fromUnixTimestamp64Milli(?), {interval}), 3, 'UTC'))
+                TO toUnixTimestamp64Milli(toDateTime64(toStartOfInterval(fromUnixTimestamp64Milli(?), {interval}), 3, 'UTC')) + 1
                 STEP toInt64({interval})
             "#
         );
@@ -674,7 +676,7 @@ impl AnalyticsEvents for ClickHouseEventsBackend {
         let sql = format!(
             r#"
             SELECT
-                toUnixTimestamp64Milli(toStartOfInterval(timestamp, {interval})) AS bucket_ms,
+                toUnixTimestamp64Milli(toDateTime64(toStartOfInterval(timestamp, {interval}), 3, 'UTC')) AS bucket_ms,
                 if({col} = '', '{sentinel}', {col}) AS value,
                 {count_sql} AS count
             FROM events FINAL
@@ -771,7 +773,7 @@ impl AnalyticsEvents for ClickHouseEventsBackend {
         let sql = format!(
             r#"
             SELECT
-                toUnixTimestamp64Milli(toStartOfHour(timestamp)) AS bucket_ms,
+                toUnixTimestamp64Milli(toDateTime64(toStartOfHour(timestamp), 3, 'UTC')) AS bucket_ms,
                 {level_expr} AS count
             FROM events FINAL
             WHERE project_id = ?
@@ -782,8 +784,8 @@ impl AnalyticsEvents for ClickHouseEventsBackend {
             GROUP BY bucket_ms
             ORDER BY bucket_ms ASC
             WITH FILL
-                FROM toUnixTimestamp64Milli(toStartOfHour(fromUnixTimestamp64Milli(?)))
-                TO toUnixTimestamp64Milli(toStartOfHour(fromUnixTimestamp64Milli(?))) + 1
+                FROM toUnixTimestamp64Milli(toDateTime64(toStartOfHour(fromUnixTimestamp64Milli(?)), 3, 'UTC'))
+                TO toUnixTimestamp64Milli(toDateTime64(toStartOfHour(fromUnixTimestamp64Milli(?)), 3, 'UTC')) + 1
                 STEP 3600000
             "#
         );
@@ -956,7 +958,7 @@ impl AnalyticsEvents for ClickHouseEventsBackend {
         let hourly_sql = r#"
             SELECT
                 project_id,
-                toUnixTimestamp64Milli(toStartOfHour(timestamp)) AS bucket_ms,
+                toUnixTimestamp64Milli(toDateTime64(toStartOfHour(timestamp), 3, 'UTC')) AS bucket_ms,
                 uniq(visitor_id) AS visitors
             FROM events FINAL
             WHERE has(?, project_id)
@@ -1052,7 +1054,7 @@ impl AnalyticsEvents for ClickHouseEventsBackend {
         let sql = format!(
             r#"
             SELECT
-                toUnixTimestamp64Milli(toStartOfInterval(timestamp, {interval})) AS bucket_ms,
+                toUnixTimestamp64Milli(toDateTime64(toStartOfInterval(timestamp, {interval}), 3, 'UTC')) AS bucket_ms,
                 {level_expr} AS count
             FROM events FINAL
             WHERE project_id = ?
@@ -1063,8 +1065,8 @@ impl AnalyticsEvents for ClickHouseEventsBackend {
             GROUP BY bucket_ms
             ORDER BY bucket_ms ASC
             WITH FILL
-                FROM toUnixTimestamp64Milli(toStartOfInterval(fromUnixTimestamp64Milli(?), {interval}))
-                TO toUnixTimestamp64Milli(toStartOfInterval(fromUnixTimestamp64Milli(?), {interval})) + 1
+                FROM toUnixTimestamp64Milli(toDateTime64(toStartOfInterval(fromUnixTimestamp64Milli(?), {interval}), 3, 'UTC'))
+                TO toUnixTimestamp64Milli(toDateTime64(toStartOfInterval(fromUnixTimestamp64Milli(?), {interval}), 3, 'UTC')) + 1
                 STEP toInt64({interval})
             "#
         );
