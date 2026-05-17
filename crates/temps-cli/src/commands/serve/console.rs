@@ -473,10 +473,96 @@ async fn serve_static_file(req: Request) -> Response {
     }
 }
 
-/// Validate GeoLite2-City database exists in multiple locations
-/// Checks: current directory → data directory → home directory
-/// No system dependencies - database file must be placed manually
-fn validate_geolite2_database(default_db_path: &Path) -> anyhow::Result<()> {
+/// Source URL for downloading GeoLite2-City.mmdb when missing on startup.
+/// Mirrors `setup.rs::GEOLITE2_DOWNLOAD_URL` so `temps serve` recovers a missing
+/// database the same way the setup wizard would.
+const GEOLITE2_DOWNLOAD_URL: &str =
+    "https://raw.githubusercontent.com/gotempsh/temps/refs/heads/main/crates/temps-cli/GeoLite2-City.mmdb";
+
+/// Download GeoLite2-City.mmdb to `dest` from GitHub (same source as `temps setup`).
+/// Writes to a sibling `.tmp` file and renames atomically on success.
+async fn download_geolite2_database_on_startup(dest: &Path) -> anyhow::Result<()> {
+    use futures::StreamExt;
+    use std::io::Write;
+
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to create data directory {}: {}",
+                parent.display(),
+                e
+            )
+        })?;
+    }
+
+    info!(
+        "Downloading GeoLite2-City.mmdb from {} to {}",
+        GEOLITE2_DOWNLOAD_URL,
+        dest.display()
+    );
+
+    let response = reqwest::Client::new()
+        .get(GEOLITE2_DOWNLOAD_URL)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to start GeoLite2 download: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(anyhow::anyhow!(
+            "Failed to download GeoLite2 database: HTTP {}",
+            response.status()
+        ));
+    }
+
+    let temp_path = dest.with_extension("mmdb.tmp");
+    let mut file = std::fs::File::create(&temp_path).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to create temporary file {}: {}",
+            temp_path.display(),
+            e
+        )
+    })?;
+
+    let mut stream = response.bytes_stream();
+    let mut downloaded: u64 = 0;
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = chunk_result.map_err(|e| anyhow::anyhow!("Download error: {}", e))?;
+        file.write_all(&chunk)
+            .map_err(|e| anyhow::anyhow!("Failed to write to {}: {}", temp_path.display(), e))?;
+        downloaded += chunk.len() as u64;
+    }
+    drop(file);
+
+    std::fs::rename(&temp_path, dest).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to move {} to {}: {}",
+            temp_path.display(),
+            dest.display(),
+            e
+        )
+    })?;
+
+    if downloaded < 1_000_000 {
+        return Err(anyhow::anyhow!(
+            "Downloaded GeoLite2 database is too small ({} bytes); file may be corrupted",
+            downloaded
+        ));
+    }
+
+    info!(
+        "✓ Downloaded GeoLite2 database to {} ({:.1} MB)",
+        dest.display(),
+        downloaded as f64 / 1024.0 / 1024.0
+    );
+
+    Ok(())
+}
+
+/// Validate GeoLite2-City database exists in multiple locations.
+/// Checks current directory and data directory; if neither has the file,
+/// downloads it to `default_db_path` from the same GitHub URL used by
+/// `temps setup`. Errors only after the download attempt fails.
+async fn validate_geolite2_database(default_db_path: &Path) -> anyhow::Result<()> {
     // Check multiple locations in order of preference
     let search_paths = vec![
         // 1. Current working directory (most convenient for local development)
@@ -493,31 +579,42 @@ fn validate_geolite2_database(default_db_path: &Path) -> anyhow::Result<()> {
         }
     }
 
-    // Database not found in any location
-    Err(anyhow::anyhow!(
-        "❌ GeoLite2-City.mmdb not found\n\n\
-        The MaxMind GeoLite2 database is required for geolocation features.\n\n\
-        📍 Checked locations (in order):\n\
-        1. {}\n\
-        2. {}\n\n\
-        📥 Setup (once, takes 2 minutes):\n\
-        1. Visit: https://www.maxmind.com/en/geolite2/geolite2-free-data-sources\n\
-        2. Create free MaxMind account (if needed)\n\
-        3. Download 'GeoLite2-City' (GZIP format: .tar.gz)\n\
-        4. Extract the archive:\n\
-           tar xzf GeoLite2-City_*.tar.gz\n\n\
-        5. Copy the database file to any location above:\n\
-           # Option A: Current directory (recommended for local development)\n\
-           cp GeoLite2-City_*/GeoLite2-City.mmdb .\n\n\
-           # Option B: Data directory\n\
-           cp GeoLite2-City_*/GeoLite2-City.mmdb {}\n\n\
-        6. Start the server again\n\n\
-        🐳 For Docker users:\n\
-        See Dockerfile in the repository for embedding the database",
+    // Not found anywhere — attempt automatic download to the data directory,
+    // matching the behaviour of `temps setup`.
+    info!(
+        "GeoLite2 database not found in {} or {}; attempting download",
         search_paths[0].display(),
-        search_paths[1].display(),
         search_paths[1].display()
-    ))
+    );
+    match download_geolite2_database_on_startup(default_db_path).await {
+        Ok(()) => Ok(()),
+        Err(e) => Err(anyhow::anyhow!(
+            "❌ GeoLite2-City.mmdb not found and automatic download failed\n\n\
+            The MaxMind GeoLite2 database is required for geolocation features.\n\n\
+            📍 Checked locations (in order):\n\
+            1. {}\n\
+            2. {}\n\n\
+            ⬇️  Download attempt error: {}\n\n\
+            📥 Manual setup (takes 2 minutes):\n\
+            1. Visit: https://www.maxmind.com/en/geolite2/geolite2-free-data-sources\n\
+            2. Create free MaxMind account (if needed)\n\
+            3. Download 'GeoLite2-City' (GZIP format: .tar.gz)\n\
+            4. Extract the archive:\n\
+               tar xzf GeoLite2-City_*.tar.gz\n\n\
+            5. Copy the database file to any location above:\n\
+               # Option A: Current directory (recommended for local development)\n\
+               cp GeoLite2-City_*/GeoLite2-City.mmdb .\n\n\
+               # Option B: Data directory\n\
+               cp GeoLite2-City_*/GeoLite2-City.mmdb {}\n\n\
+            6. Start the server again\n\n\
+            🐳 For Docker users:\n\
+            See Dockerfile in the repository for embedding the database",
+            search_paths[0].display(),
+            search_paths[1].display(),
+            e,
+            search_paths[1].display()
+        )),
+    }
 }
 
 /// Parameters for starting the console API server.
@@ -581,7 +678,7 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
     // 2. Validate GeoPlugin dependencies (GeoLite2 database)
     debug!("Checking GeoLite2 database...");
     let geo_db_path = config.data_dir.join("GeoLite2-City.mmdb");
-    validate_geolite2_database(&geo_db_path)?;
+    validate_geolite2_database(&geo_db_path).await?;
     debug!("✓ GeoLite2 database file found");
 
     // 3. Validate logs directory is writable
