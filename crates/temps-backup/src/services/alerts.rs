@@ -119,26 +119,34 @@ RETURNING id
         );
     }
 
-    // ── Step B: Open stalled-job alerts ───────────────────────────────────────
+    // ── Step B: Open stalled-backup alerts ────────────────────────────────────
     //
-    // Identifies pending jobs older than 1 hour with no open alert. These jobs
-    // were enqueued by the scheduler but never claimed by the runner.
+    // Identifies `backups` rows stuck in `pending` for >1 hour with no
+    // open alert. After the queue migration this means: the trigger
+    // inserted the row and published the message, but the consumer
+    // never dispatched it (e.g. process crashed in the gap, or the
+    // consumer is wedged).
+    //
+    // Since the FK column was dropped (job_id used to point at
+    // backup_jobs), uniqueness is enforced by the message text alone —
+    // good enough as a back-stop. The dedup is best-effort; the resolve
+    // step below clears any stragglers.
     let sql_open_stalled = r#"
-INSERT INTO backup_alerts (kind, job_id, severity, message, opened_at)
+INSERT INTO backup_alerts (kind, severity, message, opened_at)
 SELECT
     'stalled_job',
-    j.id,
     'warning',
-    'Backup job ' || j.id || ' (engine=' || j.engine || ', backup_id=' || j.backup_id || ') has been pending for ' || (NOW() - j.created_at)::text,
+    'Backup ' || b.id || ' (backup_uuid=' || b.backup_id || ') has been pending for ' || (NOW() - b.started_at)::text,
     NOW()
-FROM backup_jobs j
-WHERE j.state = 'pending'
-  AND j.created_at < NOW() - INTERVAL '1 hour'
+FROM backups b
+WHERE b.state = 'pending'
+  AND b.started_at < NOW() - INTERVAL '1 hour'
   AND NOT EXISTS (
       SELECT 1 FROM backup_alerts a
-      WHERE a.job_id = j.id AND a.resolved_at IS NULL
+      WHERE a.kind = 'stalled_job'
+        AND a.resolved_at IS NULL
+        AND a.message LIKE 'Backup ' || b.id || ' (%'
   )
-ON CONFLICT DO NOTHING
 RETURNING id
 "#;
 
@@ -199,18 +207,20 @@ RETURNING a.id
         );
     }
 
-    // ── Step D: Resolve stalled-job alerts whose job was claimed ──────────────
+    // ── Step D: Resolve stalled alerts whose backup left 'pending' ────────────
     //
-    // Clears open stalled_job alerts when the job's state is no longer 'pending'
-    // (it was claimed by the runner, completed, failed, or cancelled).
+    // Clears open stalled_job alerts whose backup's state is no longer
+    // 'pending' (it was dispatched, completed, failed, or cancelled).
+    // Match on the message text since the FK column was dropped — slow
+    // but correct, and the alert table is tiny.
     let sql_resolve_stalled = r#"
 UPDATE backup_alerts a
 SET resolved_at = NOW()
-FROM backup_jobs j
-WHERE a.job_id = j.id
-  AND a.resolved_at IS NULL
+FROM backups b
+WHERE a.resolved_at IS NULL
   AND a.kind = 'stalled_job'
-  AND j.state != 'pending'
+  AND a.message LIKE 'Backup ' || b.id || ' (%'
+  AND b.state != 'pending'
 RETURNING a.id
 "#;
 

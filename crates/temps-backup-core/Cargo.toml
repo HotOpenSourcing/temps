@@ -14,6 +14,7 @@ homepage.workspace = true
 # temps-backup to avoid circular dependencies.
 
 [dependencies]
+temps-core = { path = "../temps-core" }
 temps-entities = { path = "../temps-entities" }
 
 sea-orm = { workspace = true }

@@ -19,8 +19,6 @@ pub mod autopilot_configs;
 pub mod autopilot_run_logs;
 pub mod autopilot_runs;
 pub mod backup_alerts;
-pub mod backup_job_steps;
-pub mod backup_jobs;
 pub mod backup_schedules;
 pub mod backups;
 pub mod challenge_sessions;

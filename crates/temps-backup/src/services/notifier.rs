@@ -100,7 +100,6 @@ impl BackupFailureNotifier for BackupNotificationAdapter {
 
         let mut metadata: HashMap<String, String> = HashMap::new();
         metadata.insert("backup_id".to_string(), ctx.backup_id.to_string());
-        metadata.insert("job_id".to_string(), ctx.job_id.to_string());
         metadata.insert("engine".to_string(), ctx.engine.clone());
         metadata.insert("attempts".to_string(), ctx.attempts.to_string());
         metadata.insert("max_attempts".to_string(), ctx.max_attempts.to_string());
@@ -128,7 +127,6 @@ impl BackupFailureNotifier for BackupNotificationAdapter {
         {
             error!(
                 backup_id = ctx.backup_id,
-                job_id = ctx.job_id,
                 engine = %ctx.engine,
                 error = %e,
                 "BackupNotificationAdapter: failed to dispatch failure notification (non-fatal)",

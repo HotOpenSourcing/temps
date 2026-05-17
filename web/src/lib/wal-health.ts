@@ -76,7 +76,10 @@ export async function getPostgresWalHealth(
     }
     throw new Error(detail)
   }
-  return (await response.json()) as WalHealthResponse
+  // Backend returns the snapshot directly (not wrapped). Wrap it client-side
+  // so the panel can treat 404 and "no warnings" with one code path.
+  const snapshot = (await response.json()) as PostgresWalHealth
+  return { wal_health: snapshot }
 }
 
 export function severityOf(warning: WalWarning): WalWarningSeverity {

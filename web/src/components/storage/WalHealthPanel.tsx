@@ -140,8 +140,7 @@ function describeWarning(w: WalWarning): WarningView {
     case 'archive_mode_without_command':
       return {
         title: 'archive_mode is on, but archive_command is empty',
-        body: 'WAL is being held forever waiting for a destination that never accepts it. If backups use pg_dump, turn archiving off.',
-        fix: `ALTER SYSTEM SET archive_mode = 'off';\n-- Restart the container after this takes effect.`,
+        body: 'WAL is being held forever waiting for a destination that never accepts it. Temps writes archive_mode=off on the next service start, but the setting only takes effect after a container restart — restart the service from the actions menu when you can.',
       }
     case 'wal_not_recycled':
       return {

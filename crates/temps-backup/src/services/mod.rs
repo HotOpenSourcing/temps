@@ -6,9 +6,10 @@ mod reconcile;
 mod restore;
 pub use alerts::{sweep_backup_alerts, SweepStats, OVERDUE_GRACE};
 pub use backup::{
-    BackupError, BackupService, ChildBackupEntry, EnqueuedJob, ScheduleRunEntry,
-    ScheduleRunJobEntry, ScheduleRunListResponse, ScheduleRunOutcome, ScheduleRunResponse,
-    ScheduleRunSummary, ScheduleRunSummaryList, ServiceBackupEntry, TriggerSource,
+    BackupError, BackupService, BackupTriggerParams, ChildBackupEntry, EnqueuedJob,
+    ScheduleRunEntry, ScheduleRunJobEntry, ScheduleRunListResponse, ScheduleRunOutcome,
+    ScheduleRunResponse, ScheduleRunSummary, ScheduleRunSummaryList, ServiceBackupEntry,
+    TriggerSource,
 };
 pub use heartbeat::HeartbeatGuard;
 pub use notifier::BackupNotificationAdapter;

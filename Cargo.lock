@@ -11096,6 +11096,7 @@ dependencies = [
  "sea-orm",
  "serde",
  "serde_json",
+ "temps-core",
  "temps-entities",
  "thiserror 2.0.17",
  "tokio",

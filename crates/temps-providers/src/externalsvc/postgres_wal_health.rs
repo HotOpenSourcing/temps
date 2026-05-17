@@ -5,7 +5,7 @@
 //! `archive_command`, and unbounded `pg_wal` growth. The probe is read-only,
 //! runs on a single `tokio_postgres` connection, and returns a structured
 //! snapshot that the background `ExternalServiceHealthMonitor` persists on
-//! `external_services.wal_health_snapshot` and the UI surfaces as warnings.
+//! `external_services.health_metadata.postgres_wal` and the UI surfaces as warnings.
 //!
 //! Thresholds are hardcoded for now. They scale off `max_wal_size` so they
 //! self-tune to whatever the operator configured — no per-service knobs to
@@ -156,6 +156,23 @@ impl PostgresWalHealth {
     }
 }
 
+/// Build a libpq connection string from a `ServiceConfig`'s parameters JSON.
+///
+/// Mirrors what `PostgresService::health_probe` does internally. Returns
+/// `None` when the parameters don't deserialize — the caller treats that as
+/// "skip the WAL probe" rather than an error.
+pub fn build_conn_str(parameters: &serde_json::Value) -> Option<String> {
+    let host = parameters.get("host")?.as_str()?;
+    let port = parameters.get("port")?.as_str()?;
+    let user = parameters.get("username")?.as_str()?;
+    let password = parameters.get("password")?.as_str()?;
+    let database = parameters.get("database")?.as_str()?;
+    Some(format!(
+        "host={} port={} user={} password={} dbname={} connect_timeout=3",
+        host, port, user, password, database,
+    ))
+}
+
 /// Run the probe against a Postgres instance using libpq connection params.
 ///
 /// The caller owns the connection string (the existing `health_probe` path
@@ -239,12 +256,17 @@ async fn fetch_settings(
         match name.as_str() {
             "archive_mode" => archive_mode = ArchiveMode::parse(&setting),
             "archive_command" => {
-                let trimmed = setting.trim().to_string();
-                archive_command = if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed)
-                };
+                // pg_settings reports an unset archive_command as the literal
+                // string "(disabled)" on some Postgres builds (notably 18+).
+                // Normalize that — alongside an actually-empty value — to
+                // None so downstream warning logic doesn't get confused.
+                let trimmed = setting.trim();
+                archive_command =
+                    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("(disabled)") {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    };
             }
             "max_wal_size" => {
                 // Postgres reports as integer-with-unit-MB on modern versions.

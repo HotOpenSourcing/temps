@@ -92,7 +92,8 @@ mod m20260515_000001_create_backup_alerts;
 mod m20260515_000002_add_backup_jobs_max_runtime;
 mod m20260515_000003_add_backup_schedules_max_runtime;
 mod m20260516_000001_create_schedule_runs;
-mod m20260516_000002_add_wal_health_snapshot_to_external_services;
+mod m20260517_000001_add_health_metadata_to_external_services;
+mod m20260517_000002_drop_backup_jobs;
 
 pub struct Migrator;
 
@@ -188,7 +189,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260515_000002_add_backup_jobs_max_runtime::Migration),
             Box::new(m20260515_000003_add_backup_schedules_max_runtime::Migration),
             Box::new(m20260516_000001_create_schedule_runs::Migration),
-            Box::new(m20260516_000002_add_wal_health_snapshot_to_external_services::Migration),
+            Box::new(m20260517_000001_add_health_metadata_to_external_services::Migration),
+            Box::new(m20260517_000002_drop_backup_jobs::Migration),
         ]
     }
 }

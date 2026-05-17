@@ -5,6 +5,7 @@ use crate::handlers::audit::{
     S3SourceUpdatedAudit, ScheduleRunNowAudit,
 };
 use crate::handlers::types::BackupAppState;
+use crate::services::BackupTriggerParams;
 use crate::services::{
     BackupError, ChildBackupEntry, EnqueuedJob, ScheduleRunEntry, ScheduleRunJobEntry,
     ScheduleRunListResponse, ScheduleRunResponse, ScheduleRunSummary, ScheduleRunSummaryList,
@@ -22,7 +23,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use temps_auth::permission_guard;
 use temps_auth::RequireAuth;
-use temps_backup_core::EnqueueJobParams;
 use temps_core::problemdetails;
 use temps_core::problemdetails::{Problem, ProblemDetails};
 use temps_core::RequestMetadata;
@@ -1622,7 +1622,7 @@ async fn run_schedule_now(
 
     let response = app_state
         .backup_service
-        .run_schedule_now(&app_state.backup_runner, id, Some(auth.user_id()))
+        .run_schedule_now(id, Some(auth.user_id()))
         .await
         .map_err(Problem::from)?;
 
@@ -1788,29 +1788,15 @@ async fn run_backup_for_source(
     // insert fails, both are rolled back. This prevents orphan `backups` rows
     // that sit in `state='pending'` indefinitely with no job to drive them
     // (ADR-014 lifecycle bug fix).
-    let job_params = EnqueueJobParams {
-        // backup_id is filled in by the service once the backups row is inserted
-        backup_id: 0,
+    let trigger = BackupTriggerParams {
         engine: "control_plane".to_string(),
-        target_kind: "control_plane".to_string(),
-        target_id: None,
-        // s3_source_id is in the backups row; also pass it in params
-        // so the engine can resolve S3 credentials without joining.
         params: serde_json::json!({ "s3_source_id": id }),
-        max_attempts: None,
-        // No per-request override; engine default (4 h for control_plane) applies.
         max_runtime_secs: None,
     };
 
     let (backup, job_id) = app_state
         .backup_service
-        .create_pending_backup_row(
-            id,
-            &request.backup_type,
-            auth.user_id(),
-            &app_state.backup_runner,
-            job_params,
-        )
+        .create_pending_backup_row(id, &request.backup_type, auth.user_id(), trigger)
         .await
         .map_err(|e| {
             error!(
@@ -1898,20 +1884,10 @@ async fn get_backup(
             service_type: svc.service_type,
         });
 
-    // Populate job-level progress fields (current_step, attempts, max_runtime_secs).
-    // Errors are downgraded to None so a DB hiccup never breaks the detail page.
-    // Legacy backups (before ADR-014 Phase 0) have no backup_jobs row — all four
-    // fields remain None in that case.
-    if let Ok(Some(job)) = app_state
-        .backup_service
-        .get_latest_job_for_backup(backup_id_int)
-        .await
-    {
-        response.current_step = job.step;
-        response.attempts = Some(job.attempts);
-        response.max_attempts = Some(job.max_attempts);
-        response.max_runtime_secs = Some(job.max_runtime_secs);
-    }
+    // current_step / attempts / max_attempts / max_runtime_secs used to
+    // come from the per-backup `backup_jobs` row. That table is gone in
+    // the queue-consumer architecture; these response fields remain in
+    // the schema for backwards compat but are always None.
 
     Ok(Json(response))
 }
@@ -2163,19 +2139,13 @@ async fn run_external_service_backup(
             Problem::from(e)
         })?;
 
-    let job_params = EnqueueJobParams {
-        // backup_id is filled in by the service once the backups row is inserted
-        backup_id: 0,
+    let trigger = BackupTriggerParams {
         engine: engine_key.to_string(),
-        target_kind: "external_service".to_string(),
-        target_id: Some(service.id),
         params: serde_json::json!({
             "service_id": service.id,
             "s3_source_id": s3_source_id,
             "backup_type": backup_type,
         }),
-        max_attempts: None,
-        // No per-request override; engine-family default applies.
         max_runtime_secs: None,
     };
 
@@ -2186,8 +2156,7 @@ async fn run_external_service_backup(
             s3_source_id,
             backup_type,
             auth.user_id(),
-            &app_state.backup_runner,
-            job_params,
+            trigger,
         )
         .await
         .map_err(|e| {
@@ -2238,10 +2207,10 @@ async fn run_external_service_backup(
 /// Alerts are auto-opened by the watcher and auto-resolved when the triggering
 /// condition clears. No manual dismiss is required or supported.
 ///
-/// The optional `schedule_s3_source_id` and `backup_id` / `backup_s3_source_id`
-/// fields are included so the UI can deep-link the alert row to its target —
-/// for `overdue_schedule`, the S3 source detail page that hosts the schedule;
-/// for `stalled_job`, the backup detail page.
+/// The optional `schedule_s3_source_id` field is included so the UI can
+/// deep-link an `overdue_schedule` alert to the S3 source detail page that
+/// hosts the schedule. `stalled_job` alerts no longer carry a deep-link
+/// target — the alert message text contains the backup id for display.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct BackupAlertResponse {
     /// Database id of the alert row.
@@ -2258,15 +2227,6 @@ pub struct BackupAlertResponse {
     /// the alert to the S3 source detail page that hosts the schedule.
     /// Set for `overdue_schedule` alerts.
     pub schedule_s3_source_id: Option<i32>,
-    /// FK to `backup_jobs.id`. Set for `stalled_job` alerts.
-    pub job_id: Option<i64>,
-    /// FK to `backups.id` — the parent backup row the stalled job belongs to.
-    /// Set for `stalled_job` alerts.
-    pub backup_id: Option<i32>,
-    /// FK to `backups.s3_source_id`. Lets the UI build the deep-link
-    /// `/backups/s3-sources/{backup_s3_source_id}/backups/{backup_id}`.
-    /// Set for `stalled_job` alerts.
-    pub backup_s3_source_id: Option<i32>,
     /// Human-readable description of the alert condition.
     pub message: String,
     /// RFC 3339 timestamp when the alert was opened.
@@ -2290,9 +2250,6 @@ struct AlertRow {
     pub schedule_id: Option<i32>,
     pub schedule_name: Option<String>,
     pub schedule_s3_source_id: Option<i32>,
-    pub job_id: Option<i64>,
-    pub backup_id: Option<i32>,
-    pub backup_s3_source_id: Option<i32>,
     pub message: String,
     pub opened_at: chrono::DateTime<chrono::Utc>,
 }
@@ -2328,11 +2285,10 @@ async fn list_backup_alerts(
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, BackupsRead);
 
-    // LEFT JOIN backup_schedules + backup_jobs + backups so the response
-    // carries everything the UI needs to deep-link the alert to its target
-    // (no N+1, one round-trip). For overdue_schedule alerts we surface the
-    // schedule's `s3_source_id`. For stalled_job alerts we surface the
-    // backup id and the backup's `s3_source_id`.
+    // LEFT JOIN backup_schedules so overdue_schedule alerts carry the
+    // schedule's `s3_source_id` for UI deep-linking. stalled_job alerts
+    // no longer reference a job row (the FK column was dropped); the
+    // alert message text carries the backup id for display.
     let sql = r#"
 SELECT
     a.id,
@@ -2341,15 +2297,10 @@ SELECT
     a.schedule_id,
     s.name             AS schedule_name,
     s.s3_source_id     AS schedule_s3_source_id,
-    a.job_id,
-    j.backup_id        AS backup_id,
-    b.s3_source_id     AS backup_s3_source_id,
     a.message,
     a.opened_at
 FROM backup_alerts a
 LEFT JOIN backup_schedules s ON s.id = a.schedule_id
-LEFT JOIN backup_jobs       j ON j.id = a.job_id
-LEFT JOIN backups           b ON b.id = j.backup_id
 WHERE a.resolved_at IS NULL
 ORDER BY a.opened_at DESC
 "#;
@@ -2377,9 +2328,6 @@ ORDER BY a.opened_at DESC
             schedule_id: row.schedule_id,
             schedule_name: row.schedule_name,
             schedule_s3_source_id: row.schedule_s3_source_id,
-            job_id: row.job_id,
-            backup_id: row.backup_id,
-            backup_s3_source_id: row.backup_s3_source_id,
             message: row.message,
             opened_at: row.opened_at.to_rfc3339(),
         })

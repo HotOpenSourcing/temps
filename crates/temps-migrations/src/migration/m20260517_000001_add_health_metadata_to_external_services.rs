@@ -1,12 +1,20 @@
-//! Add `wal_health_snapshot` JSONB column to `external_services`.
+//! Add `health_metadata` JSONB column to `external_services`.
 //!
-//! Stores the latest output of the Postgres WAL health probe so the UI can
-//! render warnings (stale slots, archive misconfiguration, pg_wal bloat)
-//! without re-querying the running database on every page load.
+//! Engine-agnostic bag for current-state health signals that don't fit the
+//! existing scalar columns (`health_status`, `last_health_error`). First
+//! consumer is the Postgres WAL/archive probe, which writes under the
+//! `postgres_wal` key. Other engines can add sibling keys later (e.g.,
+//! `redis_memory`, `mongo_oplog`, `s3_bucket_usage`) without further
+//! migration churn.
 //!
-//! Current-state only — history of WAL probes is not retained. The schema
-//! lives in `temps-providers::externalsvc::postgres_wal_health` and is
-//! serialized via serde_json.
+//! Shape:
+//! ```json
+//! {
+//!   "postgres_wal": { ...PostgresWalHealth... }
+//! }
+//! ```
+//!
+//! NULL means no probe has populated any signal yet.
 
 use sea_orm_migration::prelude::*;
 
@@ -21,7 +29,7 @@ impl MigrationTrait for Migration {
                 Table::alter()
                     .table(ExternalServices::Table)
                     .add_column(
-                        ColumnDef::new(ExternalServices::WalHealthSnapshot)
+                        ColumnDef::new(ExternalServices::HealthMetadata)
                             .json_binary()
                             .null(),
                     )
@@ -36,7 +44,7 @@ impl MigrationTrait for Migration {
             .alter_table(
                 Table::alter()
                     .table(ExternalServices::Table)
-                    .drop_column(ExternalServices::WalHealthSnapshot)
+                    .drop_column(ExternalServices::HealthMetadata)
                     .to_owned(),
             )
             .await?;
@@ -47,5 +55,5 @@ impl MigrationTrait for Migration {
 #[derive(DeriveIden)]
 enum ExternalServices {
     Table,
-    WalHealthSnapshot,
+    HealthMetadata,
 }

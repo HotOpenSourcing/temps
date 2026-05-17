@@ -911,6 +911,9 @@ impl ExternalServiceManager {
                     ("POSTGRES_DB".to_string(), database),
                     ("POSTGRES_HOST_AUTH_METHOD".to_string(), "md5".to_string()),
                 ]);
+                // archive_mode=off until enable_wal_archiving() flips it on
+                // together with archive_command. See externalsvc/postgres.rs
+                // for the same invariant on the create-container path.
                 let cmd = vec![
                     "postgres".to_string(),
                     "-c".to_string(),
@@ -918,7 +921,7 @@ impl ExternalServiceManager {
                     "-c".to_string(),
                     "wal_level=replica".to_string(),
                     "-c".to_string(),
-                    "archive_mode=on".to_string(),
+                    "archive_mode=off".to_string(),
                     "-c".to_string(),
                     "archive_timeout=60".to_string(),
                 ];
@@ -1851,6 +1854,38 @@ impl ExternalServiceManager {
             .one(self.db.as_ref())
             .await?
             .ok_or(ExternalServiceError::ServiceNotFound { id: service_id })
+    }
+
+    /// Read the Postgres WAL health snapshot from `health_metadata.postgres_wal`.
+    ///
+    /// Returns `Ok(None)` when the service exists but has no snapshot yet
+    /// (e.g., probe hasn't run, or service isn't Postgres). Returns
+    /// `ServiceNotFound` only when the row doesn't exist at all.
+    pub async fn get_postgres_wal_health(
+        &self,
+        service_id: i32,
+    ) -> Result<
+        Option<crate::externalsvc::postgres_wal_health::PostgresWalHealth>,
+        ExternalServiceError,
+    > {
+        let service = self.get_service(service_id).await?;
+        let Some(metadata) = service.health_metadata else {
+            return Ok(None);
+        };
+        let Some(snapshot) = metadata.get("postgres_wal") else {
+            return Ok(None);
+        };
+        match serde_json::from_value(snapshot.clone()) {
+            Ok(parsed) => Ok(Some(parsed)),
+            Err(e) => {
+                tracing::warn!(
+                    "health_metadata.postgres_wal for service {} did not parse: {}",
+                    service_id,
+                    e
+                );
+                Ok(None)
+            }
+        }
     }
 
     async fn get_service_info(

@@ -38,7 +38,10 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
+use temps_core::{BackupCompletedJob, BackupFailedJob, Job, JobQueue};
+
 use crate::engine_v2::{BackupContext, BackupEngine, BackupError, BackupOutcome};
+use crate::notifier::{BackupFailureContext, BackupFailureNotifier};
 use crate::queue::mark_schedule_run_finished_if_done;
 
 // ── Configuration ─────────────────────────────────────────────────────────────
@@ -71,6 +74,16 @@ struct ExecutorInner {
     engines: HashMap<&'static str, Arc<dyn BackupEngine>>,
     semaphore: Arc<Semaphore>,
     in_flight: Mutex<HashMap<i32, JobHandle>>,
+    /// Optional failure-notification hook. Fired from `finalize_failed`
+    /// via a detached `tokio::spawn` so slow notifiers can't delay the DB
+    /// write.
+    notifier: Option<Arc<dyn BackupFailureNotifier>>,
+    /// Optional event publisher. When set, the executor emits
+    /// `Job::BackupCompleted` / `Job::BackupFailed` on every terminal
+    /// transition so downstream consumers (SSE bridge, webhooks, audit
+    /// log) can react. Fire-and-forget: send errors are logged and
+    /// ignored.
+    event_publisher: Option<Arc<dyn JobQueue>>,
 }
 
 /// One entry in the executor's in-flight map.
@@ -93,6 +106,8 @@ pub struct BackupExecutorBuilder {
     db: Arc<DatabaseConnection>,
     engines: HashMap<&'static str, Arc<dyn BackupEngine>>,
     max_concurrent: usize,
+    notifier: Option<Arc<dyn BackupFailureNotifier>>,
+    event_publisher: Option<Arc<dyn JobQueue>>,
 }
 
 impl BackupExecutorBuilder {
@@ -101,6 +116,8 @@ impl BackupExecutorBuilder {
             db,
             engines: HashMap::new(),
             max_concurrent: DEFAULT_MAX_CONCURRENT,
+            notifier: None,
+            event_publisher: None,
         }
     }
 
@@ -119,6 +136,24 @@ impl BackupExecutorBuilder {
         self
     }
 
+    /// Wire a failure-notification hook. Fired by the executor on every
+    /// terminal failure (engine error, timeout, unknown-engine). Optional —
+    /// when unset the executor still records the failure in the database
+    /// but emits no out-of-band notification.
+    pub fn with_notifier(mut self, notifier: Arc<dyn BackupFailureNotifier>) -> Self {
+        self.notifier = Some(notifier);
+        self
+    }
+
+    /// Wire an event publisher. The executor publishes
+    /// `Job::BackupCompleted` / `Job::BackupFailed` on every terminal
+    /// transition so other consumers (SSE bridge, webhooks, audit log)
+    /// can subscribe. Send errors are logged and ignored.
+    pub fn with_event_publisher(mut self, queue: Arc<dyn JobQueue>) -> Self {
+        self.event_publisher = Some(queue);
+        self
+    }
+
     pub fn build(self) -> BackupExecutor {
         BackupExecutor {
             inner: Arc::new(ExecutorInner {
@@ -126,6 +161,8 @@ impl BackupExecutorBuilder {
                 engines: self.engines,
                 semaphore: Arc::new(Semaphore::new(self.max_concurrent)),
                 in_flight: Mutex::new(HashMap::new()),
+                notifier: self.notifier,
+                event_publisher: self.event_publisher,
             }),
         }
     }
@@ -326,7 +363,7 @@ UPDATE backups
                     "BackupExecutor: failed to mark backup as running; aborting before engine call",
                 );
                 executor
-                    .finalize_failed(backup_id, &format!("DB error: {}", e))
+                    .finalize_failed(backup_id, &params.engine, &format!("DB error: {}", e))
                     .await;
                 executor.remove_from_in_flight(backup_id).await;
                 return;
@@ -346,7 +383,10 @@ UPDATE backups
 
             match outcome {
                 Ok(o) => {
-                    if let Err(e) = executor.finalize_completed(backup_id, o).await {
+                    if let Err(e) = executor
+                        .finalize_completed(backup_id, &params.engine, o)
+                        .await
+                    {
                         error!(
                             backup_id,
                             error = %e,
@@ -366,7 +406,9 @@ UPDATE backups
                 Err(e) => {
                     let msg = e.to_string();
                     error!(backup_id, error = %msg, "BackupExecutor: engine returned error");
-                    executor.finalize_failed(backup_id, &msg).await;
+                    executor
+                        .finalize_failed(backup_id, &params.engine, &msg)
+                        .await;
                 }
             }
 
@@ -418,7 +460,7 @@ UPDATE backups
         Ok(())
     }
 
-    async fn finalize_failed(&self, backup_id: i32, reason: &str) {
+    async fn finalize_failed(&self, backup_id: i32, engine_key: &str, reason: &str) {
         if let Err(e) = self.mark_backup_failed(backup_id, reason).await {
             error!(
                 backup_id,
@@ -427,11 +469,53 @@ UPDATE backups
             );
         }
         let _ = mark_schedule_run_finished_if_done(self.inner.db.as_ref(), backup_id).await;
+
+        // Fire-and-forget the failure notification. The notifier is
+        // responsible for its own error handling; we never await the
+        // spawned task so a slow SMTP/webhook cannot stall the finalize
+        // path.
+        if let Some(notifier) = self.inner.notifier.clone() {
+            let ctx = BackupFailureContext {
+                backup_id,
+                engine: engine_key.to_string(),
+                // Attempts/max_attempts are queue-specific concepts. For the
+                // executor we report the executor's retry policy as 1/1 so
+                // the notifier surface stays uniform; the per-engine retry
+                // behaviour lives inside `run_with_retries`.
+                attempts: 1,
+                max_attempts: 1,
+                error_message: reason.to_string(),
+                failed_at: chrono::Utc::now(),
+            };
+            tokio::spawn(async move {
+                notifier.notify_failed(ctx).await;
+            });
+        }
+
+        // Publish a BackupFailed event for downstream consumers. Same
+        // fire-and-forget contract as the notifier.
+        if let Some(queue) = self.inner.event_publisher.clone() {
+            let event = Job::BackupFailed(BackupFailedJob {
+                backup_id,
+                engine: engine_key.to_string(),
+                error_message: reason.to_string(),
+            });
+            tokio::spawn(async move {
+                if let Err(e) = queue.send(event).await {
+                    error!(
+                        backup_id,
+                        error = %e,
+                        "BackupExecutor: failed to publish BackupFailed event",
+                    );
+                }
+            });
+        }
     }
 
     async fn finalize_completed(
         &self,
         backup_id: i32,
+        engine_key: &str,
         outcome: BackupOutcome,
     ) -> Result<(), sea_orm::DbErr> {
         let sql = r#"
@@ -451,7 +535,7 @@ UPDATE backups
                 vec![
                     SValue::from(outcome.location.clone()),
                     SValue::from(outcome.size_bytes),
-                    SValue::from(outcome.compression),
+                    SValue::from(outcome.compression.clone()),
                     SValue::from(backup_id),
                 ],
             ))
@@ -465,6 +549,26 @@ UPDATE backups
         );
 
         let _ = mark_schedule_run_finished_if_done(self.inner.db.as_ref(), backup_id).await;
+
+        // Publish a BackupCompleted event for downstream consumers.
+        if let Some(queue) = self.inner.event_publisher.clone() {
+            let event = Job::BackupCompleted(BackupCompletedJob {
+                backup_id,
+                engine: engine_key.to_string(),
+                s3_location: outcome.location,
+                size_bytes: outcome.size_bytes,
+            });
+            tokio::spawn(async move {
+                if let Err(e) = queue.send(event).await {
+                    error!(
+                        backup_id,
+                        error = %e,
+                        "BackupExecutor: failed to publish BackupCompleted event",
+                    );
+                }
+            });
+        }
+
         Ok(())
     }
 }

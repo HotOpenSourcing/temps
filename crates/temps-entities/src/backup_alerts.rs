@@ -4,8 +4,8 @@
 //!
 //! - `overdue_schedule`: a `backup_schedules` row has `enabled=true` and
 //!   `next_run < NOW() - 1h`. The scheduler never fired.
-//! - `stalled_job`: a `backup_jobs` row has `state='pending'` and
-//!   `created_at < NOW() - 1h`. The runner never claimed it.
+//! - `stalled_job`: a `backups` row has `state='pending'` and
+//!   `created_at < NOW() - 1h`. The queue consumer never dispatched it.
 //!
 //! Rows are inserted by `temps_backup::services::alerts::sweep_backup_alerts`
 //! and automatically resolved when the condition clears.
@@ -25,9 +25,6 @@ pub struct Model {
     /// FK to `backup_schedules.id`. Set for `overdue_schedule` alerts; `None`
     /// for `stalled_job` alerts.
     pub schedule_id: Option<i32>,
-    /// FK to `backup_jobs.id`. Set for `stalled_job` alerts; `None` for
-    /// `overdue_schedule` alerts.
-    pub job_id: Option<i64>,
     /// `"warning"` (default) or `"critical"` (condition persisted > 6 hours).
     pub severity: String,
     /// Human-readable description surfaced in the UI banner.
@@ -47,23 +44,11 @@ pub enum Relation {
         to = "super::backup_schedules::Column::Id"
     )]
     BackupSchedule,
-    #[sea_orm(
-        belongs_to = "super::backup_jobs::Entity",
-        from = "Column::JobId",
-        to = "super::backup_jobs::Column::Id"
-    )]
-    BackupJob,
 }
 
 impl Related<super::backup_schedules::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::BackupSchedule.def()
-    }
-}
-
-impl Related<super::backup_jobs::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::BackupJob.def()
     }
 }
 

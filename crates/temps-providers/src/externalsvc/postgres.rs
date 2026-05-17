@@ -423,13 +423,16 @@ impl PostgresService {
             exposed_ports: Some(Vec::from(["5432/tcp".to_string()])),
             env: Some(env_vars.iter().map(|s| s.to_string()).collect()),
             labels: Some(container_labels),
-            // NOTE: archive_command is NOT set here on purpose.
-            // Command-line `-c` parameters take highest priority in PostgreSQL and
-            // cannot be overridden by ALTER SYSTEM or postgresql.auto.conf.
-            // We leave archive_command unset so it defaults to '' (disabled).
-            // After the first backup, enable_wal_archiving() uses ALTER SYSTEM to set
-            // archive_command to source the walg.env file and run wal-g wal-push.
-            // archive_mode=on is required for WAL archiving to work once enabled.
+            // archive_mode starts OFF. The combination
+            // `archive_mode=on, archive_command=''` causes Postgres to retain
+            // every WAL segment forever waiting for an archiver that never
+            // accepts — that's the silent disk-filler we hit in production
+            // (191 GB pg_wal). enable_wal_archiving() flips archive_mode=on
+            // ATOMICALLY with archive_command when an S3 source is linked, and
+            // restarts the container so the postmaster-context setting takes
+            // effect. Keeping wal_level=replica means we can still enable
+            // streaming replication / archiving later without a full restart
+            // of the surrounding fleet.
             cmd: Some(vec![
                 "postgres".to_string(),
                 "-c".to_string(),
@@ -437,7 +440,7 @@ impl PostgresService {
                 "-c".to_string(),
                 "wal_level=replica".to_string(),
                 "-c".to_string(),
-                "archive_mode=on".to_string(),
+                "archive_mode=off".to_string(),
                 "-c".to_string(),
                 "archive_timeout=60".to_string(),
             ]),
@@ -720,16 +723,23 @@ impl PostgresService {
         //
         // Note: ALTER SYSTEM writes to postgresql.auto.conf. If archive_command was previously
         // set there (e.g., from a restore), this overwrites it. pg_reload_conf() applies
-        // the change without restart because archive_command is a SIGHUP-reloadable parameter.
+        // archive_command without restart because it's SIGHUP-reloadable.
+        //
+        // archive_mode is `postmaster` context — it requires a full restart to take
+        // effect. We set it here ATOMICALLY with archive_command, then restart the
+        // container below. This is the only place that flips archive_mode=on, and
+        // it always pairs with a non-empty archive_command, so the bad combo
+        // (mode=on, command='') is unrepresentable.
         let archive_command = format!(". {} && wal-g wal-push %p", walg_env_path);
 
-        // Use two separate -c flags because ALTER SYSTEM cannot run inside a
+        // Use three separate -c flags because ALTER SYSTEM cannot run inside a
         // transaction block, and psql wraps multiple statements in a single -c
         // into a transaction.
-        let alter_sql = format!(
+        let alter_command_sql = format!(
             "ALTER SYSTEM SET archive_command = '{}'",
             archive_command.replace('\'', "''")
         );
+        let alter_mode_sql = "ALTER SYSTEM SET archive_mode = 'on'";
         let reload_sql = "SELECT pg_reload_conf()";
 
         let password_env = format!("PGPASSWORD={}", postgres_config.password);
@@ -745,7 +755,9 @@ impl PostgresService {
                         "-d",
                         &postgres_config.database,
                         "-c",
-                        &alter_sql,
+                        &alter_command_sql,
+                        "-c",
+                        alter_mode_sql,
                         "-c",
                         reload_sql,
                     ]),
@@ -772,7 +784,7 @@ impl PostgresService {
             if inspect.running == Some(false) {
                 if inspect.exit_code != Some(0) {
                     return Err(anyhow::anyhow!(
-                        "ALTER SYSTEM SET archive_command failed (exit code {:?})",
+                        "ALTER SYSTEM SET archive_command/archive_mode failed (exit code {:?})",
                         inspect.exit_code
                     ));
                 }
@@ -782,10 +794,185 @@ impl PostgresService {
         }
 
         info!(
-            "Enabled continuous WAL archiving in container '{}' (archive_command: {})",
+            "Wrote archive_command + archive_mode=on in container '{}' (archive_command: {}). Restarting container so archive_mode takes effect.",
             container_name, archive_command
         );
 
+        // Restart the container so archive_mode=on takes effect. archive_mode is
+        // postmaster-context — pg_reload_conf() does NOT pick it up. Without
+        // this restart we'd leave the service in the bad combo
+        // (archive_mode written but inactive) until something else restarts it.
+        // restart_container is graceful — Postgres receives SIGTERM, flushes
+        // checkpoint, then comes back up clean.
+        self.docker
+            .restart_container(
+                container_name,
+                None::<bollard::query_parameters::RestartContainerOptions>,
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to restart container '{}' after enabling archiving: {}",
+                    container_name,
+                    e
+                )
+            })?;
+
+        info!(
+            "Restarted container '{}' — archive_mode=on now active",
+            container_name
+        );
+
+        Ok(())
+    }
+
+    /// Detect and repair the `archive_mode=on, archive_command=''` combo on
+    /// an already-running container.
+    ///
+    /// Earlier versions of this code set `archive_mode=on` in the container
+    /// CMD unconditionally. Any service whose `archive_command` was never set
+    /// (no S3 source linked, or never reached `enable_wal_archiving`) ends up
+    /// accumulating WAL forever because Postgres holds segments waiting for
+    /// an archiver that never accepts them.
+    ///
+    /// This method:
+    ///   1. Reads `pg_settings` to check the current state.
+    ///   2. If `archive_mode=on` AND `archive_command` is empty, sets
+    ///      `archive_mode=off` via `ALTER SYSTEM` so the next restart picks
+    ///      it up. We DO NOT restart here — the next operator-initiated
+    ///      restart or container-recreate will activate the fix. Restarting
+    ///      unprompted in a hot path is too invasive.
+    ///   3. Leaves config alone if either setting is in a sensible state.
+    ///
+    /// Safe to call repeatedly: no-op when config is already correct.
+    async fn heal_orphan_archive_mode(&self, container_name: &str) -> Result<()> {
+        use bollard::exec::{CreateExecOptions, StartExecOptions};
+        use futures::TryStreamExt;
+
+        // We need to read the password from our stored config. If config
+        // isn't loaded (e.g., the service was imported from an existing
+        // container), skip — we can't auth into it to fix it.
+        let cfg = match self.config.read().await.clone() {
+            Some(c) => c,
+            None => return Ok(()),
+        };
+
+        // Step 1: read current settings.
+        let read_sql =
+            "SELECT name, setting FROM pg_settings WHERE name IN ('archive_mode', 'archive_command')";
+
+        let password_env = format!("PGPASSWORD={}", cfg.password);
+        let read_exec = self
+            .docker
+            .create_exec(
+                container_name,
+                CreateExecOptions {
+                    cmd: Some(vec![
+                        "psql",
+                        "-U",
+                        &cfg.username,
+                        "-d",
+                        &cfg.database,
+                        "-tAF",
+                        "|",
+                        "-c",
+                        read_sql,
+                    ]),
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    env: Some(vec![&password_env]),
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        let mut archive_mode_on = false;
+        let mut archive_command_empty = true;
+        if let bollard::exec::StartExecResults::Attached { mut output, .. } = self
+            .docker
+            .start_exec(
+                &read_exec.id,
+                Some(StartExecOptions {
+                    detach: false,
+                    ..Default::default()
+                }),
+            )
+            .await?
+        {
+            let mut stdout = String::new();
+            while let Some(chunk) = output.try_next().await? {
+                if let bollard::container::LogOutput::StdOut { message } = chunk {
+                    stdout.push_str(&String::from_utf8_lossy(&message));
+                }
+            }
+            for line in stdout.lines() {
+                let mut parts = line.splitn(2, '|');
+                match (parts.next(), parts.next()) {
+                    (Some("archive_mode"), Some(setting)) => {
+                        archive_mode_on = setting.trim().eq_ignore_ascii_case("on")
+                            || setting.trim().eq_ignore_ascii_case("always");
+                    }
+                    (Some("archive_command"), Some(setting)) => {
+                        let trimmed = setting.trim();
+                        archive_command_empty =
+                            trimmed.is_empty() || trimmed.eq_ignore_ascii_case("(disabled)");
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if !(archive_mode_on && archive_command_empty) {
+            return Ok(()); // Healthy or already-mid-config — leave alone.
+        }
+
+        warn!(
+            "Container '{}' has archive_mode=on but archive_command=''. \
+             This causes WAL bloat. Setting archive_mode=off via ALTER SYSTEM \
+             (effective on next container restart).",
+            container_name
+        );
+
+        // Step 2: fix it. ALTER SYSTEM writes postgresql.auto.conf; the
+        // setting becomes effective on the next restart since archive_mode
+        // is postmaster-context. We do NOT restart now — the container is
+        // healthy and this is a hot start path.
+        let fix_sql = "ALTER SYSTEM SET archive_mode = 'off'";
+        let fix_exec = self
+            .docker
+            .create_exec(
+                container_name,
+                CreateExecOptions {
+                    cmd: Some(vec![
+                        "psql",
+                        "-U",
+                        &cfg.username,
+                        "-d",
+                        &cfg.database,
+                        "-c",
+                        fix_sql,
+                    ]),
+                    attach_stdout: Some(false),
+                    attach_stderr: Some(false),
+                    env: Some(vec![&password_env]),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        self.docker
+            .start_exec(
+                &fix_exec.id,
+                Some(StartExecOptions {
+                    detach: true,
+                    ..Default::default()
+                }),
+            )
+            .await?;
+
+        info!(
+            "Set archive_mode=off via ALTER SYSTEM on container '{}'. Takes effect on next restart.",
+            container_name
+        );
         Ok(())
     }
 
@@ -2904,6 +3091,24 @@ impl ExternalService for PostgresService {
         // Wait for container to be healthy
         self.wait_for_container_health(&self.docker, &container_name)
             .await?;
+
+        // Self-heal the "archive_mode=on, archive_command=''" combo.
+        //
+        // This is the WAL-bloat bug we caused in earlier versions: the
+        // container CMD baked in archive_mode=on unconditionally, so any
+        // Postgres service whose archive_command was never set (no S3 source
+        // ever linked) accumulates WAL forever. New services no longer hit
+        // this (CMD now sets archive_mode=off). Existing services with the
+        // bad config will see this branch on next start and be fixed.
+        //
+        // We *only* touch archive_mode when archive_command is empty. If a
+        // user has manually set archive_command, we leave their config alone.
+        if let Err(e) = self.heal_orphan_archive_mode(&container_name).await {
+            warn!(
+                "Failed to self-heal archive_mode for container {}: {} (non-fatal)",
+                container_name, e
+            );
+        }
 
         Ok(())
     }
@@ -5053,7 +5258,7 @@ mod tests {
             last_health_check_at: None,
             last_health_error: None,
             consecutive_health_failures: 0,
-            wal_health_snapshot: None,
+            health_metadata: None,
         };
         // Build a MockDatabase for the `pool` slot — restore_pitr for
         // Postgres doesn't touch it in the legacy-reject path.
@@ -5084,7 +5289,7 @@ mod tests {
                     .or_else(|| {
                         panic_payload
                             .downcast_ref::<&'static str>()
-                            .map(|s| s.to_string())
+                            .map(ToString::to_string)
                     })
                     .unwrap_or_else(|| "(non-string panic payload)".to_string());
                 if panic_msg.contains("TrustStore") || panic_msg.contains("certificate") {

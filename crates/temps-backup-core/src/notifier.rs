@@ -24,8 +24,6 @@ use chrono::{DateTime, Utc};
 /// name) may perform their own lookups using `backup_id`.
 #[derive(Debug, Clone)]
 pub struct BackupFailureContext {
-    /// ID of the `backup_jobs` row that failed.
-    pub job_id: i64,
     /// ID of the parent `backups` row.
     pub backup_id: i32,
     /// Engine key that was running when the failure occurred (e.g. `"redis"`).

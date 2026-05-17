@@ -35,10 +35,10 @@ pub struct Model {
     /// Consecutive failed probes. Used to suppress flapping alerts.
     #[sea_orm(default_value = 0)]
     pub consecutive_health_failures: i32,
-    /// Latest Postgres WAL/archive health snapshot (JSONB). NULL for
-    /// non-Postgres services or before the first probe runs. Schema matches
-    /// `temps_providers::externalsvc::postgres_wal_health::PostgresWalHealth`.
-    pub wal_health_snapshot: Option<Json>,
+    /// Engine-specific health snapshots keyed by signal name (e.g.,
+    /// `postgres_wal`). Populated by the background health monitor.
+    /// NULL means no probe has populated any signal yet.
+    pub health_metadata: Option<Json>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
