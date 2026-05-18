@@ -1826,7 +1826,12 @@ export type ContainerMetricsResponse = {
     container_id: string;
     container_name: string;
     /**
-     * CPU usage percentage (0-100)
+     * CPU limit in whole cores (e.g. 1.0). None = no limit.
+     */
+    cpu_limit_cores?: number | null;
+    /**
+     * CPU usage as a multi-core percentage (Docker convention: 200 = 2 cores
+     * fully pinned). Divide by 100 to get cores used.
      */
     cpu_percent: number;
     /**
