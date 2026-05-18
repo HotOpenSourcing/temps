@@ -21,6 +21,10 @@ mod tests {
             database_url: "postgres://localhost/test".to_string(),
             tls_address: None,
             console_address: "0.0.0.0:3001".to_string(),
+            console_admin_address: None,
+            admin_allowed_ips: Vec::new(),
+            admin_allowed_hosts: Vec::new(),
+            admin_trust_forwarded_for: false,
             data_dir: std::path::PathBuf::from("/tmp/temps-test"),
             auth_secret: "test-secret".to_string(),
             encryption_key: "test-encryption-key-32bytes!!!!!".to_string(),
@@ -31,6 +35,10 @@ mod tests {
             postgres_acquire_timeout_secs: None,
             postgres_idle_timeout_secs: None,
             postgres_max_lifetime_secs: None,
+            clickhouse_url: None,
+            clickhouse_database: None,
+            clickhouse_user: None,
+            clickhouse_password: None,
         });
         Arc::new(temps_config::ConfigService::new(server_config, db))
     }

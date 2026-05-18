@@ -2,10 +2,11 @@ use async_trait::async_trait;
 use serde_json;
 use temps_core::UtcDateTime;
 
+use crate::types::requests::VisitorSegmentFilters;
 use crate::types::responses::{
     EnrichVisitorResponse, EventCount, PageFlowResponse, SessionDetails, SessionEventsResponse,
-    SessionLogsResponse, VisitorDetails, VisitorJourneyResponse, VisitorSessionsResponse,
-    VisitorsResponse,
+    SessionLogsResponse, VisitorDetails, VisitorFacets, VisitorJourneyResponse,
+    VisitorSessionsResponse, VisitorsResponse,
 };
 use crate::types::{AnalyticsError, Page};
 
@@ -22,7 +23,8 @@ pub trait Analytics: Send + Sync {
         end_date: Option<UtcDateTime>,
     ) -> Result<Vec<Page>, AnalyticsError>;
 
-    /// Get visitors list
+    /// Get visitors list, optionally narrowed to a segment (e.g. visitors who
+    /// used Chrome, came from the US, or triggered a specific event).
     async fn get_visitors(
         &self,
         start_date: UtcDateTime,
@@ -33,7 +35,24 @@ pub trait Analytics: Send + Sync {
         limit: Option<i32>,
         offset: Option<i32>,
         has_activity_only: Option<bool>,
+        segment: VisitorSegmentFilters,
     ) -> Result<VisitorsResponse, AnalyticsError>;
+
+    /// Get the top values per filter dimension for the visitors page filter
+    /// UI. Counts are distinct visitor counts within the current date range
+    /// and segment; each dimension is computed independently of itself so a
+    /// selected value never collapses its own dropdown to a single option.
+    async fn get_visitor_facets(
+        &self,
+        start_date: UtcDateTime,
+        end_date: UtcDateTime,
+        project_id: i32,
+        environment_id: Option<i32>,
+        include_crawlers: Option<bool>,
+        has_activity_only: Option<bool>,
+        per_facet_limit: Option<i32>,
+        segment: VisitorSegmentFilters,
+    ) -> Result<VisitorFacets, AnalyticsError>;
 
     /// Get event counts
     async fn get_events_count(

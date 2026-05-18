@@ -1,6 +1,8 @@
 use crate::utils::ensure_network_exists;
 
-use super::{ExternalService, HealthProbeResult, ServiceConfig, ServiceType};
+use super::{
+    ExternalService, HealthProbeResult, ServiceConfig, ServiceResourceLimits, ServiceType,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use bollard::query_parameters::{InspectContainerOptions, StopContainerOptions};
@@ -16,8 +18,13 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use urlencoding;
+
+/// Bound on a single Redis backup `docker exec` call. Redis backups are
+/// typically small (RDB dumps), so 1 hour is plenty; larger setups can
+/// extend this in the future.
+const REDIS_BACKUP_EXEC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// Input configuration for creating a Redis service
 /// This is what users provide when creating the service
@@ -153,6 +160,9 @@ fn find_available_port(start_port: u16) -> Option<u16> {
 pub struct RedisService {
     name: String,
     config: Arc<RwLock<Option<RedisConfig>>>,
+    /// Resource limits captured at init time, applied to recreate paths
+    /// (start, upgrade) so the container keeps the same constraints.
+    resource_limits: Arc<RwLock<ServiceResourceLimits>>,
     docker: Arc<Docker>,
 }
 
@@ -161,6 +171,7 @@ impl RedisService {
         Self {
             name,
             config: Arc::new(RwLock::new(None)),
+            resource_limits: Arc::new(RwLock::new(ServiceResourceLimits::default())),
             docker,
         }
     }
@@ -228,6 +239,7 @@ impl RedisService {
         docker: &Docker,
         config: &RedisConfig,
         password: &str,
+        resource_limits: &ServiceResourceLimits,
     ) -> Result<()> {
         let container_name = self.get_container_name();
 
@@ -335,7 +347,7 @@ impl RedisService {
         }
 
         let volume_name = format!("redis_data_{}", self.name);
-        let host_config = bollard::models::HostConfig {
+        let mut host_config = bollard::models::HostConfig {
             port_bindings: Some(HashMap::from([(
                 "6379/tcp".to_string(),
                 Some(vec![bollard::models::PortBinding {
@@ -355,6 +367,7 @@ impl RedisService {
             pids_limit: Some(512),
             ..Default::default()
         };
+        resource_limits.apply_to_host_config(&mut host_config);
         ensure_network_exists(docker)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to ensure network exists: {:?}", e))?;
@@ -553,6 +566,73 @@ impl RedisService {
 }
 
 impl RedisService {
+    /// Build wal-g env and run `wal-g backup-push` via the resilient exec
+    /// helper.
+    async fn run_walg_backup_push(
+        &self,
+        container_name: &str,
+        walg_s3_prefix: &str,
+        s3_credentials: &super::S3Credentials,
+        service_config: ServiceConfig,
+    ) -> anyhow::Result<()> {
+        let redis_password = self
+            .get_redis_config(service_config)
+            .map(|c| c.password.clone())
+            .unwrap_or_default();
+
+        // redis-cli --rdb writes the RDB snapshot to a file. We can't use
+        // /dev/stdout directly because redis-cli tries to ftruncate() and
+        // fsync() the output file, which fail on /dev/stdout (exit code 1).
+        // Instead, write to a temp file and cat it to stdout for WAL-G to
+        // capture the stream.
+        let stream_create_cmd = if redis_password.is_empty() {
+            "redis-cli --rdb /tmp/redis_backup.rdb && cat /tmp/redis_backup.rdb".to_string()
+        } else {
+            format!(
+                "redis-cli -a '{}' --rdb /tmp/redis_backup.rdb && cat /tmp/redis_backup.rdb",
+                redis_password
+            )
+        };
+
+        let mut walg_env: Vec<String> = vec![
+            format!("WALG_S3_PREFIX={}", walg_s3_prefix),
+            format!("AWS_ACCESS_KEY_ID={}", s3_credentials.access_key_id),
+            format!("AWS_SECRET_ACCESS_KEY={}", s3_credentials.secret_key),
+            format!("AWS_REGION={}", s3_credentials.region),
+            format!("WALG_STREAM_CREATE_COMMAND={}", stream_create_cmd),
+            "WALG_STREAM_RESTORE_COMMAND=cat > /data/dump.rdb".to_string(),
+        ];
+
+        if !redis_password.is_empty() {
+            walg_env.push(format!("WALG_REDIS_PASSWORD={}", redis_password));
+        }
+
+        if let Some(resolved_endpoint) = s3_credentials
+            .resolve_endpoint_for_container(&self.docker, container_name)
+            .await
+        {
+            walg_env.push(format!("AWS_ENDPOINT={}", resolved_endpoint));
+        }
+        if s3_credentials.force_path_style {
+            walg_env.push("AWS_S3_FORCE_PATH_STYLE=true".to_string());
+        }
+
+        info!(
+            "Running wal-g backup-push in container '{}' (S3 prefix: {})",
+            container_name, walg_s3_prefix
+        );
+
+        super::exec_util::run_exec(
+            &self.docker,
+            container_name,
+            vec!["sh".into(), "-c".into(), "wal-g backup-push 2>&1".into()],
+            Some(walg_env),
+            REDIS_BACKUP_EXEC_TIMEOUT,
+        )
+        .await
+        .map(|_| ())
+    }
+
     /// Restore from a WAL-G backup stored in S3.
     ///
     /// WAL-G restore requires stopping Redis, fetching the backup (which writes
@@ -938,7 +1018,7 @@ impl RedisService {
         subpath: &str,
         pool: &temps_database::DbConnection,
         external_service: &temps_entities::external_services::Model,
-    ) -> Result<String> {
+    ) -> Result<super::BackupOutcome> {
         use chrono::Utc;
         use sea_orm::*;
         use std::io::Write;
@@ -1049,7 +1129,7 @@ impl RedisService {
             timestamp
         );
 
-        let size_bytes = std::fs::metadata(&tar_path)?.len() as i32;
+        let size_bytes = std::fs::metadata(&tar_path)?.len() as i64;
 
         if size_bytes == 0 {
             let mut backup_update: temps_entities::external_service_backups::ActiveModel =
@@ -1082,7 +1162,7 @@ impl RedisService {
         backup_update.update(pool).await?;
 
         info!("Redis legacy backup completed successfully: {}", backup_key);
-        Ok(backup_key)
+        Ok(super::BackupOutcome::new(backup_key, Some(size_bytes)))
     }
 }
 
@@ -1117,6 +1197,14 @@ impl ExternalService for RedisService {
             config.name, config.service_type, config.version
         );
 
+        // Pull resource limits out of the raw parameters JSON before the
+        // typed config consumes it. Defaults to unlimited when no
+        // `resources` block is present (legacy services).
+        let resource_limits = ServiceResourceLimits::from_parameters(&config.parameters);
+        if let Err(e) = resource_limits.validate() {
+            return Err(anyhow::anyhow!("Invalid resource limits: {}", e));
+        }
+
         // Parse input config and transform to runtime config
         let redis_config = self.get_redis_config(config)?;
 
@@ -1126,15 +1214,21 @@ impl ExternalService for RedisService {
             redis_config.password.len()
         );
 
-        // Store runtime config
+        // Store runtime config and limits so `start()` recreates correctly.
         *self.config.write().await = Some(redis_config.clone());
+        *self.resource_limits.write().await = resource_limits.clone();
 
         info!("Redis init - config stored successfully");
 
         // Create Docker container (but don't start it yet)
         // Note: Connection will be established in start() method
-        self.create_container(&self.docker, &redis_config, &redis_config.password)
-            .await?;
+        self.create_container(
+            &self.docker,
+            &redis_config,
+            &redis_config.password,
+            &resource_limits,
+        )
+        .await?;
 
         info!("Redis container created, connection will be established on start");
 
@@ -1428,7 +1522,8 @@ impl ExternalService for RedisService {
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("Redis configuration not found"))?
                 .clone();
-            self.create_container(&self.docker, &config, &config.password)
+            let limits = self.resource_limits.read().await.clone();
+            self.create_container(&self.docker, &config, &config.password, &limits)
                 .await?;
         } else {
             self.docker
@@ -1595,8 +1690,7 @@ impl ExternalService for RedisService {
         pool: &temps_database::DbConnection,
         external_service: &temps_entities::external_services::Model,
         service_config: ServiceConfig,
-    ) -> Result<String> {
-        use bollard::exec::CreateExecOptions;
+    ) -> Result<super::BackupOutcome> {
         use chrono::Utc;
         use sea_orm::*;
 
@@ -1652,142 +1746,64 @@ impl ExternalService for RedisService {
             s3_credentials.bucket_name,
             subpath_root.trim_matches('/')
         );
+        let s3_list_prefix = format!("{}/walg/", subpath_root.trim_matches('/'));
 
-        // Get Redis password from the service config (database), NOT from in-memory config.
-        // The in-memory config may be None after a server restart if init() wasn't called.
-        let redis_password = self
-            .get_redis_config(service_config)
-            .map(|c| c.password.clone())
-            .unwrap_or_default();
-
-        // Build WAL-G environment variables for docker exec.
-        // WALG_STREAM_CREATE_COMMAND tells WAL-G how to create the backup stream.
-        //
-        // redis-cli --rdb writes the RDB snapshot to a file. We can't use /dev/stdout
-        // directly because redis-cli tries to ftruncate() and fsync() the output file,
-        // which fail on /dev/stdout (exit code 1). Instead, we write to a temp file
-        // and cat it to stdout for WAL-G to capture the stream.
-        let stream_create_cmd = if redis_password.is_empty() {
-            "redis-cli --rdb /tmp/redis_backup.rdb && cat /tmp/redis_backup.rdb".to_string()
-        } else {
-            format!(
-                "redis-cli -a '{}' --rdb /tmp/redis_backup.rdb && cat /tmp/redis_backup.rdb",
-                redis_password
-            )
-        };
-
-        let mut walg_env: Vec<String> = vec![
-            format!("WALG_S3_PREFIX={}", walg_s3_prefix),
-            format!("AWS_ACCESS_KEY_ID={}", s3_credentials.access_key_id),
-            format!("AWS_SECRET_ACCESS_KEY={}", s3_credentials.secret_key),
-            format!("AWS_REGION={}", s3_credentials.region),
-            format!("WALG_STREAM_CREATE_COMMAND={}", stream_create_cmd),
-            format!("WALG_STREAM_RESTORE_COMMAND=cat > /data/dump.rdb"),
-        ];
-
-        if !redis_password.is_empty() {
-            walg_env.push(format!("WALG_REDIS_PASSWORD={}", redis_password));
-        }
-
-        // Resolve S3 endpoint for use inside the Docker container.
-        if let Some(resolved_endpoint) = s3_credentials
-            .resolve_endpoint_for_container(&self.docker, &container_name)
-            .await
-        {
-            walg_env.push(format!("AWS_ENDPOINT={}", resolved_endpoint));
-        }
-        if s3_credentials.force_path_style {
-            walg_env.push("AWS_S3_FORCE_PATH_STYLE=true".to_string());
-        }
-
-        // Run wal-g backup-push inside the running Redis container
-        let walg_cmd = vec!["sh", "-c", "wal-g backup-push 2>&1"];
-        let walg_env_refs: Vec<&str> = walg_env.iter().map(|s| s.as_str()).collect();
-
-        info!(
-            "Running wal-g backup-push in container '{}' (S3 prefix: {})",
-            container_name, walg_s3_prefix
-        );
-
-        let exec = self
-            .docker
-            .create_exec(
+        let result = self
+            .run_walg_backup_push(
                 &container_name,
-                CreateExecOptions {
-                    cmd: Some(walg_cmd),
-                    attach_stdout: Some(false),
-                    attach_stderr: Some(false),
-                    env: Some(walg_env_refs),
-                    ..Default::default()
-                },
+                &walg_s3_prefix,
+                s3_credentials,
+                service_config,
             )
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to create wal-g exec in container {}: {}",
-                    container_name,
-                    e
+            .await;
+
+        match result {
+            Ok(()) => {
+                let size_bytes = match super::s3_util::list_total_size(
+                    s3_client,
+                    &s3_credentials.bucket_name,
+                    &s3_list_prefix,
                 )
-            })?;
+                .await
+                {
+                    Ok(n) => Some(n),
+                    Err(e) => {
+                        warn!(
+                            "Redis WAL-G backup succeeded but failed to compute size from S3: {}",
+                            e
+                        );
+                        None
+                    }
+                };
 
-        // Start WAL-G in detached mode — no data flows through the Temps process
-        use bollard::exec::StartExecOptions;
-        self.docker
-            .start_exec(
-                &exec.id,
-                Some(StartExecOptions {
-                    detach: true,
-                    ..Default::default()
-                }),
-            )
-            .await?;
+                let mut backup_update: temps_entities::external_service_backups::ActiveModel =
+                    backup_record.clone().into();
+                backup_update.state = Set("completed".to_string());
+                backup_update.finished_at = Set(Some(Utc::now()));
+                backup_update.s3_location = Set(walg_s3_prefix.clone());
+                backup_update.size_bytes = Set(size_bytes);
+                backup_update.update(pool).await?;
 
-        // Poll for completion
-        loop {
-            let inspect = self.docker.inspect_exec(&exec.id).await?;
-            if let Some(running) = inspect.running {
-                if !running {
-                    break;
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        }
-
-        // Check WAL-G exit code
-        let exec_inspect = self.docker.inspect_exec(&exec.id).await?;
-        if let Some(exit_code) = exec_inspect.exit_code {
-            if exit_code != 0 {
-                let error_msg = format!(
-                    "wal-g backup-push failed with exit code {} in container '{}'",
-                    exit_code, container_name
+                info!(
+                    "Redis WAL-G backup completed successfully (prefix: {}, size: {:?})",
+                    walg_s3_prefix, size_bytes
                 );
+                Ok(super::BackupOutcome::new(walg_s3_prefix, size_bytes))
+            }
+            Err(e) => {
+                let error_msg = format!("Redis WAL-G backup failed: {}", e);
                 error!("{}", error_msg);
                 let mut backup_update: temps_entities::external_service_backups::ActiveModel =
                     backup_record.clone().into();
                 backup_update.state = Set("failed".to_string());
                 backup_update.error_message = Set(Some(error_msg.clone()));
                 backup_update.finished_at = Set(Some(Utc::now()));
-                let _ = backup_update.update(pool).await;
-                return Err(anyhow::anyhow!("{}", error_msg));
+                if let Err(update_err) = backup_update.update(pool).await {
+                    error!("Failed to mark Redis backup row as failed: {}", update_err);
+                }
+                Err(e)
             }
         }
-
-        // The backup location is the WAL-G S3 prefix
-        let backup_location = walg_s3_prefix.clone();
-
-        // Update backup record with success
-        let mut backup_update: temps_entities::external_service_backups::ActiveModel =
-            backup_record.clone().into();
-        backup_update.state = Set("completed".to_string());
-        backup_update.finished_at = Set(Some(Utc::now()));
-        backup_update.s3_location = Set(backup_location.clone());
-        backup_update.update(pool).await?;
-
-        info!(
-            "Redis WAL-G backup completed successfully (prefix: {})",
-            walg_s3_prefix
-        );
-        Ok(backup_location)
     }
 
     /// Restore Redis data from S3 using WAL-G or legacy format
@@ -1878,8 +1894,14 @@ impl ExternalService for RedisService {
 
         // Create container with new image (keeping the same volume for data persistence)
         info!("Starting Redis container with new image");
-        self.create_container(&self.docker, &new_redis_config, &new_redis_config.password)
-            .await?;
+        let limits = self.resource_limits.read().await.clone();
+        self.create_container(
+            &self.docker,
+            &new_redis_config,
+            &new_redis_config.password,
+            &limits,
+        )
+        .await?;
 
         info!("Redis upgrade completed successfully");
         Ok(())
@@ -2268,9 +2290,34 @@ mod tests {
         assert!(connection_url.contains("6379"));
     }
 
+    // `flavor = "multi_thread"` is required because the test uses
+    // `MinioTestContainer`, whose `Drop` impl calls
+    // `tokio::task::block_in_place` to synchronously stop/remove the
+    // container. `block_in_place` panics under the default current-thread
+    // runtime, and panicking inside Drop while a Tokio runtime is shutting
+    // down has historically wedged the whole test binary in CI.
     #[cfg(feature = "docker-tests")]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_redis_backup_and_restore_to_s3() {
+        // Whole-test wall-clock budget. Anything above this is a hang — fail
+        // loudly with a diagnostic instead of stalling the CI runner for 90 min.
+        // See incident: GitHub run 25806816492 (PR #89) burned 90 min on this
+        // test because blocking redis APIs starved the tokio worker pool.
+        const TEST_TIMEOUT: Duration = Duration::from_secs(180);
+        // Per-Redis-operation timeout. ConnectionManager retries internally,
+        // so this needs only cover the cold-start window of the container.
+        const REDIS_OP_TIMEOUT: Duration = Duration::from_secs(30);
+
+        tokio::time::timeout(TEST_TIMEOUT, run_redis_backup_and_restore_to_s3(REDIS_OP_TIMEOUT))
+            .await
+            .expect("test_redis_backup_and_restore_to_s3 exceeded 180s — likely hung on Redis/Docker/S3 wait");
+    }
+
+    /// Body of `test_redis_backup_and_restore_to_s3`, extracted so the outer
+    /// test can wrap it in `tokio::time::timeout` without a giant async block
+    /// at the call site.
+    #[cfg(feature = "docker-tests")]
+    async fn run_redis_backup_and_restore_to_s3(op_timeout: Duration) {
         use super::super::test_utils::{
             create_mock_backup, create_mock_db, create_mock_external_service, MinioTestContainer,
         };
@@ -2311,8 +2358,17 @@ mod tests {
             }
         };
 
-        // Create Redis service
-        let redis_port = 16379u16; // Use unique port
+        // Pick a free port so parallel test runs (and leaked containers from
+        // previous runs) don't collide. Previously hardcoded to 16379, which
+        // caused silent hangs in CI when a leftover container held the port.
+        let redis_port = match find_available_port(16379) {
+            Some(p) => p,
+            None => {
+                println!("No available port in 16379..16479 range, skipping test");
+                let _ = minio.cleanup().await;
+                return;
+            }
+        };
         let redis_password = "redispass123";
         let service_name = format!(
             "test_redis_backup_{}",
@@ -2345,12 +2401,14 @@ mod tests {
             }
         }
 
-        // Wait for Redis to be ready
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-
-        // Connect to Redis and set some test data
+        // Connect to Redis using the async ConnectionManager. This must NOT
+        // be `redis::Client::get_connection()` — that's the blocking, no-
+        // timeout sync API, and it parks a tokio worker thread on a raw
+        // socket connect. Under parallel test load that exhausts the runtime
+        // worker pool and the whole test binary deadlocks (with no progress
+        // output) until CI kills it.
         let connection_url = format!("redis://:{}@localhost:{}", redis_password, redis_port);
-        let redis_client = match redis::Client::open(connection_url.as_str()) {
+        let redis_client = match Client::open(connection_url.as_str()) {
             Ok(client) => client,
             Err(e) => {
                 println!("Failed to create Redis client: {}. Skipping test", e);
@@ -2360,64 +2418,97 @@ mod tests {
             }
         };
 
-        let mut conn = match redis_client.get_connection() {
-            Ok(c) => c,
-            Err(e) => {
-                println!("Failed to connect to Redis: {}. Skipping test", e);
-                let _ = redis_service.remove().await;
-                let _ = minio.cleanup().await;
-                return;
-            }
-        };
+        let mut conn =
+            match tokio::time::timeout(op_timeout, ConnectionManager::new(redis_client.clone()))
+                .await
+            {
+                Ok(Ok(c)) => c,
+                Ok(Err(e)) => {
+                    println!("Failed to connect to Redis: {}. Skipping test", e);
+                    let _ = redis_service.remove().await;
+                    let _ = minio.cleanup().await;
+                    return;
+                }
+                Err(_) => {
+                    println!(
+                        "Redis connect timed out after {:?}. Skipping test",
+                        op_timeout
+                    );
+                    let _ = redis_service.remove().await;
+                    let _ = minio.cleanup().await;
+                    return;
+                }
+            };
+
+        // Helper to run a Redis command with a bounded timeout and consistent
+        // skip-on-failure behaviour. Defined inline so it captures the cleanup
+        // closures by reference.
+        async fn redis_set(
+            conn: &mut ConnectionManager,
+            key: &str,
+            value: &str,
+            timeout: Duration,
+        ) -> Result<()> {
+            tokio::time::timeout(
+                timeout,
+                redis::cmd("SET")
+                    .arg(key)
+                    .arg(value)
+                    .query_async::<()>(conn),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("SET {} timed out after {:?}", key, timeout))?
+            .map_err(|e| anyhow::anyhow!("SET {} failed: {}", key, e))
+        }
+
+        async fn redis_get_string(
+            conn: &mut ConnectionManager,
+            key: &str,
+            timeout: Duration,
+        ) -> Result<String> {
+            tokio::time::timeout(
+                timeout,
+                redis::cmd("GET").arg(key).query_async::<String>(conn),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("GET {} timed out after {:?}", key, timeout))?
+            .map_err(|e| anyhow::anyhow!("GET {} failed: {}", key, e))
+        }
+
+        async fn redis_exists(
+            conn: &mut ConnectionManager,
+            key: &str,
+            timeout: Duration,
+        ) -> Result<bool> {
+            tokio::time::timeout(
+                timeout,
+                redis::cmd("EXISTS").arg(key).query_async::<bool>(conn),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("EXISTS {} timed out after {:?}", key, timeout))?
+            .map_err(|e| anyhow::anyhow!("EXISTS {} failed: {}", key, e))
+        }
 
         // Set test data
-        match redis::cmd("SET")
-            .arg("test_key1")
-            .arg("value1")
-            .query::<()>(&mut conn)
-        {
-            Ok(_) => println!("✓ Set test_key1=value1"),
-            Err(e) => {
-                println!("Failed to set test key 1: {}. Skipping test", e);
+        for (k, v) in [
+            ("test_key1", "value1"),
+            ("test_key2", "value2"),
+            ("test_key3", "value3"),
+        ] {
+            if let Err(e) = redis_set(&mut conn, k, v, op_timeout).await {
+                println!("{}. Skipping test", e);
                 let _ = redis_service.remove().await;
                 let _ = minio.cleanup().await;
                 return;
             }
-        }
-
-        match redis::cmd("SET")
-            .arg("test_key2")
-            .arg("value2")
-            .query::<()>(&mut conn)
-        {
-            Ok(_) => println!("✓ Set test_key2=value2"),
-            Err(e) => {
-                println!("Failed to set test key 2: {}. Skipping test", e);
-                let _ = redis_service.remove().await;
-                let _ = minio.cleanup().await;
-                return;
-            }
-        }
-
-        match redis::cmd("SET")
-            .arg("test_key3")
-            .arg("value3")
-            .query::<()>(&mut conn)
-        {
-            Ok(_) => println!("✓ Set test_key3=value3"),
-            Err(e) => {
-                println!("Failed to set test key 3: {}. Skipping test", e);
-                let _ = redis_service.remove().await;
-                let _ = minio.cleanup().await;
-                return;
-            }
+            println!("✓ Set {}={}", k, v);
         }
 
         // Verify data exists
-        let value1: String = match redis::cmd("GET").arg("test_key1").query(&mut conn) {
+        let value1 = match redis_get_string(&mut conn, "test_key1", op_timeout).await {
             Ok(v) => v,
             Err(e) => {
-                println!("Failed to get test key 1: {}. Skipping test", e);
+                println!("{}. Skipping test", e);
                 let _ = redis_service.remove().await;
                 let _ = minio.cleanup().await;
                 return;
@@ -2425,9 +2516,6 @@ mod tests {
         };
         assert_eq!(value1, "value1");
         println!("✓ Verified test_key1={}", value1);
-
-        // Drop connection before backup
-        drop(conn);
 
         // Create mock database connection for backup/restore operations
         let mock_db = match create_mock_db().await {
@@ -2460,9 +2548,12 @@ mod tests {
             )
             .await
         {
-            Ok(location) => {
-                println!("✓ Backup completed to: {}", location);
-                location
+            Ok(outcome) => {
+                println!(
+                    "✓ Backup completed to: {} ({:?} bytes)",
+                    outcome.location, outcome.size_bytes
+                );
+                outcome.location
             }
             Err(e) => {
                 println!("Backup failed: {}. Skipping test", e);
@@ -2473,36 +2564,35 @@ mod tests {
         };
 
         // Delete keys to simulate data loss
-        let mut conn = match redis_client.get_connection() {
-            Ok(c) => c,
-            Err(e) => {
-                println!("Failed to reconnect to Redis: {}. Skipping test", e);
+        let del_result = tokio::time::timeout(
+            op_timeout,
+            redis::cmd("DEL")
+                .arg("test_key1")
+                .arg("test_key2")
+                .arg("test_key3")
+                .query_async::<()>(&mut conn),
+        )
+        .await;
+        match del_result {
+            Ok(Ok(_)) => println!("✓ Deleted all test keys (simulating data loss)"),
+            Ok(Err(e)) => {
+                println!("Failed to delete keys: {}. Skipping test", e);
                 let _ = redis_service.remove().await;
                 let _ = minio.cleanup().await;
                 return;
             }
-        };
-
-        match redis::cmd("DEL")
-            .arg("test_key1")
-            .arg("test_key2")
-            .arg("test_key3")
-            .query::<()>(&mut conn)
-        {
-            Ok(_) => println!("✓ Deleted all test keys (simulating data loss)"),
-            Err(e) => {
-                println!("Failed to delete keys: {}. Skipping test", e);
+            Err(_) => {
+                println!("DEL timed out after {:?}. Skipping test", op_timeout);
                 let _ = redis_service.remove().await;
                 let _ = minio.cleanup().await;
                 return;
             }
         }
 
-        // Verify keys are gone
-        let exists: bool = match redis::cmd("EXISTS").arg("test_key1").query(&mut conn) {
-            Ok(e) => e,
+        let exists = match redis_exists(&mut conn, "test_key1", op_timeout).await {
+            Ok(v) => v,
             Err(e) => {
-                println!("Failed to check key existence: {}. Skipping test", e);
+                println!("{}. Skipping test", e);
                 let _ = redis_service.remove().await;
                 let _ = minio.cleanup().await;
                 return;
@@ -2510,8 +2600,6 @@ mod tests {
         };
         assert!(!exists, "test_key1 should not exist after deletion");
         println!("✓ Verified keys were deleted");
-
-        drop(conn);
 
         // Restore from S3 backup
         match redis_service
@@ -2533,25 +2621,36 @@ mod tests {
             }
         };
 
-        // Wait for Redis to be ready after restore
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+        // Re-establish a fresh connection after restore — the prior socket
+        // may have been severed when the Redis process reloaded. The
+        // ConnectionManager would reconnect lazily on next command anyway,
+        // but doing it explicitly bounds the wait.
+        let mut conn =
+            match tokio::time::timeout(op_timeout, ConnectionManager::new(redis_client.clone()))
+                .await
+            {
+                Ok(Ok(c)) => c,
+                Ok(Err(e)) => {
+                    println!("Failed to reconnect after restore: {}. Skipping test", e);
+                    let _ = redis_service.remove().await;
+                    let _ = minio.cleanup().await;
+                    return;
+                }
+                Err(_) => {
+                    println!(
+                        "Reconnect after restore timed out after {:?}. Skipping test",
+                        op_timeout
+                    );
+                    let _ = redis_service.remove().await;
+                    let _ = minio.cleanup().await;
+                    return;
+                }
+            };
 
-        // Verify restored data
-        let mut conn = match redis_client.get_connection() {
-            Ok(c) => c,
+        let exists1 = match redis_exists(&mut conn, "test_key1", op_timeout).await {
+            Ok(v) => v,
             Err(e) => {
-                println!("Failed to reconnect after restore: {}. Skipping test", e);
-                let _ = redis_service.remove().await;
-                let _ = minio.cleanup().await;
-                return;
-            }
-        };
-
-        // Verify keys exist
-        let exists1: bool = match redis::cmd("EXISTS").arg("test_key1").query(&mut conn) {
-            Ok(e) => e,
-            Err(e) => {
-                println!("Failed to check restored key1: {}. Skipping test", e);
+                println!("{}. Skipping test", e);
                 let _ = redis_service.remove().await;
                 let _ = minio.cleanup().await;
                 return;
@@ -2560,42 +2659,23 @@ mod tests {
         assert!(exists1, "test_key1 should exist after restore");
         println!("✓ Verified test_key1 exists after restore");
 
-        // Verify values
-        let value1: String = match redis::cmd("GET").arg("test_key1").query(&mut conn) {
-            Ok(v) => v,
-            Err(e) => {
-                println!("Failed to get restored value1: {}. Skipping test", e);
-                let _ = redis_service.remove().await;
-                let _ = minio.cleanup().await;
-                return;
-            }
-        };
-        assert_eq!(value1, "value1");
-        println!("✓ Verified test_key1={}", value1);
-
-        let value2: String = match redis::cmd("GET").arg("test_key2").query(&mut conn) {
-            Ok(v) => v,
-            Err(e) => {
-                println!("Failed to get restored value2: {}. Skipping test", e);
-                let _ = redis_service.remove().await;
-                let _ = minio.cleanup().await;
-                return;
-            }
-        };
-        assert_eq!(value2, "value2");
-        println!("✓ Verified test_key2={}", value2);
-
-        let value3: String = match redis::cmd("GET").arg("test_key3").query(&mut conn) {
-            Ok(v) => v,
-            Err(e) => {
-                println!("Failed to get restored value3: {}. Skipping test", e);
-                let _ = redis_service.remove().await;
-                let _ = minio.cleanup().await;
-                return;
-            }
-        };
-        assert_eq!(value3, "value3");
-        println!("✓ Verified test_key3={}", value3);
+        for (k, expected) in [
+            ("test_key1", "value1"),
+            ("test_key2", "value2"),
+            ("test_key3", "value3"),
+        ] {
+            let v = match redis_get_string(&mut conn, k, op_timeout).await {
+                Ok(v) => v,
+                Err(e) => {
+                    println!("{}. Skipping test", e);
+                    let _ = redis_service.remove().await;
+                    let _ = minio.cleanup().await;
+                    return;
+                }
+            };
+            assert_eq!(v, expected);
+            println!("✓ Verified {}={}", k, v);
+        }
 
         // Cleanup
         drop(conn);

@@ -121,6 +121,24 @@ const BackupDetail = lazy(() =>
 const CreateS3Source = lazy(() =>
   import('./pages/CreateS3Source').then((m) => ({ default: m.CreateS3Source }))
 )
+const CreateBackupSchedule = lazy(() =>
+  import('./pages/CreateBackupSchedule').then((m) => ({
+    default: m.CreateBackupSchedule,
+  }))
+)
+const EditBackupSchedule = lazy(() =>
+  import('./pages/EditBackupSchedule').then((m) => ({
+    default: m.EditBackupSchedule,
+  }))
+)
+const ScheduleDetail = lazy(() =>
+  import('./pages/ScheduleDetail').then((m) => ({ default: m.ScheduleDetail }))
+)
+const ScheduleRunDetail = lazy(() =>
+  import('./pages/ScheduleRunDetail').then((m) => ({
+    default: m.ScheduleRunDetail,
+  }))
+)
 const NewProject = lazy(() =>
   import('./pages/NewProject').then((m) => ({ default: m.NewProject }))
 )
@@ -155,6 +173,9 @@ const ExternalConnectivitySetup = lazy(() =>
 )
 const AuditLogs = lazy(() =>
   import('./pages/AuditLogs').then((m) => ({ default: m.AuditLogs }))
+)
+const CliLogin = lazy(() =>
+  import('./pages/CliLogin').then((m) => ({ default: m.CliLogin }))
 )
 const ProxyLogs = lazy(() => import('./pages/ProxyLogs'))
 const ProxyLogDetail = lazy(() => import('./pages/ProxyLogDetail'))
@@ -344,6 +365,12 @@ const FullAppRoutes = () => {
                 <Route path="/proxy-logs" element={<ProxyLogs />} />
                 <Route path="/proxy-logs/:id" element={<ProxyLogDetail />} />
                 <Route path="/audit-logs" element={<AuditLogs />} />
+                {/* CLI device-authorization approval surface. The route
+                    sits inside the protected layout so unauthenticated
+                    visitors get bounced through /login and the
+                    captureReturnTo() infrastructure brings them back. */}
+                <Route path="/cli-login" element={<CliLogin />} />
+                <Route path="/cli-login/:userCode" element={<CliLogin />} />
                 {/* Settings drill-down: only items NOT surfaced at the
                     main sidebar root live here. Top-level resources
                     (domains, storage, email, AI, source providers,
@@ -405,8 +432,12 @@ const FullAppRoutes = () => {
                 <Route path="/dns-providers/:id" element={<DnsProviderDetail />} />
                 <Route path="/backups" element={<Backups />} />
                 <Route path="/backups/s3-sources/new" element={<CreateS3Source />} />
-                <Route path="/backups/s3-sources/:id" element={<S3SourceDetail />} />
+                <Route path="/backups/s3-sources/:id/schedules/new" element={<CreateBackupSchedule />} />
+                <Route path="/backups/s3-sources/:id/schedules/:scheduleId/edit" element={<EditBackupSchedule />} />
+                <Route path="/backups/schedules/:id" element={<ScheduleDetail />} />
+                <Route path="/backups/schedules/:scheduleId/runs/:runId" element={<ScheduleRunDetail />} />
                 <Route path="/backups/s3-sources/:id/backups/:backupId" element={<BackupDetail />} />
+                <Route path="/backups/s3-sources/:id" element={<S3SourceDetail />} />
                 {/* Backward-compat: old /settings/<resource> links → new top-level */}
                 <Route path="/settings/domains/*" element={<Navigate to="/domains" replace />} />
                 <Route path="/settings/email/*" element={<Navigate to="/email" replace />} />

@@ -198,7 +198,7 @@ pub struct PlanSourceBackup {
     pub location_was_resolved: bool,
     /// "walg", "pg_dump", "unknown".
     pub format: String,
-    pub size_bytes: Option<i32>,
+    pub size_bytes: Option<i64>,
     pub created_at: Option<String>,
 }
 
@@ -963,6 +963,7 @@ async fn run_restore_inner(
             name: "orphan backup".to_string(),
             backup_id: "".to_string(),
             schedule_id: None,
+            schedule_run_id: None,
             backup_type: "full".to_string(),
             state: "completed".to_string(),
             started_at: Utc::now(),
@@ -978,6 +979,7 @@ async fn run_restore_inner(
             created_by: run.created_by,
             expires_at: None,
             tags: "[]".to_string(),
+            last_heartbeat_at: None,
         }
     };
 

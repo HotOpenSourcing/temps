@@ -66,15 +66,25 @@ export function TriggerBackupDialog({
     },
   })
 
+  // The user's explicitly-flagged default S3 source, if any. Used in
+  // the FormDescription render below ("Defaults to ⭐ Cloudflare …") and
+  // as the first-choice preselect in the effect below.
   const defaultSource = s3Sources?.find(
     (s) => (s as { is_default?: boolean }).is_default === true,
   )
 
+  // Pre-select a Storage Destination when the dialog opens:
+  //   1. The default source, if any.
+  //   2. Otherwise, the first source in the list — saves an extra click
+  //      and matches what most operators want when they only have one or
+  //      two sources configured. Without this, the Select renders blank
+  //      and the user has to expand it manually.
   useEffect(() => {
-    if (open && defaultSource && form.getValues('s3_source_id') === undefined) {
-      form.setValue('s3_source_id', defaultSource.id)
-    }
-  }, [open, defaultSource, form])
+    if (!open || !s3Sources || s3Sources.length === 0) return
+    if (form.getValues('s3_source_id') !== undefined) return
+    const preferred = defaultSource ?? s3Sources[0]
+    form.setValue('s3_source_id', preferred.id)
+  }, [open, s3Sources, defaultSource, form])
 
   const runBackupMutation = useMutation({
     ...runExternalServiceBackupMutation(),
@@ -177,11 +187,20 @@ export function TriggerBackupDialog({
                             (source as { is_default?: boolean }).is_default ===
                             true
                           return (
+                            // pl-2 overrides the shadcn SelectItem default of
+                            // pl-8 (which reserves a check-mark gutter we
+                            // don't render here). Without this override the
+                            // menu rows look indented relative to the trigger
+                            // when an option is selected. The hidden check
+                            // <span> inside SelectItem still positions
+                            // absolutely at left-2; we accept the slight
+                            // visual overlap because we never render it.
                             <SelectItem
                               key={source.id}
                               value={source.id.toString()}
+                              className="pl-2"
                             >
-                              <div className="flex flex-col">
+                              <div className="flex flex-col items-start text-left">
                                 <span className="flex items-center gap-1.5">
                                   {source.name}
                                   {isDefault ? (

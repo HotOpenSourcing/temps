@@ -8,6 +8,7 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
+temps-backup-core = { path = "../temps-backup-core" }
 temps-auth = { path = "../temps-auth" }
 temps-config = { path = "../temps-config" }
 temps-core = { path = "../temps-core" }
@@ -39,6 +40,7 @@ axum = { workspace = true }
 bollard = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
+async-stream = { workspace = true }
 urlencoding = { workspace = true }
 
 [dev-dependencies]

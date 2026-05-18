@@ -59,10 +59,9 @@ impl PreviewUrlParts {
 /// broken settings read falls back to `https://localho.st` so sandbox
 /// endpoints keep working.
 ///
-/// This duplicates the logic in `temps-workspace::preview_url_parts`
-/// intentionally — we want `temps-sandbox` independent of the workspace
-/// crate. If the two diverge, prefer making both callers share a
-/// `PreviewUrlParts::from_platform_config` helper in `temps-core`.
+/// If a second consumer of this logic appears, prefer extracting a shared
+/// `PreviewUrlParts::from_platform_config` helper in `temps-core` rather
+/// than copy-pasting.
 pub async fn load(platform_config: &Arc<ConfigService>) -> PreviewUrlParts {
     match platform_config.get_settings().await {
         Ok(s) => {

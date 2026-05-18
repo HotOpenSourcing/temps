@@ -18,9 +18,11 @@ pub mod audit_logs;
 pub mod autopilot_configs;
 pub mod autopilot_run_logs;
 pub mod autopilot_runs;
+pub mod backup_alerts;
 pub mod backup_schedules;
 pub mod backups;
 pub mod challenge_sessions;
+pub mod cli_login_sessions;
 pub mod cron_executions;
 pub mod crons;
 pub mod custom_routes;
@@ -72,6 +74,7 @@ pub mod request_sessions;
 pub mod restore_runs;
 pub mod roles;
 pub mod s3_sources;
+pub mod schedule_runs;
 pub mod secret_environments;
 pub mod secrets;
 pub mod service_endpoints;
@@ -130,10 +133,6 @@ pub mod log_events;
 
 // Standalone sandbox API (Vercel-compatible)
 pub mod sandboxes;
-
-// Workspace entities
-pub mod workspace_messages;
-pub mod workspace_sessions;
 
 // Workflow memory
 pub mod workflow_memory;

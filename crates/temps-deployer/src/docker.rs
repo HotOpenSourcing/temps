@@ -57,6 +57,14 @@ pub struct DockerRuntime {
     /// Wrapped in `Option` so non-overlay deployers (e.g. tests) can
     /// skip the wiring entirely.
     overlay_peers: Option<Arc<std::sync::RwLock<Vec<temps_network::Peer>>>>,
+    /// Root directory on the host where per-container secret files are
+    /// materialized for bind-mounting into `/run/secrets`. Defaults to
+    /// `$TEMPS_DATA_DIR/secrets` (falling back to `$HOME/.temps/secrets`
+    /// and finally `./.temps/secrets`) so secret mounts SURVIVE A HOST
+    /// REBOOT — historically this lived under `std::env::temp_dir()`,
+    /// which is tmpfs on most Linux distros and got wiped on every
+    /// reboot, forcing a redeploy. Override via [`Self::with_secrets_root`].
+    secrets_root: PathBuf,
 }
 
 /// Map a POSIX exit code (>= 128 means "killed by signal N - 128") to a human
@@ -119,18 +127,138 @@ pub(crate) fn build_exit_reason(
     }
 }
 
+/// Sample container stats twice ~1s apart so the CPU delta formula has a real
+/// window to work with. Docker's `one_shot: true` returns immediately but
+/// leaves `precpu_stats` empty, which makes the single-sample CPU math
+/// collapse to ~0% for any container that's been running long enough that
+/// (cumulative_cpu_time / system_time_since_boot) rounds to zero. The 1s
+/// interval matches the Docker CLI default.
+async fn sample_container_stats_twice(
+    docker: &Docker,
+    container_id: &str,
+) -> Result<
+    (
+        bollard::models::ContainerStatsResponse,
+        bollard::models::ContainerStatsResponse,
+    ),
+    bollard::errors::Error,
+> {
+    use bollard::query_parameters::StatsOptions;
+
+    let opts = StatsOptions {
+        stream: false,
+        one_shot: true,
+    };
+
+    let mut first_stream = docker.stats(container_id, Some(opts.clone()));
+    let first = first_stream
+        .try_next()
+        .await?
+        .ok_or_else(|| bollard::errors::Error::IOError {
+            err: std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "first stats sample produced no frames",
+            ),
+        })?;
+    drop(first_stream);
+
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+    let mut second_stream = docker.stats(container_id, Some(opts));
+    let second =
+        second_stream
+            .try_next()
+            .await?
+            .ok_or_else(|| bollard::errors::Error::IOError {
+                err: std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "second stats sample produced no frames",
+                ),
+            })?;
+
+    Ok((first, second))
+}
+
+/// Compute the Docker-CLI-equivalent CPU percent from two consecutive stats
+/// samples.
+///
+/// Formula (matches `docker stats`):
+/// ```text
+/// cpu_delta    = current.total_usage     - previous.total_usage
+/// system_delta = current.system_cpu_usage - previous.system_cpu_usage
+/// percent      = (cpu_delta / system_delta) * online_cpus * 100
+/// ```
+///
+/// Returns `None` when counters are missing or the delta is zero/negative
+/// (container just started, stopped, or clock skew). A fully pinned 4-core
+/// container correctly reads as 400% — we deliberately do NOT clamp to 100,
+/// because the UI shows "CPU x.x% / N cores" and capping the numerator hides
+/// real over-saturation.
+fn cpu_percent_from_samples(
+    current: &bollard::models::ContainerStatsResponse,
+    previous: &bollard::models::ContainerStatsResponse,
+) -> Option<f64> {
+    let cur_cpu = current.cpu_stats.as_ref()?;
+    let prev_cpu = previous.cpu_stats.as_ref()?;
+
+    let cur_total = cur_cpu.cpu_usage.as_ref()?.total_usage? as i128;
+    let prev_total = prev_cpu.cpu_usage.as_ref()?.total_usage? as i128;
+    let cur_system = cur_cpu.system_cpu_usage? as i128;
+    let prev_system = prev_cpu.system_cpu_usage? as i128;
+
+    let cpu_delta = cur_total - prev_total;
+    let system_delta = cur_system - prev_system;
+
+    if cpu_delta <= 0 || system_delta <= 0 {
+        return None;
+    }
+
+    let cpus = cur_cpu.online_cpus.unwrap_or(1).max(1) as f64;
+    let percent = (cpu_delta as f64 / system_delta as f64) * cpus * 100.0;
+    if percent.is_finite() && percent >= 0.0 {
+        Some(percent)
+    } else {
+        None
+    }
+}
+
+/// Subtract reclaimable page cache from raw memory usage so the number
+/// matches `docker stats`'s "MEM USAGE" column.
+///
+/// Docker reports `usage` straight from cgroups, which includes the page
+/// cache. A Postgres container with an 8 GB working set + 8 GB of file
+/// cache reads back as `usage == limit` on a 16 GB cap even though only
+/// half of that is real RSS. The Docker CLI compensates by subtracting:
+/// - cgroup v2: `stats.inactive_file`
+/// - cgroup v1: `stats.cache`
+///
+/// We prefer `inactive_file` (cgroup v2 is the modern default) and fall
+/// back to `cache`. If neither key is present, return the raw usage —
+/// better to slightly over-report than to crash on a missing field.
+fn memory_usage_excluding_cache(mem: &bollard::models::ContainerMemoryStats) -> Option<u64> {
+    let raw_usage = mem.usage?;
+    let cache = mem
+        .stats
+        .as_ref()
+        .and_then(|s| s.get("inactive_file").or_else(|| s.get("cache")).copied());
+    match cache {
+        Some(c) if c <= raw_usage => Some(raw_usage - c),
+        _ => Some(raw_usage),
+    }
+}
+
 impl DockerRuntime {
     /// Per-container directory that holds plaintext secret files for bind-mounting
     /// into `/run/secrets`. Lives outside `TempDir` because Docker keeps the
     /// directory open for the container lifetime; cleanup happens in
     /// `remove_container`.
+    ///
+    /// Lives under `secrets_root` (defaults to `$TEMPS_DATA_DIR/secrets`)
+    /// rather than `/tmp` so the bind mount survives a host reboot —
+    /// `/tmp` is tmpfs on most Linux distros and gets wiped, leaving
+    /// containers with empty `/run/secrets` until the next redeploy.
     fn secrets_host_dir(&self, container_name: &str) -> PathBuf {
-        // Use std::env::temp_dir() so the path matches what the Docker daemon
-        // can see — both daemon and us run on the same host in the local
-        // (non-remote) deployer path.
-        std::env::temp_dir()
-            .join("temps-secrets")
-            .join(container_name)
+        self.secrets_root.join(container_name)
     }
 
     /// Resolves the numeric (uid, gid) that the container will run as,
@@ -179,6 +307,25 @@ impl DockerRuntime {
     }
 
     pub fn new(docker: Arc<Docker>, use_buildkit: bool, network_name: String) -> Self {
+        let secrets_root = default_secrets_root();
+        // Best-effort: ensure the root exists with restrictive perms so the
+        // first deploy after a fresh install doesn't race with the per-container
+        // mkdir. Failures are logged and not fatal — the per-deploy code path
+        // creates the leaf directory regardless.
+        if let Err(e) = std::fs::create_dir_all(&secrets_root) {
+            warn!(
+                "Failed to pre-create secrets root {}: {} (will retry per-deploy)",
+                secrets_root.display(),
+                e
+            );
+        } else {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ =
+                    std::fs::set_permissions(&secrets_root, std::fs::Permissions::from_mode(0o700));
+            }
+        }
         Self {
             docker,
             use_buildkit,
@@ -188,7 +335,15 @@ impl DockerRuntime {
             dns_servers: Vec::new(),
             overlay_dns_slot: None,
             overlay_peers: None,
+            secrets_root,
         }
+    }
+
+    /// Override the secrets host root. Tests use this to scope writes to
+    /// a temp dir; the agent/serve paths leave it at the default.
+    pub fn with_secrets_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.secrets_root = root.into();
+        self
     }
 
     /// Read the per-node Hickory resolver IP from a shared slot
@@ -1286,9 +1441,14 @@ impl ContainerDeployer for DockerRuntime {
         // and files are visible from container start (no race with start).
         //
         // Trade-off vs tmpfs: plaintext lives on the host filesystem under
-        // SecretsHostDir until the container is removed. The directory is
-        // mode 0700 root-owned; individual files are mode 0400. Cleanup is
-        // handled in `remove_container`.
+        // `secrets_root` ($TEMPS_DATA_DIR/secrets by default) until the
+        // container is removed. We deliberately use a persistent path
+        // rather than `std::env::temp_dir()` so the bind mount survives a
+        // host reboot — `/tmp` is tmpfs on most Linux distros, and the
+        // mount would otherwise point at an empty directory after a
+        // restart, forcing a redeploy. The directory is mode 0700
+        // root-owned; individual files are mode 0400. Cleanup is handled
+        // in `remove_container`.
         let secrets_bind = if request.secrets.is_empty() {
             None
         } else {
@@ -1682,85 +1842,40 @@ impl ContainerDeployer for DockerRuntime {
         &self,
         container_id: &str,
     ) -> Result<crate::ContainerStats, DeployerError> {
-        use bollard::query_parameters::StatsOptions;
-
-        // Get container info first to get the name
+        // Get container info first to get the name and cpu_limit
         let container_info = self.get_container_info(container_id).await?;
 
-        // Get stats from Docker - stream but take only first stat and close
-        let mut stats_stream = self.docker.stats(
-            container_id,
-            Some(StatsOptions {
-                stream: false,  // Only get one stat, don't stream
-                one_shot: true, // Return immediately after first stat
-            }),
-        );
-
-        // Take the first stat
-        let stats_data = stats_stream
-            .try_next()
+        // Sample twice ~1s apart so CPU% has a real delta window — Docker's
+        // `one_shot: true` doesn't populate `precpu_stats`, so the
+        // single-sample math collapses to (cumulative cpu time / system time
+        // since boot) which is ~0% for any long-running container. This is
+        // the same pattern `docker stats` uses internally.
+        let (first, second) = sample_container_stats_twice(&self.docker, container_id)
             .await
-            .map_err(|e| DeployerError::Other(format!("Failed to get container stats: {}", e)))?
-            .ok_or_else(|| DeployerError::Other("No stats available".to_string()))?;
+            .map_err(|e| DeployerError::Other(format!("Failed to get container stats: {}", e)))?;
 
-        // Extract CPU percentage using delta between cpu_stats and precpu_stats
-        let cpu_percent = {
-            let current_cpu = stats_data
-                .cpu_stats
-                .as_ref()
-                .and_then(|cs| cs.cpu_usage.as_ref())
-                .and_then(|cu| cu.total_usage);
-            let current_system = stats_data
-                .cpu_stats
-                .as_ref()
-                .and_then(|cs| cs.system_cpu_usage);
-            let prev_cpu = stats_data
-                .precpu_stats
-                .as_ref()
-                .and_then(|cs| cs.cpu_usage.as_ref())
-                .and_then(|cu| cu.total_usage);
-            let prev_system = stats_data
-                .precpu_stats
-                .as_ref()
-                .and_then(|cs| cs.system_cpu_usage);
+        let cpu_percent = cpu_percent_from_samples(&second, &first).unwrap_or(0.0);
 
-            match (current_cpu, current_system, prev_cpu, prev_system) {
-                (Some(cur_cpu), Some(cur_sys), Some(pre_cpu), Some(pre_sys)) => {
-                    let cpu_delta = cur_cpu as f64 - pre_cpu as f64;
-                    let system_delta = cur_sys as f64 - pre_sys as f64;
-                    if system_delta > 0.0 && cpu_delta >= 0.0 {
-                        let num_cpus = stats_data
-                            .cpu_stats
-                            .as_ref()
-                            .and_then(|cs| cs.online_cpus)
-                            .unwrap_or(1) as f64;
-                        ((cpu_delta / system_delta) * num_cpus * 100.0).clamp(0.0, 100.0)
-                    } else {
-                        0.0
-                    }
-                }
-                _ => 0.0,
-            }
-        };
-
-        // Extract memory stats
-        let memory_stats = stats_data.memory_stats.as_ref();
-        let memory_bytes = memory_stats.and_then(|ms| ms.usage).unwrap_or(0);
+        // Memory: subtract page cache (matches `docker stats` MEM USAGE).
+        // cgroup v2 → `inactive_file`, cgroup v1 → `cache`. Both are
+        // reclaimable file pages that the kernel counts as `usage` but
+        // shouldn't show up as the container's working set.
+        let memory_stats = second.memory_stats.as_ref();
+        let memory_bytes = memory_stats
+            .and_then(memory_usage_excluding_cache)
+            .unwrap_or(0);
         let memory_limit_bytes = memory_stats.and_then(|ms| ms.limit);
 
-        let memory_percent = if let Some(limit) = memory_limit_bytes {
-            if limit > 0 {
+        let memory_percent = match memory_limit_bytes {
+            Some(limit) if limit > 0 => {
                 Some(((memory_bytes as f64 / limit as f64) * 100.0).clamp(0.0, 100.0))
-            } else {
-                None
             }
-        } else {
-            None
+            _ => None,
         };
 
-        // Extract network stats
+        // Extract network stats from the latest sample.
         let default_networks = Default::default();
-        let networks_stats = stats_data.networks.as_ref().unwrap_or(&default_networks);
+        let networks_stats = second.networks.as_ref().unwrap_or(&default_networks);
         let (network_rx_bytes, network_tx_bytes) =
             if let Some(net_stat) = networks_stats.values().next() {
                 (
@@ -1889,6 +2004,31 @@ impl ContainerRuntime for DockerRuntime {
     }
 }
 
+/// Resolve the persistent root directory for materialized secret files.
+///
+/// Order of preference, mirroring the rest of the codebase
+/// (`temps-sandbox`, agent session storage):
+///   1. `$TEMPS_DATA_DIR/secrets`
+///   2. `$HOME/.temps/secrets`
+///   3. `./.temps/secrets` (last-resort fallback for headless container
+///      runtimes where neither env var is set)
+///
+/// Crucially, NONE of these resolve to `std::env::temp_dir()`. On most
+/// Linux distros `/tmp` is mounted as tmpfs and wiped at boot, which
+/// caused container `/run/secrets` mounts to point at empty/missing
+/// directories after a host reboot and forced a redeploy.
+fn default_secrets_root() -> PathBuf {
+    let base = std::env::var("TEMPS_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(".temps")
+        });
+    base.join("secrets")
+}
+
 /// Writes secrets as files into a per-container host directory for Docker
 /// to bind-mount into `/run/secrets`. The directory is created (or recreated)
 /// fresh on each call so stale entries from a previous deployment of the same
@@ -1910,10 +2050,71 @@ fn write_secrets_to_host_dir(
     use std::fs;
     use std::io::Write;
 
+    // Ensure the parent (secrets root) exists. The runtime's `new()` already
+    // best-effort creates it, but a hostile chmod or fresh install between
+    // restarts could have left it missing — recreate so we don't fail with
+    // ENOENT. We deliberately do NOT chmod the parent here: that's the
+    // runtime's job, and on shared hosts the parent may be intentionally
+    // owned by a different user.
+    if let Some(parent) = dir.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
     // Recreate fresh — wipes any stale files from a previous container with
     // the same name (rolling deploys, retries after failure, etc.).
+    //
+    // After a host reboot we may inherit a leaf directory whose contents
+    // were chowned to the previous container's USER (e.g. nonroot uid
+    // 65532) while the parent is owned by the temps user. `remove_dir_all`
+    // on such a tree fails with EACCES because we can't unlink files we
+    // don't own inside a directory we *do* own (sticky-bit semantics on
+    // some filesystems). Reset the leaf's perms to 0700 owned-by-us first
+    // so the recursive remove can succeed.
     if dir.exists() {
-        fs::remove_dir_all(dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Best-effort: if this chmod fails (we don't own the dir), the
+            // remove below will still surface the real error.
+            let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+        }
+        if let Err(e) = fs::remove_dir_all(dir) {
+            // If the leaf itself is owned by another uid (e.g. previous
+            // container's USER) and we can't traverse into it, fall back
+            // to renaming it aside so the deploy can proceed. The orphan
+            // is logged for operator cleanup; it's not in /tmp anymore so
+            // it won't auto-vanish on reboot, but it's also not blocking
+            // the deploy.
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                let orphan = dir.with_extension(format!(
+                    "orphan-{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0)
+                ));
+                fs::rename(dir, &orphan).map_err(|rename_err| {
+                    std::io::Error::new(
+                        rename_err.kind(),
+                        format!(
+                            "failed to clear stale secrets dir {} \
+                             (rename to {} also failed: {}; original error: {})",
+                            dir.display(),
+                            orphan.display(),
+                            rename_err,
+                            e
+                        ),
+                    )
+                })?;
+                warn!(
+                    "Renamed unowned stale secrets dir to {} so deploy could proceed; \
+                     please remove manually",
+                    orphan.display()
+                );
+            } else {
+                return Err(e);
+            }
+        }
     }
     fs::create_dir_all(dir)?;
     #[cfg(unix)]
@@ -1987,8 +2188,8 @@ fn write_secrets_to_host_dir(
                 );
                 // World-readable fallback. Parent dir already restricts
                 // access on the host side (only the Temps user can traverse
-                // into /tmp/temps-secrets); these bits are what the
-                // container sees.
+                // into the secrets root under $TEMPS_DATA_DIR/secrets);
+                // these bits are what the container sees.
                 fs::set_permissions(dir, fs::Permissions::from_mode(0o755))?;
                 for key in secrets.keys() {
                     fs::set_permissions(dir.join(key), fs::Permissions::from_mode(0o444))?;
@@ -2106,6 +2307,42 @@ mod docker_tests {
         // Stale file from first call must be gone
         assert!(!dir.join("OLD").exists());
         assert!(dir.join("NEW").exists());
+    }
+
+    #[test]
+    fn test_default_secrets_root_uses_temps_data_dir() {
+        // Smoke test the env precedence. We can't unset HOME without
+        // breaking other tests, so verify TEMPS_DATA_DIR wins when set.
+        let tmp = TempDir::new().unwrap();
+        let prev = std::env::var("TEMPS_DATA_DIR").ok();
+        std::env::set_var("TEMPS_DATA_DIR", tmp.path());
+        let root = default_secrets_root();
+        assert_eq!(root, tmp.path().join("secrets"));
+        // Critically, this must NOT live under /tmp (unless TEMPS_DATA_DIR
+        // points there explicitly) — that was the bug we just fixed.
+        match prev {
+            Some(v) => std::env::set_var("TEMPS_DATA_DIR", v),
+            None => std::env::remove_var("TEMPS_DATA_DIR"),
+        }
+    }
+
+    #[test]
+    fn test_default_secrets_root_is_persistent_path() {
+        // Without TEMPS_DATA_DIR, the resolved root must live under
+        // $HOME/.temps/secrets — i.e. NOT under std::env::temp_dir(),
+        // which is tmpfs on most Linux distros and was the source of
+        // the post-reboot redeploy regression.
+        let prev_data = std::env::var("TEMPS_DATA_DIR").ok();
+        std::env::remove_var("TEMPS_DATA_DIR");
+        let root = default_secrets_root();
+        assert!(
+            !root.starts_with(std::env::temp_dir()),
+            "secrets root unexpectedly resolved to a tmpfs path: {}",
+            root.display()
+        );
+        if let Some(v) = prev_data {
+            std::env::set_var("TEMPS_DATA_DIR", v);
+        }
     }
 
     #[test]
@@ -2630,5 +2867,163 @@ CMD ["cat", "/hello.txt"]
         assert!(matches!(deploy_error, DeployerError::DeploymentFailed(_)));
 
         println!("✅ Error types validation passed");
+    }
+
+    // ── Container stats helpers ──────────────────────────────────────────────
+
+    fn cpu_sample(
+        total: u64,
+        system: u64,
+        online_cpus: u32,
+    ) -> bollard::models::ContainerStatsResponse {
+        bollard::models::ContainerStatsResponse {
+            cpu_stats: Some(bollard::models::ContainerCpuStats {
+                cpu_usage: Some(bollard::models::ContainerCpuUsage {
+                    total_usage: Some(total),
+                    ..Default::default()
+                }),
+                system_cpu_usage: Some(system),
+                online_cpus: Some(online_cpus),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// 50% on a 2-CPU host: cpu_delta=1e9 (1s of cpu-time), system_delta=4e9
+    /// (wall_ticks * cpus). (cpu_delta/system_delta)*online_cpus = 0.25*2 = 50%.
+    #[test]
+    fn cpu_percent_50pct_two_cpus() {
+        let prev = cpu_sample(0, 0, 2);
+        let curr = cpu_sample(1_000_000_000, 4_000_000_000, 2);
+        let pct = cpu_percent_from_samples(&curr, &prev).unwrap();
+        assert!((pct - 50.0).abs() < 0.01, "expected ~50%, got {pct}");
+    }
+
+    /// A 2-core container fully pinned reads as 200% — we intentionally
+    /// don't clamp to 100, since the UI shows "x.x% / N cores".
+    #[test]
+    fn cpu_percent_fully_pinned_two_cpus_reads_200pct() {
+        let prev = cpu_sample(0, 0, 2);
+        let curr = cpu_sample(2_000_000_000, 2_000_000_000, 2);
+        let pct = cpu_percent_from_samples(&curr, &prev).unwrap();
+        assert!((pct - 200.0).abs() < 0.01, "expected ~200%, got {pct}");
+    }
+
+    /// Identical samples (container idle or clock didn't advance) must
+    /// produce None rather than 0% — the old code returned a spurious
+    /// near-zero value here, which is what made the UI read "CPU 0.0%".
+    #[test]
+    fn cpu_percent_identical_samples_returns_none() {
+        let prev = cpu_sample(5_000_000_000, 10_000_000_000, 4);
+        let same = cpu_sample(5_000_000_000, 10_000_000_000, 4);
+        assert!(cpu_percent_from_samples(&same, &prev).is_none());
+    }
+
+    #[test]
+    fn cpu_percent_missing_counters_returns_none() {
+        let prev = bollard::models::ContainerStatsResponse {
+            cpu_stats: Some(bollard::models::ContainerCpuStats {
+                cpu_usage: None,
+                system_cpu_usage: Some(0),
+                online_cpus: Some(1),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let curr = cpu_sample(1_000_000_000, 1_000_000_000, 1);
+        assert!(cpu_percent_from_samples(&curr, &prev).is_none());
+    }
+
+    fn mem_stats(
+        usage: u64,
+        limit: u64,
+        cache: Option<(&'static str, u64)>,
+    ) -> bollard::models::ContainerMemoryStats {
+        let mut stats_map = std::collections::HashMap::new();
+        if let Some((key, val)) = cache {
+            stats_map.insert(key.to_string(), val);
+        }
+        bollard::models::ContainerMemoryStats {
+            usage: Some(usage),
+            limit: Some(limit),
+            stats: if cache.is_some() {
+                Some(stats_map)
+            } else {
+                None
+            },
+            ..Default::default()
+        }
+    }
+
+    /// cgroup v2 hosts (Docker Desktop, modern Linux) report reclaimable
+    /// file pages as `inactive_file`. Subtract it so the number matches
+    /// `docker stats`.
+    #[test]
+    fn memory_usage_subtracts_inactive_file_cgroup_v2() {
+        let mem = mem_stats(
+            16 * 1024 * 1024 * 1024,
+            16 * 1024 * 1024 * 1024,
+            Some(("inactive_file", 8 * 1024 * 1024 * 1024)),
+        );
+        assert_eq!(
+            memory_usage_excluding_cache(&mem).unwrap(),
+            8 * 1024 * 1024 * 1024
+        );
+    }
+
+    /// cgroup v1 surfaces the same data as `cache`. Subtract it.
+    #[test]
+    fn memory_usage_subtracts_cache_cgroup_v1() {
+        let mem = mem_stats(
+            10 * 1024 * 1024 * 1024,
+            16 * 1024 * 1024 * 1024,
+            Some(("cache", 3 * 1024 * 1024 * 1024)),
+        );
+        assert_eq!(
+            memory_usage_excluding_cache(&mem).unwrap(),
+            7 * 1024 * 1024 * 1024
+        );
+    }
+
+    /// Hosts that report both should prefer `inactive_file` — matches the
+    /// Docker CLI exactly and is the more accurate signal.
+    #[test]
+    fn memory_usage_prefers_inactive_file_when_both_present() {
+        let mut stats_map = std::collections::HashMap::new();
+        stats_map.insert("inactive_file".to_string(), 4 * 1024 * 1024 * 1024);
+        stats_map.insert("cache".to_string(), 6 * 1024 * 1024 * 1024);
+        let mem = bollard::models::ContainerMemoryStats {
+            usage: Some(10 * 1024 * 1024 * 1024),
+            limit: Some(16 * 1024 * 1024 * 1024),
+            stats: Some(stats_map),
+            ..Default::default()
+        };
+        assert_eq!(
+            memory_usage_excluding_cache(&mem).unwrap(),
+            6 * 1024 * 1024 * 1024
+        );
+    }
+
+    /// Without cache info, return raw usage rather than crashing.
+    #[test]
+    fn memory_usage_returns_raw_when_no_cache_info() {
+        let mem = mem_stats(5 * 1024 * 1024 * 1024, 16 * 1024 * 1024 * 1024, None);
+        assert_eq!(
+            memory_usage_excluding_cache(&mem).unwrap(),
+            5u64 * 1024 * 1024 * 1024
+        );
+    }
+
+    /// Defensive: if `cache` is somehow larger than `usage` (sentinel
+    /// values, stat skew), don't underflow — return raw usage.
+    #[test]
+    fn memory_usage_handles_cache_larger_than_usage() {
+        let mem = mem_stats(
+            1024 * 1024,
+            16 * 1024 * 1024 * 1024,
+            Some(("cache", 10 * 1024 * 1024 * 1024)),
+        );
+        assert_eq!(memory_usage_excluding_cache(&mem).unwrap(), 1024 * 1024);
     }
 }

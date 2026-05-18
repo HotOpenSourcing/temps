@@ -81,6 +81,19 @@ mod m20260428_000003_create_node_route_state;
 mod m20260430_000001_add_deployment_container_exit_info;
 mod m20260430_000002_add_deployment_container_runtime_info;
 mod m20260501_000001_add_gitlab_webhook_to_projects;
+mod m20260502_000001_add_observe_correlation;
+mod m20260504_000001_widen_backup_size_and_heartbeat;
+mod m20260505_000001_create_events_ch_outbox;
+mod m20260507_000001_add_workspace_preview_password_encrypted;
+mod m20260511_000001_create_cli_login_sessions;
+mod m20260511_000002_add_is_secret_to_env_vars;
+mod m20260514_000001_create_backup_jobs;
+mod m20260515_000001_create_backup_alerts;
+mod m20260515_000002_add_backup_jobs_max_runtime;
+mod m20260515_000003_add_backup_schedules_max_runtime;
+mod m20260516_000001_create_schedule_runs;
+mod m20260517_000001_add_health_metadata_to_external_services;
+mod m20260517_000002_drop_backup_jobs;
 
 pub struct Migrator;
 
@@ -165,6 +178,19 @@ impl MigratorTrait for Migrator {
             Box::new(m20260430_000001_add_deployment_container_exit_info::Migration),
             Box::new(m20260430_000002_add_deployment_container_runtime_info::Migration),
             Box::new(m20260501_000001_add_gitlab_webhook_to_projects::Migration),
+            Box::new(m20260502_000001_add_observe_correlation::Migration),
+            Box::new(m20260504_000001_widen_backup_size_and_heartbeat::Migration),
+            Box::new(m20260505_000001_create_events_ch_outbox::Migration),
+            Box::new(m20260507_000001_add_workspace_preview_password_encrypted::Migration),
+            Box::new(m20260511_000001_create_cli_login_sessions::Migration),
+            Box::new(m20260511_000002_add_is_secret_to_env_vars::Migration),
+            Box::new(m20260514_000001_create_backup_jobs::Migration),
+            Box::new(m20260515_000001_create_backup_alerts::Migration),
+            Box::new(m20260515_000002_add_backup_jobs_max_runtime::Migration),
+            Box::new(m20260515_000003_add_backup_schedules_max_runtime::Migration),
+            Box::new(m20260516_000001_create_schedule_runs::Migration),
+            Box::new(m20260517_000001_add_health_metadata_to_external_services::Migration),
+            Box::new(m20260517_000002_drop_backup_jobs::Migration),
         ]
     }
 }

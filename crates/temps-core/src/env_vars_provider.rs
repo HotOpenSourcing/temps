@@ -44,9 +44,16 @@ pub trait ProjectEnvVarsProvider: Send + Sync {
     /// given project. Returns one entry per linked service (even if that
     /// service produced zero variables) so the UI can list integrations that
     /// are attached but currently empty.
+    ///
+    /// When `environment_id` is `Some`, the returned env vars are the
+    /// side-effect-free preview of what a deployment in that environment
+    /// would receive (per-tenant DB names, bucket names, etc.). When
+    /// `None`, the static admin-level values are returned — same legacy
+    /// behavior as before this argument existed.
     async fn get_project_integration_env_vars(
         &self,
         project_id: i32,
+        environment_id: Option<i32>,
     ) -> Result<Vec<ProjectIntegrationEnvVars>, Box<dyn std::error::Error + Send + Sync>>;
 }
 

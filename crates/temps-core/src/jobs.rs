@@ -235,6 +235,61 @@ pub struct RouteTableUpdatedJob {
     pub route_count: usize,
 }
 
+/// Trigger event for a backup. Published by the HTTP handler or the cron
+/// scheduler immediately after inserting the `backups` row. The backup
+/// processor consumes this event and runs the engine in a one-shot
+/// container.
+///
+/// The processor reads everything it needs from the `backups` row + the
+/// engine-specific JSON params; this struct only carries the routing
+/// info needed to dispatch to the right engine and apply the right
+/// wall-clock limit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupRequestedJob {
+    /// FK to `backups.id`. The processor uses this as the dedup key
+    /// (one in-flight task per backup_id) and as the audit log key.
+    pub backup_id: i32,
+    /// Engine key (`"control_plane"`, `"postgres_pgdump"`, `"redis"`,
+    /// `"mongodb"`, `"s3_mirror"`, `"postgres_walg"`, `"postgres_cluster"`).
+    /// Must match a registered `BackupEngine::engine()` in the processor.
+    pub engine: String,
+    /// Engine-specific parameters (e.g. `{"service_id": 28, "s3_source_id": 2}`).
+    pub params: serde_json::Value,
+    /// Wall-clock timeout for this backup. The processor wraps the
+    /// container's exit in `tokio::time::timeout` with this duration.
+    pub max_runtime_secs: i64,
+}
+
+/// Result event published by the backup processor after a successful run.
+/// The schedule_runs aggregator listens for this to update the parent
+/// `schedule_runs.finished_at` once every sibling reaches a terminal state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupCompletedJob {
+    pub backup_id: i32,
+    pub engine: String,
+    /// S3 URL or object key where the backup data lives.
+    pub s3_location: String,
+    pub size_bytes: Option<i64>,
+}
+
+/// Result event published by the backup processor after a failed run.
+/// Carries the captured stderr tail so notification handlers can include
+/// it in alerts without re-querying the DB.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupFailedJob {
+    pub backup_id: i32,
+    pub engine: String,
+    pub error_message: String,
+}
+
+/// Cancel request from the HTTP cancel handler. The processor looks the
+/// `backup_id` up in its in-memory cancel-token map and fires the token,
+/// which signals the in-flight container to stop.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupCancelRequestedJob {
+    pub backup_id: i32,
+}
+
 /// Core job enum containing all possible job types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Job {
@@ -275,6 +330,14 @@ pub enum Job {
     AlarmResolved(AlarmResolvedJob),
     // Autopilot events
     AutopilotTrigger(AutopilotTriggerJob),
+    // Backup events — the trigger flows through the same JobQueue as
+    // deployments: the HTTP handler / cron tick publishes BackupRequested,
+    // the `BackupJobProcessor` consumes it and runs the engine in a
+    // one-shot container, then publishes BackupCompleted or BackupFailed.
+    BackupRequested(BackupRequestedJob),
+    BackupCompleted(BackupCompletedJob),
+    BackupFailed(BackupFailedJob),
+    BackupCancelRequested(BackupCancelRequestedJob),
 }
 
 impl fmt::Display for Job {
@@ -318,6 +381,10 @@ impl fmt::Display for Job {
             Job::AlarmFired(job) => write!(f, "AlarmFired(id: {}, project: {}, type: {}, severity: {})", job.alarm_id, job.project_id, job.alarm_type, job.severity),
             Job::AlarmResolved(job) => write!(f, "AlarmResolved(id: {}, project: {}, type: {})", job.alarm_id, job.project_id, job.alarm_type),
             Job::AutopilotTrigger(job) => write!(f, "AutopilotTrigger(project: {}, type: {}, source: {:?})", job.project_id, job.trigger_type, job.trigger_source_id),
+            Job::BackupRequested(job) => write!(f, "BackupRequested(backup: {}, engine: {})", job.backup_id, job.engine),
+            Job::BackupCompleted(job) => write!(f, "BackupCompleted(backup: {}, engine: {}, size: {:?})", job.backup_id, job.engine, job.size_bytes),
+            Job::BackupFailed(job) => write!(f, "BackupFailed(backup: {}, engine: {})", job.backup_id, job.engine),
+            Job::BackupCancelRequested(job) => write!(f, "BackupCancelRequested(backup: {})", job.backup_id),
         }
     }
 }

@@ -1075,6 +1075,10 @@ mod integration_tests {
             database_url: test_db.database_url.clone(),
             tls_address: None,
             console_address: "127.0.0.1:8080".to_string(),
+            console_admin_address: None,
+            admin_allowed_ips: Vec::new(),
+            admin_allowed_hosts: Vec::new(),
+            admin_trust_forwarded_for: false,
             data_dir: std::path::PathBuf::from("/tmp/test"),
             auth_secret: "test_secret".to_string(),
             encryption_key: "test_encryption_key_32_bytes_long!!".to_string(),
@@ -1085,6 +1089,10 @@ mod integration_tests {
             postgres_acquire_timeout_secs: None,
             postgres_idle_timeout_secs: None,
             postgres_max_lifetime_secs: None,
+            clickhouse_url: None,
+            clickhouse_database: None,
+            clickhouse_user: None,
+            clickhouse_password: None,
         });
         let config_service = Arc::new(temps_config::ConfigService::new(server_config, db.clone()));
 

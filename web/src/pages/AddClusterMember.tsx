@@ -158,7 +158,7 @@ export function AddClusterMember() {
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: 'Storage', href: '/storage' },
+      { label: 'Databases', href: '/storage' },
       {
         label: serviceQuery.data?.service?.name ?? `Service ${id}`,
         href: `/storage/${id}`,

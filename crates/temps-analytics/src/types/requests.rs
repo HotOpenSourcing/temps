@@ -111,6 +111,25 @@ pub enum EventBreakdown {
     City,
 }
 
+/// Optional segment filters for [`VisitorsListQuery`]. Each filter narrows the
+/// result set to visitors who match the given dimension value within the date
+/// range. All filters resolve against `visitor` / `ip_geolocations` — by
+/// design we never touch the events hypertable here so filtering stays fast
+/// regardless of event volume.
+#[derive(Debug, Deserialize, Clone, Default, ToSchema)]
+pub struct VisitorSegmentFilters {
+    /// Geolocation country (matches `ip_geolocations.country`)
+    pub filter_country: Option<String>,
+    /// Geolocation region (matches `ip_geolocations.region`)
+    pub filter_region: Option<String>,
+    /// Geolocation city (matches `ip_geolocations.city`)
+    pub filter_city: Option<String>,
+    /// First-touch marketing channel (matches `visitor.first_channel`)
+    pub filter_channel: Option<String>,
+    /// First-touch referrer hostname (matches `visitor.first_referrer_hostname`)
+    pub filter_referrer: Option<String>,
+}
+
 #[derive(Deserialize, Clone, ToSchema)]
 pub struct VisitorsListQuery {
     pub start_date: DateTime,
@@ -123,6 +142,11 @@ pub struct VisitorsListQuery {
     /// Filter to only include visitors with recorded activity (events/sessions).
     /// When true, excludes "ghost" visitors that have no events.
     pub has_activity_only: Option<bool>,
+
+    // Segment filters — drill into "visitors who match this dimension value".
+    // Flattened so each filter remains a top-level query string param.
+    #[serde(flatten)]
+    pub segment: VisitorSegmentFilters,
 }
 
 #[derive(Deserialize, Clone, ToSchema)]
@@ -341,4 +365,23 @@ pub struct PageFlowQuery {
     pub transitions_limit: Option<i32>,
     /// Minimum views for drop-off analysis (default: 5)
     pub min_views_for_dropoff: Option<i32>,
+}
+
+/// Query parameters for the visitor-facets endpoint. Mirrors the shape of
+/// `VisitorsListQuery` so the same segment filters apply — facet counts are
+/// always computed against the *currently filtered* visitor pool, minus the
+/// dimension being aggregated.
+#[derive(Deserialize, Clone, ToSchema)]
+pub struct VisitorFacetsQuery {
+    pub start_date: DateTime,
+    pub end_date: DateTime,
+    pub project_id: i32,
+    pub environment_id: Option<i32>,
+    pub include_crawlers: Option<bool>,
+    pub has_activity_only: Option<bool>,
+    /// Maximum number of values returned per dimension (default: 50, max: 200).
+    pub per_facet_limit: Option<i32>,
+
+    #[serde(flatten)]
+    pub segment: VisitorSegmentFilters,
 }

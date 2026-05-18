@@ -771,7 +771,7 @@ export function ServiceDataBrowser() {
   // Update breadcrumbs
   useEffect(() => {
     const crumbs = [
-      { label: 'Storage', href: '/storage' },
+      { label: 'Databases', href: '/storage' },
       {
         label: service?.service?.name || 'Service',
         href: `/storage/${id}`,

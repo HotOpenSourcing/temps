@@ -2,6 +2,7 @@ import {
   getLastDeploymentOptions,
   getProjectsOptions,
 } from '@/api/client/@tanstack/react-query.gen'
+import { BackupAlertsButton } from '@/components/dashboard/BackupAlertsButton'
 import { ThemeToggle } from '@/components/theme/ThemeToggle'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { useQuery } from '@tanstack/react-query'
@@ -264,7 +265,7 @@ export function Header() {
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
-          {/* <NotificationsDropdown /> */}
+          <BackupAlertsButton />
           <ThemeToggle />
         </div>
       </div>

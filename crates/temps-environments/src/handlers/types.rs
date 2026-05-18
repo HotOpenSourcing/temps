@@ -50,6 +50,31 @@ pub struct CreateEnvironmentVariableRequest {
     /// Include this environment variable in preview environments (default: true)
     #[serde(default = "default_include_in_preview")]
     pub include_in_preview: bool,
+    /// When true the variable is treated as write-only: never returned in
+    /// plaintext from the API, masked in the UI, and updates that omit the
+    /// value preserve the existing ciphertext. The flag is one-way — secret
+    /// vars cannot be demoted back to regular vars.
+    #[serde(default)]
+    pub is_secret: bool,
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct UpdateEnvironmentVariableRequest {
+    pub key: String,
+    /// New plaintext value. `None` (omitted) keeps the existing ciphertext,
+    /// which is the only way to edit a secret env var without re-typing its
+    /// value (e.g. changing which environments it applies to).
+    #[serde(default)]
+    pub value: Option<String>,
+    pub environment_ids: Vec<i32>,
+    #[serde(default = "default_include_in_preview")]
+    pub include_in_preview: bool,
+    /// Optional secret-flag transition.
+    /// - `Some(true)` promotes a regular var to a secret.
+    /// - `Some(false)` is rejected if the row is already secret (one-way flag).
+    /// - `None` (omitted) leaves the flag unchanged.
+    #[serde(default)]
+    pub is_secret: Option<bool>,
 }
 
 fn default_include_in_preview() -> bool {
@@ -60,12 +85,17 @@ fn default_include_in_preview() -> bool {
 pub struct EnvironmentVariableResponse {
     pub id: i32,
     pub key: String,
-    pub value: String,
+    /// Plaintext value for non-secret vars (or `"***"` mask for list responses).
+    /// `None` for secret vars — secrets are write-only.
+    pub value: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
     pub environments: Vec<EnvironmentInfo>,
     /// Include this environment variable in preview environments
     pub include_in_preview: bool,
+    /// Whether the variable is a write-only secret. Secrets always have
+    /// `value: None` in responses.
+    pub is_secret: bool,
 }
 
 #[derive(Serialize, Deserialize, ToSchema, Clone)]
@@ -88,6 +118,11 @@ pub struct EnvironmentResponse {
     pub name: String,
     pub slug: String,
     pub main_url: String,
+    /// The host label stored for this environment (e.g.
+    /// `myproject-production`). This is the prefix that is combined with the
+    /// platform's preview domain at request time to produce `main_url`. Edit
+    /// this via the rename-subdomain endpoint, not the full URL.
+    pub subdomain: String,
     pub current_deployment_id: Option<i32>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -138,7 +173,8 @@ impl From<temps_entities::environments::Model> for EnvironmentResponse {
             project_id: env.project_id,
             name: env.name,
             slug: env.slug,
-            main_url: env.subdomain,
+            main_url: env.subdomain.clone(),
+            subdomain: env.subdomain,
             current_deployment_id: env.current_deployment_id,
             created_at: env.created_at.timestamp_millis(),
             updated_at: env.updated_at.timestamp_millis(),
@@ -284,6 +320,21 @@ pub struct UpdateEnvironmentSettingsRequest {
     /// Send an empty string to remove password protection.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
+}
+
+/// Request to rename an environment's auto-managed subdomain.
+///
+/// The subdomain is the host label inserted in front of the platform's
+/// preview domain (e.g. `myapp` in `myapp.preview.temps.sh`). Renaming
+/// replaces the previous subdomain entirely — the old hostname stops
+/// resolving immediately after this request succeeds.
+#[derive(Serialize, Deserialize, Clone, ToSchema)]
+pub struct UpdateEnvironmentSubdomainRequest {
+    /// New subdomain label. Must be a DNS-safe slug (lowercase letters,
+    /// digits, and hyphens, 1-63 characters). The value is slugified
+    /// server-side, so casing and disallowed characters are normalized.
+    #[schema(example = "myapp")]
+    pub subdomain: String,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]

@@ -1,4 +1,4 @@
-use crate::handlers::{configure_routes, AppState};
+use crate::handlers::{configure_public_routes, configure_routes, AppState};
 use crate::services::service::PerformanceService;
 use std::future::Future;
 use std::pin::Pin;
@@ -45,6 +45,20 @@ impl TempsPlugin for PerformancePlugin {
         let ip_address_service = context.require_service::<temps_geo::IpAddressService>();
 
         let routes = configure_routes().with_state(Arc::new(AppState {
+            performance_service,
+            route_table,
+            ip_address_service,
+        }));
+
+        Some(PluginRoutes { router: routes })
+    }
+
+    fn configure_public_routes(&self, context: &PluginContext) -> Option<PluginRoutes> {
+        let performance_service = context.require_service::<PerformanceService>();
+        let route_table = context.require_service::<temps_routes::CachedPeerTable>();
+        let ip_address_service = context.require_service::<temps_geo::IpAddressService>();
+
+        let routes = configure_public_routes().with_state(Arc::new(AppState {
             performance_service,
             route_table,
             ip_address_service,

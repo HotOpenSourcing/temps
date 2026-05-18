@@ -14,7 +14,7 @@ pub struct Model {
     pub state: String,
     pub started_at: DBDateTime,
     pub finished_at: Option<DBDateTime>,
-    pub size_bytes: Option<i32>,
+    pub size_bytes: Option<i64>,
     pub file_count: Option<i32>,
     pub s3_source_id: i32,
     pub s3_location: String,
@@ -25,6 +25,15 @@ pub struct Model {
     pub created_by: i32,
     pub expires_at: Option<DBDateTime>,
     pub tags: String,
+    pub last_heartbeat_at: Option<DBDateTime>,
+    /// FK to `schedule_runs.id`. Set for all `backups` rows created by the
+    /// fan-out path (`enqueue_scheduled_run`). `NULL` for legacy one-shot rows
+    /// that pre-date the `schedule_runs` table (migration
+    /// `m20260516_000001_create_schedule_runs`).
+    ///
+    /// `ON DELETE SET NULL` — deleting a `schedule_runs` row never cascades
+    /// to the backup data itself.
+    pub schedule_run_id: Option<i64>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -43,6 +52,12 @@ pub enum Relation {
         to = "super::users::Column::Id"
     )]
     User,
+    #[sea_orm(
+        belongs_to = "super::schedule_runs::Entity",
+        from = "Column::ScheduleRunId",
+        to = "super::schedule_runs::Column::Id"
+    )]
+    ScheduleRun,
 }
 
 impl Related<super::s3_sources::Entity> for Entity {
@@ -60,6 +75,12 @@ impl Related<super::external_service_backups::Entity> for Entity {
 impl Related<super::users::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::User.def()
+    }
+}
+
+impl Related<super::schedule_runs::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::ScheduleRun.def()
     }
 }
 

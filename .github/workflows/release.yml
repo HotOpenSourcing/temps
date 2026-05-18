@@ -5,6 +5,17 @@ on:
     tags:
       - "v*.*.*"
       - "v*.*.*-*"
+  # Manual dispatch lets us dry-run the pipeline without minting a junk
+  # tag. Useful when iterating on the workflow itself or verifying a fix
+  # before cutting a real release. The artifact tags include the run id
+  # so a manual run can never overwrite a real release artifact.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry-run: skip pushes, only build to verify the pipeline works"
+        required: false
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -353,9 +364,41 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      # Single source of truth for "is this a prerelease?" so every downstream
+      # job (server image, sandbox images, manifest merge) makes the same
+      # channel decision. Prereleases are tags containing a `-` (e.g.
+      # `v0.1.0-beta.6`); stable tags look like `v0.1.0`.
+      is_prerelease: ${{ steps.channel.outputs.is_prerelease }}
+      # The floating channel tag stable -> "latest", prerelease -> "beta".
+      # Image jobs append this as an extra tag so operators can pin to a
+      # channel ("ghcr.io/.../temps:beta") instead of an exact version.
+      channel_tag: ${{ steps.channel.outputs.channel_tag }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Determine release channel
+        id: channel
+        # Tag pushes: prerelease iff the tag contains a `-` (e.g. `v0.1.0-beta.6`).
+        # Manual dispatches: always treated as prerelease so a dry-run or test
+        # invocation cannot promote to the stable `:<version>` ref by accident.
+        # If you ever need workflow_dispatch to mint a stable build, pass it as
+        # an explicit input (and add it to the dispatch inputs above).
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "is_prerelease=true" >> $GITHUB_OUTPUT
+            echo "channel_tag=beta" >> $GITHUB_OUTPUT
+            echo "Channel: beta (workflow_dispatch — never promotes to stable)"
+          elif [[ "${{ github.ref_name }}" == *"-"* ]]; then
+            echo "is_prerelease=true" >> $GITHUB_OUTPUT
+            echo "channel_tag=beta" >> $GITHUB_OUTPUT
+            echo "Channel: beta (prerelease)"
+          else
+            echo "is_prerelease=false" >> $GITHUB_OUTPUT
+            echo "channel_tag=latest" >> $GITHUB_OUTPUT
+            echo "Channel: latest (stable)"
+          fi
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -520,8 +563,7 @@ jobs:
         run: |
           echo "Creating release ${{ github.ref_name }}..."
 
-          # Determine if this is a prerelease
-          if [[ "${{ github.ref_name }}" == *"-"* ]]; then
+          if [[ "${{ steps.channel.outputs.is_prerelease }}" == "true" ]]; then
             PRERELEASE_FLAG="--prerelease"
             echo "This is a pre-release"
           else
@@ -552,7 +594,7 @@ jobs:
 
   build-and-push-docker:
     name: Build and Push Docker Image (${{ matrix.platform }})
-    needs: [build-linux-amd64, build-linux-arm64, build-darwin-amd64, build-darwin-arm64]
+    needs: [build-linux-amd64, build-linux-arm64, build-darwin-amd64, build-darwin-arm64, create-release]
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -617,8 +659,12 @@ jobs:
           file: ./Dockerfile.release
           platforms: ${{ matrix.platform }}
           push: true
+          # Per-platform intermediate tags. The manifest-merge job below
+          # combines amd64+arm64 into the final multi-arch refs. Channel tag
+          # (`latest` for stable, `beta` for prereleases) keeps stable users
+          # from being upgraded by a beta release that happens to land later.
           tags: |
-            ghcr.io/${{ github.repository_owner }}/temps:latest-${{ steps.platform_tag.outputs.tag }}
+            ghcr.io/${{ github.repository_owner }}/temps:${{ needs.create-release.outputs.channel_tag }}-${{ steps.platform_tag.outputs.tag }}
             ghcr.io/${{ github.repository_owner }}/temps:${{ steps.version.outputs.version }}-${{ steps.platform_tag.outputs.tag }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
@@ -631,7 +677,7 @@ jobs:
 
   create-docker-manifest:
     name: Create Docker Manifest
-    needs: [build-and-push-docker]
+    needs: [build-and-push-docker, create-release]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -651,14 +697,288 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Version: $VERSION"
 
-      - name: Create and push manifest for latest
+      # Merge per-platform tags into a multi-arch manifest under the channel
+      # ref (`:latest` for stable, `:beta` for prereleases). Operators that
+      # pin to `:latest` never receive a prerelease build by accident.
+      - name: Create and push manifest for channel
         run: |
-          docker buildx imagetools create -t ghcr.io/${{ github.repository_owner }}/temps:latest \
-            ghcr.io/${{ github.repository_owner }}/temps:latest-linux-amd64 \
-            ghcr.io/${{ github.repository_owner }}/temps:latest-linux-arm64
+          CHANNEL="${{ needs.create-release.outputs.channel_tag }}"
+          docker buildx imagetools create -t ghcr.io/${{ github.repository_owner }}/temps:$CHANNEL \
+            ghcr.io/${{ github.repository_owner }}/temps:$CHANNEL-linux-amd64 \
+            ghcr.io/${{ github.repository_owner }}/temps:$CHANNEL-linux-arm64
 
       - name: Create and push manifest for version
         run: |
           docker buildx imagetools create -t ghcr.io/${{ github.repository_owner }}/temps:${{ steps.version.outputs.version }} \
             ghcr.io/${{ github.repository_owner }}/temps:${{ steps.version.outputs.version }}-linux-amd64 \
             ghcr.io/${{ github.repository_owner }}/temps:${{ steps.version.outputs.version }}-linux-arm64
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Sandbox images and preview gateway
+  #
+  # Published to ghcr.io on every release tag (v*.*.*). The sandbox image
+  # version that the running temps server expects is pinned via
+  # `SANDBOX_IMAGE_VERSION` in crates/temps-agents/src/sandbox/docker.rs —
+  # bumping that constant is what causes hosts to pull a new image, since
+  # `docker inspect` short-circuits cached `:latest` tags. We tag both
+  # `:<SANDBOX_IMAGE_VERSION>` (the immutable tag the runtime pulls) and
+  # `:latest` (operator convenience).
+  # ─────────────────────────────────────────────────────────────────────────
+  # ─────────────────────────────────────────────────────────────────────
+  # Compile helpers + render every per-runtime Dockerfile + materialise
+  # the shared bundle, ONCE. The matrix below depends on this — was
+  # being repeated 6× in parallel across the matrix.
+  # ─────────────────────────────────────────────────────────────────────
+  prepare-sandbox-context:
+    name: Prepare sandbox build context
+    needs: [create-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      sandbox_image_version: ${{ steps.version.outputs.sandbox_image_version }}
+      gateway_version: ${{ steps.version.outputs.gateway_version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo deps
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: sandbox-image-builder
+
+      - name: Build helpers (print_dockerfile + print_bundle)
+        # Single source of truth: same examples the runtime ships use of.
+        # `pty_agent_bundle::BUNDLE` and `git_credential_bundle::BUNDLE`
+        # are linked into both, so what we materialise here is exactly
+        # what `temps serve` would tar at runtime.
+        run: |
+          cargo build \
+            --example print_dockerfile \
+            --example print_bundle \
+            -p temps-agents
+
+      - name: Extract versions
+        id: version
+        run: |
+          IMAGE_VERSION=$(grep -E '^pub const SANDBOX_IMAGE_VERSION' \
+            crates/temps-agents/src/sandbox/docker.rs \
+            | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ -z "$IMAGE_VERSION" ]; then
+            echo "::error::Failed to extract SANDBOX_IMAGE_VERSION from docker.rs"
+            exit 1
+          fi
+          echo "sandbox_image_version=$IMAGE_VERSION" >> $GITHUB_OUTPUT
+
+          GATEWAY_VERSION=$(grep -E '^version = ' \
+            crates/temps-preview-gateway/Cargo.standalone.toml \
+            | head -n 1 \
+            | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ -z "$GATEWAY_VERSION" ]; then
+            echo "::error::Failed to extract preview gateway version"
+            exit 1
+          fi
+          echo "gateway_version=$GATEWAY_VERSION" >> $GITHUB_OUTPUT
+
+          echo "Sandbox image version: $IMAGE_VERSION"
+          echo "Gateway version:       $GATEWAY_VERSION"
+
+      - name: Render Dockerfiles for every runtime
+        run: |
+          mkdir -p sandbox-context/dockerfiles
+          for runtime in node bun python rust go full; do
+            ./target/debug/examples/print_dockerfile "$runtime" \
+              > "sandbox-context/dockerfiles/$runtime.Dockerfile"
+            echo "  rendered: $runtime"
+          done
+
+      - name: Materialise bundles into shared build context
+        run: |
+          mkdir -p sandbox-context/bundle
+          ./target/debug/examples/print_bundle sandbox-context/bundle
+          echo "Bundle layout:"
+          find sandbox-context/bundle -type f | sort
+
+      - name: Upload sandbox build context
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-context
+          path: sandbox-context/
+          retention-days: 1
+
+  build-and-push-sandbox-images:
+    name: Build sandbox image (${{ matrix.runtime }})
+    needs: [create-release, prepare-sandbox-context]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [node, bun, python, rust, go, full]
+    env:
+      # Channel decided once in `create-release`; reused here so beta tags
+      # never get pushed to the stable `:latest` ref.
+      CHANNEL_TAG: ${{ needs.create-release.outputs.channel_tag }}
+      IS_PRERELEASE: ${{ needs.create-release.outputs.is_prerelease }}
+    steps:
+      - name: Download prepared context
+        uses: actions/download-artifact@v4
+        with:
+          name: sandbox-context
+          path: sandbox-context
+
+      - name: Assemble per-runtime build context
+        # `docker buildx build` wants a single directory: this runtime's
+        # rendered Dockerfile + the materialised bundle, side by side.
+        run: |
+          mkdir -p build-context
+          cp -r sandbox-context/bundle/. build-context/
+          cp "sandbox-context/dockerfiles/${{ matrix.runtime }}.Dockerfile" \
+             build-context/Dockerfile
+          echo "Build context layout:"
+          find build-context -maxdepth 2 | sort
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Compose channel-aware tag list. Stable releases own the canonical
+      # `:<sandbox_version>` ref + `:latest` + `:stable`; beta releases
+      # publish only suffixed refs (`:<sandbox_version>-beta`, `:beta`) so a
+      # beta Dockerfile change cannot overwrite the stable image at the same
+      # `SANDBOX_IMAGE_VERSION`. The `:<sha>` tag is always pushed for
+      # forensic traceability.
+      - name: Compose tag list
+        id: tags
+        run: |
+          REPO="ghcr.io/${{ github.repository_owner }}/temps-sandbox-${{ matrix.runtime }}"
+          VER="${{ needs.prepare-sandbox-context.outputs.sandbox_image_version }}"
+          SHA="${{ github.sha }}"
+          {
+            echo "list<<TAGS_EOF"
+            echo "$REPO:$SHA"
+            if [[ "$IS_PRERELEASE" == "true" ]]; then
+              echo "$REPO:${VER}-beta"
+              echo "$REPO:beta"
+            else
+              echo "$REPO:$VER"
+              echo "$REPO:${VER}-stable"
+              echo "$REPO:latest"
+              echo "$REPO:stable"
+            fi
+            echo "TAGS_EOF"
+          } >> $GITHUB_OUTPUT
+
+          echo "Channel: $CHANNEL_TAG (prerelease=$IS_PRERELEASE)"
+          echo "Will push:"
+          if [[ "$IS_PRERELEASE" == "true" ]]; then
+            echo "  $REPO:$SHA"
+            echo "  $REPO:${VER}-beta"
+            echo "  $REPO:beta"
+          else
+            echo "  $REPO:$SHA"
+            echo "  $REPO:$VER"
+            echo "  $REPO:${VER}-stable"
+            echo "  $REPO:latest"
+            echo "  $REPO:stable"
+          fi
+
+      - name: Build and push sandbox image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./build-context
+          platforms: linux/amd64,linux/arm64
+          # Dry-run: build but don't push. Used by `workflow_dispatch` with
+          # `dry_run=true` to verify the pipeline works without polluting
+          # the registry. Real tag pushes always push.
+          push: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run != true }}
+          tags: ${{ steps.tags.outputs.list }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.prepare-sandbox-context.outputs.sandbox_image_version }}
+            org.opencontainers.image.title=temps-sandbox-${{ matrix.runtime }}
+            org.opencontainers.image.description=Temps workspace sandbox image (${{ matrix.runtime }} runtime)
+          cache-from: type=gha,scope=sandbox-${{ matrix.runtime }}
+          cache-to: type=gha,scope=sandbox-${{ matrix.runtime }},mode=max
+
+  build-and-push-preview-gateway:
+    name: Build preview gateway image
+    needs: [create-release, prepare-sandbox-context]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IS_PRERELEASE: ${{ needs.create-release.outputs.is_prerelease }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Same channel-aware tag composition as the sandbox images: stable
+      # owns canonical refs, beta only suffixed refs. Without this, every
+      # release (including pre-releases) overwrites `:<version>` and
+      # `:latest`, defeating the channel split.
+      - name: Compose tag list
+        id: tags
+        run: |
+          REPO="ghcr.io/${{ github.repository_owner }}/temps-preview-gateway"
+          VER="${{ needs.prepare-sandbox-context.outputs.gateway_version }}"
+          SHA="${{ github.sha }}"
+          {
+            echo "list<<TAGS_EOF"
+            echo "$REPO:$SHA"
+            if [[ "$IS_PRERELEASE" == "true" ]]; then
+              echo "$REPO:${VER}-beta"
+              echo "$REPO:beta"
+            else
+              echo "$REPO:$VER"
+              echo "$REPO:${VER}-stable"
+              echo "$REPO:latest"
+              echo "$REPO:stable"
+            fi
+            echo "TAGS_EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Build and push preview gateway image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./crates/temps-preview-gateway
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run != true }}
+          tags: ${{ steps.tags.outputs.list }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.prepare-sandbox-context.outputs.gateway_version }}
+            org.opencontainers.image.title=temps-preview-gateway
+            org.opencontainers.image.description=Temps preview gateway — routes ws-<sid>-<port> hosts to sandbox containers
+          cache-from: type=gha,scope=preview-gateway
+          cache-to: type=gha,scope=preview-gateway,mode=max

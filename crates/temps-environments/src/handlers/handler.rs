@@ -1,6 +1,6 @@
 use super::audit::{
     EnvironmentDeletedAudit, EnvironmentSettingsUpdatedAudit, EnvironmentSettingsUpdatedFields,
-    EnvironmentSleepStateChangedAudit,
+    EnvironmentSleepStateChangedAudit, EnvironmentSubdomainUpdatedAudit,
 };
 use super::types::AppState;
 use axum::Router;
@@ -8,7 +8,7 @@ use axum::{
     extract::{Extension, Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{delete, get, post, put},
+    routing::{delete, get, patch, post, put},
     Json,
 };
 use std::sync::Arc;
@@ -24,7 +24,8 @@ use super::types::{
     EnvironmentResponse, EnvironmentVariableResponse, EnvironmentVariableValueResponse,
     GetEnvironmentVariablesQuery, GetProjectSecretsQuery, ProjectSecretEnvironmentInfo,
     ProjectSecretResponse, ResolvedEnvVarResponse, ResolvedEnvVarSource,
-    UpdateEnvironmentSettingsRequest, UpdateProjectSecretRequest,
+    UpdateEnvironmentSettingsRequest, UpdateEnvironmentSubdomainRequest,
+    UpdateEnvironmentVariableRequest, UpdateProjectSecretRequest,
 };
 use temps_core::problemdetails::Problem;
 
@@ -58,6 +59,12 @@ impl From<crate::services::env_var_service::EnvVarError> for Problem {
                     .detail(err.to_string())
                     .build()
             }
+            EnvVarError::CannotDemoteSecret { .. } => temps_core::error_builder::bad_request()
+                .detail(err.to_string())
+                .build(),
+            EnvVarError::SecretValueRequired { .. } => temps_core::error_builder::bad_request()
+                .detail(err.to_string())
+                .build(),
             EnvVarError::Other(msg) => temps_core::error_builder::internal_server_error()
                 .detail(msg)
                 .build(),
@@ -133,6 +140,7 @@ pub async fn get_environments(
             name: env.name,
             slug: env.slug,
             main_url,
+            subdomain: env.subdomain,
             current_deployment_id: env.current_deployment_id,
             created_at: env.created_at.timestamp_millis(),
             updated_at: env.updated_at.timestamp_millis(),
@@ -199,6 +207,7 @@ pub async fn get_environment(
         name: env.name,
         slug: env.slug,
         main_url,
+        subdomain: env.subdomain,
         current_deployment_id: env.current_deployment_id,
         created_at: env.created_at.timestamp_millis(),
         updated_at: env.updated_at.timestamp_millis(),
@@ -253,20 +262,15 @@ pub async fn get_environment_domains(
 
     let mut response: Vec<EnvironmentDomainResponse> = Vec::new();
     for d in domains {
-        let fqdn = state
-            .environment_service
-            .compute_environment_fqdn(&d.domain)
-            .await;
-
         let url = state
             .environment_service
-            .compute_environment_url(&d.domain)
+            .compute_custom_domain_url(&d.domain)
             .await;
 
         response.push(EnvironmentDomainResponse {
             id: d.id,
             environment_id: d.environment_id,
-            domain: fqdn,
+            domain: d.domain,
             created_at: d.created_at.timestamp_millis(),
             url,
         });
@@ -306,20 +310,15 @@ pub async fn add_environment_domain(
         .await
         .map_err(Problem::from)?;
 
-    let fqdn = state
-        .environment_service
-        .compute_environment_fqdn(&domain.domain)
-        .await;
-
     let url = state
         .environment_service
-        .compute_environment_url(&domain.domain)
+        .compute_custom_domain_url(&domain.domain)
         .await;
 
     let response = EnvironmentDomainResponse {
         id: domain.id,
         environment_id: domain.environment_id,
-        domain: fqdn,
+        domain: domain.domain,
         created_at: domain.created_at.timestamp_millis(),
         url,
     };
@@ -398,23 +397,35 @@ pub async fn get_environment_variables(
     // a total credential exfiltration.
     let response: Vec<EnvironmentVariableResponse> = vars
         .into_iter()
-        .map(|v| EnvironmentVariableResponse {
-            id: v.id,
-            key: v.key,
-            value: "***".to_string(),
-            created_at: v.created_at.timestamp_millis(),
-            updated_at: v.updated_at.timestamp_millis(),
-            environments: v
-                .environments
-                .into_iter()
-                .map(|env| EnvironmentInfo {
-                    id: env.id,
-                    name: env.name,
-                    main_url: env.main_url,
-                    current_deployment_id: env.current_deployment_id,
-                })
-                .collect(),
-            include_in_preview: v.include_in_preview,
+        .map(|v| {
+            // Non-secret rows get a masked preview so the UI never has the
+            // plaintext sitting in memory in a list view. Secret rows return
+            // `None` so the UI can render a stronger "write-only" affordance
+            // (and so an accidental JSON dump never contains a value at all).
+            let value = if v.is_secret {
+                None
+            } else {
+                Some("***".to_string())
+            };
+            EnvironmentVariableResponse {
+                id: v.id,
+                key: v.key,
+                value,
+                created_at: v.created_at.timestamp_millis(),
+                updated_at: v.updated_at.timestamp_millis(),
+                environments: v
+                    .environments
+                    .into_iter()
+                    .map(|env| EnvironmentInfo {
+                        id: env.id,
+                        name: env.name,
+                        main_url: env.main_url,
+                        current_deployment_id: env.current_deployment_id,
+                    })
+                    .collect(),
+                include_in_preview: v.include_in_preview,
+                is_secret: v.is_secret,
+            }
         })
         .collect();
 
@@ -480,7 +491,7 @@ pub async fn get_resolved_environment_variables(
     // plugin).
     let integrations = match state.integration_env_provider.as_ref() {
         Some(provider) => provider
-            .get_project_integration_env_vars(project_id)
+            .get_project_integration_env_vars(project_id, params.environment_id)
             .await
             .map_err(|e| {
                 error!("Failed to load integration env vars: {}", e);
@@ -640,7 +651,7 @@ pub async fn get_resolved_environment_variable_value(
     })?;
 
     let services = provider
-        .get_project_integration_env_vars(project_id)
+        .get_project_integration_env_vars(project_id, params.environment_id)
         .await
         .map_err(|e| {
             error!("Failed to load integration env vars: {}", e);
@@ -704,6 +715,7 @@ pub async fn create_environment_variable(
             request.key,
             request.value,
             request.include_in_preview,
+            request.is_secret,
         )
         .await
         .map_err(Problem::from)?;
@@ -725,6 +737,7 @@ pub async fn create_environment_variable(
             })
             .collect(),
         include_in_preview: var.include_in_preview,
+        is_secret: var.is_secret,
     };
 
     Ok((StatusCode::CREATED, Json(response)))
@@ -765,7 +778,7 @@ pub async fn delete_environment_variable(
     put,
     path = "/projects/{project_id}/env-vars/{var_id}",
     tag = "Projects",
-    request_body = CreateEnvironmentVariableRequest,
+    request_body = UpdateEnvironmentVariableRequest,
     responses(
         (status = 200, description = "Environment variables updated successfully", body = EnvironmentVariableResponse),
         (status = 400, description = "Invalid input"),
@@ -781,7 +794,7 @@ pub async fn update_environment_variable(
     State(state): State<Arc<AppState>>,
     Path((project_id, var_id)): Path<(i32, i32)>,
     RequireAuth(auth): RequireAuth,
-    Json(request): Json<CreateEnvironmentVariableRequest>,
+    Json(request): Json<UpdateEnvironmentVariableRequest>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, EnvironmentsWrite);
 
@@ -794,6 +807,7 @@ pub async fn update_environment_variable(
             request.value,
             request.environment_ids,
             request.include_in_preview,
+            request.is_secret,
         )
         .await?;
 
@@ -814,6 +828,7 @@ pub async fn update_environment_variable(
             })
             .collect(),
         include_in_preview: var.include_in_preview,
+        is_secret: var.is_secret,
     };
 
     Ok(Json(response))
@@ -946,6 +961,7 @@ pub async fn update_environment_settings(
         name: updated_environment.name,
         slug: updated_environment.slug,
         main_url,
+        subdomain: updated_environment.subdomain,
         current_deployment_id: updated_environment.current_deployment_id,
         created_at: updated_environment.created_at.timestamp_millis(),
         updated_at: updated_environment.updated_at.timestamp_millis(),
@@ -972,6 +988,106 @@ pub async fn update_environment_settings(
         },
     })
     .into_response())
+}
+
+/// Rename the auto-managed subdomain for an environment.
+///
+/// Replaces the environment's previous subdomain entirely — the old
+/// hostname stops resolving once the proxy reloads its route table.
+/// Custom domains attached to the environment are unaffected.
+#[utoipa::path(
+    patch,
+    path = "/projects/{project_id}/environments/{env_id}/subdomain",
+    tag = "Projects",
+    request_body = UpdateEnvironmentSubdomainRequest,
+    responses(
+        (status = 200, description = "Subdomain updated successfully", body = EnvironmentResponse),
+        (status = 400, description = "Invalid subdomain or conflict with another environment"),
+        (status = 404, description = "Project or environment not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    params(
+        ("project_id" = i32, Path, description = "Project ID or slug"),
+        ("env_id" = i32, Path, description = "Environment ID or slug")
+    )
+)]
+pub async fn update_environment_subdomain(
+    State(state): State<Arc<AppState>>,
+    Path((project_id, env_id)): Path<(i32, i32)>,
+    RequireAuth(auth): RequireAuth,
+    Extension(metadata): Extension<RequestMetadata>,
+    Json(request): Json<UpdateEnvironmentSubdomainRequest>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, EnvironmentsWrite);
+
+    let project = state.environment_service.get_project(project_id).await?;
+    let environment = state
+        .environment_service
+        .get_environment(project_id, env_id)
+        .await?;
+    let previous_subdomain = environment.subdomain.clone();
+
+    let updated_environment = state
+        .environment_service
+        .update_environment_subdomain(project_id, env_id, request.subdomain)
+        .await?;
+
+    let audit_event = EnvironmentSubdomainUpdatedAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.to_string()),
+            user_agent: metadata.user_agent,
+        },
+        project_id: project.id,
+        project_name: project.name,
+        project_slug: project.slug,
+        environment_id: environment.id,
+        environment_name: environment.name,
+        environment_slug: environment.slug,
+        previous_subdomain,
+        new_subdomain: updated_environment.subdomain.clone(),
+    };
+    if let Err(e) = state.audit_service.create_audit_log(&audit_event).await {
+        error!("Failed to create audit log: {:?}", e);
+    }
+
+    let main_url = state
+        .environment_service
+        .compute_environment_url(&updated_environment.subdomain)
+        .await;
+
+    Ok(Json(EnvironmentResponse {
+        id: updated_environment.id,
+        project_id: updated_environment.project_id,
+        name: updated_environment.name,
+        slug: updated_environment.slug,
+        main_url,
+        subdomain: updated_environment.subdomain,
+        current_deployment_id: updated_environment.current_deployment_id,
+        created_at: updated_environment.created_at.timestamp_millis(),
+        updated_at: updated_environment.updated_at.timestamp_millis(),
+        branch: updated_environment.branch,
+        is_preview: updated_environment.is_preview,
+        deployment_config: updated_environment.deployment_config.clone(),
+        protected: updated_environment.protected,
+        sleeping: updated_environment.sleeping,
+        last_activity_at: updated_environment
+            .last_activity_at
+            .map(|t| t.timestamp_millis()),
+        estimated_sleep_at: if !updated_environment.sleeping {
+            updated_environment
+                .deployment_config
+                .as_ref()
+                .filter(|dc| dc.on_demand)
+                .and_then(|dc| {
+                    updated_environment.last_activity_at.map(|last| {
+                        last.timestamp_millis() + (dc.idle_timeout_seconds as i64 * 1000)
+                    })
+                })
+        } else {
+            None
+        },
+    }))
 }
 
 /// Wake a sleeping on-demand environment
@@ -1098,6 +1214,7 @@ pub async fn wake_environment(
         name: updated_environment.name,
         slug: updated_environment.slug,
         main_url,
+        subdomain: updated_environment.subdomain,
         current_deployment_id: updated_environment.current_deployment_id,
         created_at: updated_environment.created_at.timestamp_millis(),
         updated_at: updated_environment.updated_at.timestamp_millis(),
@@ -1235,6 +1352,7 @@ pub async fn sleep_environment(
         name: updated_environment.name,
         slug: updated_environment.slug,
         main_url,
+        subdomain: updated_environment.subdomain,
         current_deployment_id: updated_environment.current_deployment_id,
         created_at: updated_environment.created_at.timestamp_millis(),
         updated_at: updated_environment.updated_at.timestamp_millis(),
@@ -1396,6 +1514,7 @@ pub async fn create_environment(
             name: environment.name,
             slug: environment.slug,
             main_url,
+            subdomain: environment.subdomain,
             current_deployment_id: environment.current_deployment_id,
             created_at: environment.created_at.timestamp_millis(),
             updated_at: environment.updated_at.timestamp_millis(),
@@ -1649,6 +1768,10 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
             "/projects/{project_id}/environments/{id_or_slug}/settings",
             put(update_environment_settings),
         )
+        .route(
+            "/projects/{project_id}/environments/{id_or_slug}/subdomain",
+            patch(update_environment_subdomain),
+        )
         // Environment wake/sleep (on-demand)
         .route(
             "/projects/{project_id}/environments/{env_id}/wake",
@@ -1718,6 +1841,7 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         get_environment,
         create_environment,
         update_environment_settings,
+        update_environment_subdomain,
         wake_environment,
         sleep_environment,
         delete_environment,
@@ -1741,10 +1865,12 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
             EnvironmentResponse,
             CreateEnvironmentRequest,
             UpdateEnvironmentSettingsRequest,
+            UpdateEnvironmentSubdomainRequest,
             EnvironmentDomainResponse,
             AddEnvironmentDomainRequest,
             EnvironmentVariableResponse,
             CreateEnvironmentVariableRequest,
+            UpdateEnvironmentVariableRequest,
             EnvironmentVariableValueResponse,
             GetEnvironmentVariablesQuery,
             EnvironmentInfo,

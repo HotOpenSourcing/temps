@@ -79,7 +79,7 @@ fn synthetic_agent_config(
         ai_model: None,
         api_key_encrypted: None,
         ai_provider_key_id: None,
-        max_turns: 10,
+        max_turns: 30,
         timeout_seconds: 600,
         daily_budget_cents: 0,
         cooldown_minutes: 0,
@@ -531,7 +531,7 @@ impl AgentExecutor {
         if let Some((cred_value, auth_type)) = deferred_credential {
             if let Some(provider_entry) = crate::ai_cli::catalog::find_provider(ai_provider) {
                 if let Some(flavor) = provider_entry.flavor(&auth_type) {
-                    let seed_path = flavor.seed_path;
+                    let seed_path = flavor.seed_path();
                     if let Some(idx) = seed_path.rfind('/') {
                         let parent = &seed_path[..idx];
                         let _ = self
@@ -572,7 +572,7 @@ impl AgentExecutor {
                     if !file_bytes.is_empty() {
                         if let Err(e) = self
                             .sandbox_registry
-                            .write_file(run_id, seed_path, &file_bytes, 0o600)
+                            .write_file(run_id, &seed_path, &file_bytes, 0o600)
                             .await
                         {
                             tracing::warn!(
@@ -3832,6 +3832,16 @@ mod tests {
                 head_sha: Some("abc123def456".to_string()),
             })
         }
+
+        async fn mint_scoped_repo_token(
+            &self,
+            _: i32,
+            _: &str,
+            _: &str,
+            _: temps_git::ScopedTokenOp,
+        ) -> Result<temps_git::ScopedTokenGrant, GitProviderManagerError> {
+            Err(GitProviderManagerError::Other("not used in test".into()))
+        }
     }
 
     /// Fake job queue that records sent jobs.
@@ -4002,6 +4012,7 @@ mod tests {
                     }
                 ]
             })),
+            trace_id_indexed: None,
             created_at: Utc::now(),
         }
     }

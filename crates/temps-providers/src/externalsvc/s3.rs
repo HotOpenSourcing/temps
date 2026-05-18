@@ -17,11 +17,13 @@ use std::time::Duration;
 use temps_core::EncryptionService;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::utils::ensure_network_exists;
 
-use super::{ExternalService, HealthProbeResult, ServiceConfig, ServiceType};
+use super::{
+    ExternalService, HealthProbeResult, ServiceConfig, ServiceResourceLimits, ServiceType,
+};
 
 /// Input configuration for creating an S3/MinIO service
 /// This is what users provide when creating the service
@@ -171,6 +173,8 @@ pub struct S3Service {
     name: String,
     config: Arc<RwLock<Option<S3Config>>>,
     client: Arc<RwLock<Option<Client>>>,
+    /// Resource limits captured at init time, applied to recreate paths.
+    resource_limits: Arc<RwLock<ServiceResourceLimits>>,
     docker: Arc<Docker>,
     encryption_service: Arc<EncryptionService>,
 }
@@ -188,6 +192,7 @@ impl S3Service {
             name,
             config: Arc::new(RwLock::new(None)),
             client: Arc::new(RwLock::new(None)),
+            resource_limits: Arc::new(RwLock::new(ServiceResourceLimits::default())),
             docker,
             encryption_service,
         }
@@ -197,7 +202,12 @@ impl S3Service {
         format!("minio-{}", self.name)
     }
 
-    async fn create_container(&self, docker: &Docker, config: &S3Config) -> Result<()> {
+    async fn create_container(
+        &self,
+        docker: &Docker,
+        config: &S3Config,
+        resource_limits: &ServiceResourceLimits,
+    ) -> Result<()> {
         // Pull the image first
         info!("Pulling MinIO image {}", config.docker_image);
 
@@ -305,7 +315,7 @@ impl S3Service {
                 },
             )])),
         });
-        let host_config = bollard::models::HostConfig {
+        let mut host_config = bollard::models::HostConfig {
             port_bindings: Some(HashMap::from([(
                 "9000/tcp".to_string(),
                 Some(vec![bollard::models::PortBinding {
@@ -326,6 +336,7 @@ impl S3Service {
             pids_limit: Some(512),
             ..Default::default()
         };
+        resource_limits.apply_to_host_config(&mut host_config);
 
         let container_config = bollard::models::ContainerCreateBody {
             image: Some(config.docker_image.to_string()),
@@ -580,6 +591,58 @@ impl S3Service {
 /// Internal port used by MinIO inside the container
 const S3_INTERNAL_PORT: &str = "9000";
 
+impl S3Service {
+    /// Build the per-tenant bucket name shared between provisioning and
+    /// preview paths.
+    fn bucket_name_for(project_id: &str, environment: &str) -> String {
+        format!("{}-{}", project_id, environment)
+            .replace('_', "-")
+            .to_lowercase()
+    }
+
+    /// Build the `S3_*` / `AWS_*` env vars for a given bucket name. Shared
+    /// between `get_runtime_env_vars` and `preview_runtime_env_vars`.
+    fn build_runtime_env_vars(
+        &self,
+        config: ServiceConfig,
+        bucket_name: &str,
+    ) -> Result<HashMap<String, String>> {
+        let mut env_vars = HashMap::new();
+
+        let effective_host = self.get_container_name();
+        let effective_port = S3_INTERNAL_PORT.to_string();
+
+        env_vars.insert("S3_BUCKET".to_string(), bucket_name.to_string());
+
+        let endpoint = format!("http://{}:{}", effective_host, effective_port);
+        env_vars.insert("S3_ENDPOINT".to_string(), endpoint.clone());
+
+        let access_key = config
+            .parameters
+            .get("access_key")
+            .and_then(|v| v.as_str())
+            .context("Missing access key parameter")?;
+        let secret_key = config
+            .parameters
+            .get("secret_key")
+            .and_then(|v| v.as_str())
+            .context("Missing secret key parameter")?;
+
+        env_vars.insert("S3_HOST".to_string(), effective_host.clone());
+        env_vars.insert("S3_PORT".to_string(), effective_port);
+        env_vars.insert("S3_ACCESS_KEY".to_string(), access_key.to_string());
+        env_vars.insert("S3_SECRET_KEY".to_string(), secret_key.to_string());
+        env_vars.insert("S3_REGION".to_string(), "us-east-1".to_string());
+
+        env_vars.insert("AWS_ACCESS_KEY_ID".to_string(), access_key.to_string());
+        env_vars.insert("AWS_SECRET_ACCESS_KEY".to_string(), secret_key.to_string());
+        env_vars.insert("AWS_DEFAULT_REGION".to_string(), "us-east-1".to_string());
+        env_vars.insert("AWS_ENDPOINT_URL".to_string(), endpoint);
+
+        Ok(env_vars)
+    }
+}
+
 #[async_trait]
 impl ExternalService for S3Service {
     fn get_local_address(&self, service_config: ServiceConfig) -> Result<String> {
@@ -613,6 +676,13 @@ impl ExternalService for S3Service {
             config.name, config.service_type, config.version
         );
 
+        // Pull resource limits before consuming the parameters JSON.
+        let resource_limits = ServiceResourceLimits::from_parameters(&config.parameters);
+        if let Err(e) = resource_limits.validate() {
+            return Err(anyhow::anyhow!("Invalid resource limits: {}", e));
+        }
+        *self.resource_limits.write().await = resource_limits.clone();
+
         // Parse input config and transform to runtime config
         let s3_config = self.get_s3_config(config)?;
         info!(
@@ -624,7 +694,8 @@ impl ExternalService for S3Service {
         *self.config.write().await = Some(s3_config.clone());
 
         // Create Docker container
-        self.create_container(&self.docker, &s3_config).await?;
+        self.create_container(&self.docker, &s3_config, &resource_limits)
+            .await?;
 
         // Serialize the full runtime config to save to database
         // This ensures auto-generated values (keys, port) are persisted
@@ -806,7 +877,8 @@ impl ExternalService for S3Service {
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("S3 configuration not found"))?
                 .clone();
-            self.create_container(docker, &config).await?;
+            let limits = self.resource_limits.read().await.clone();
+            self.create_container(docker, &config, &limits).await?;
         } else {
             docker
                 .start_container(
@@ -867,51 +939,21 @@ impl ExternalService for S3Service {
         project_id: &str,
         environment: &str,
     ) -> Result<HashMap<String, String>> {
-        let bucket_name = format!("{}-{}", project_id, environment)
-            .replace("_", "-")
-            .to_lowercase();
+        let bucket_name = Self::bucket_name_for(project_id, environment);
         // Create the bucket
         self.create_bucket(config.clone(), &bucket_name).await?;
+        self.build_runtime_env_vars(config, &bucket_name)
+    }
 
-        let mut env_vars = HashMap::new();
-
-        // Always use container name and internal port for container-to-container communication
-        let effective_host = self.get_container_name();
-        let effective_port = S3_INTERNAL_PORT.to_string();
-
-        // Bucket name (specific to this project/environment)
-        env_vars.insert("S3_BUCKET".to_string(), bucket_name);
-
-        // Endpoint
-        let endpoint = format!("http://{}:{}", effective_host, effective_port);
-        env_vars.insert("S3_ENDPOINT".to_string(), endpoint.clone());
-
-        // Get access keys from service config
-        let access_key = config
-            .parameters
-            .get("access_key")
-            .and_then(|v| v.as_str())
-            .context("Missing access key parameter")?;
-        let secret_key = config
-            .parameters
-            .get("secret_key")
-            .and_then(|v| v.as_str())
-            .context("Missing secret key parameter")?;
-
-        // S3-style environment variables
-        env_vars.insert("S3_HOST".to_string(), effective_host.clone());
-        env_vars.insert("S3_PORT".to_string(), effective_port);
-        env_vars.insert("S3_ACCESS_KEY".to_string(), access_key.to_string());
-        env_vars.insert("S3_SECRET_KEY".to_string(), secret_key.to_string());
-        env_vars.insert("S3_REGION".to_string(), "us-east-1".to_string());
-
-        // AWS-style environment variables (for AWS SDK compatibility)
-        env_vars.insert("AWS_ACCESS_KEY_ID".to_string(), access_key.to_string());
-        env_vars.insert("AWS_SECRET_ACCESS_KEY".to_string(), secret_key.to_string());
-        env_vars.insert("AWS_DEFAULT_REGION".to_string(), "us-east-1".to_string());
-        env_vars.insert("AWS_ENDPOINT_URL".to_string(), endpoint);
-
-        Ok(env_vars)
+    async fn preview_runtime_env_vars(
+        &self,
+        config: ServiceConfig,
+        project_id: &str,
+        environment: &str,
+    ) -> Result<HashMap<String, String>> {
+        let bucket_name = Self::bucket_name_for(project_id, environment);
+        // Preview: skip create_bucket so the UI doesn't provision buckets.
+        self.build_runtime_env_vars(config, &bucket_name)
     }
     async fn remove(&self) -> Result<()> {
         // First cleanup any connections
@@ -1046,7 +1088,7 @@ impl ExternalService for S3Service {
         &self,
         // we are not using the s3 client for this backup, we are using the mc container to backup the data
         _s3_client: &aws_sdk_s3::Client,
-        _s3_credentials: &super::S3Credentials,
+        s3_credentials: &super::S3Credentials,
         backup: temps_entities::backups::Model,
         s3_source: &temps_entities::s3_sources::Model,
         _subpath: &str,
@@ -1054,7 +1096,7 @@ impl ExternalService for S3Service {
         pool: &temps_database::DbConnection,
         external_service: &temps_entities::external_services::Model,
         service_config: ServiceConfig,
-    ) -> Result<String> {
+    ) -> Result<super::BackupOutcome> {
         use chrono::Utc;
         use sea_orm::*;
 
@@ -1256,17 +1298,39 @@ impl ExternalService for S3Service {
             .await?;
 
         if success {
-            // Update backup record with success
+            // Compute size by listing the destination prefix.
+            let dest_s3_client = s3_credentials.build_s3_client().await;
+            let size_bytes = match super::s3_util::list_total_size(
+                &dest_s3_client,
+                &s3_credentials.bucket_name,
+                &format!("{}/", subpath_root.trim_matches('/')),
+            )
+            .await
+            {
+                Ok(n) => Some(n),
+                Err(e) => {
+                    warn!(
+                        "S3 mirror backup succeeded but failed to compute size: {}",
+                        e
+                    );
+                    None
+                }
+            };
+
             let mut backup_update: temps_entities::external_service_backups::ActiveModel =
                 backup_record.clone().into();
             backup_update.state = Set("completed".to_string());
             backup_update.finished_at = Set(Some(Utc::now()));
+            backup_update.size_bytes = Set(size_bytes);
             temps_entities::external_service_backups::Entity::update(backup_update)
                 .exec(pool)
                 .await?;
 
-            info!("S3 backup completed successfully");
-            Ok(backup_prefix.to_string())
+            info!("S3 backup completed successfully ({:?} bytes)", size_bytes);
+            Ok(super::BackupOutcome::new(
+                backup_prefix.to_string(),
+                size_bytes,
+            ))
         } else {
             let error_message = error_logs.join("\n");
 
@@ -1657,11 +1721,13 @@ impl ExternalService for S3Service {
             self.docker.clone(),
             self.encryption_service.clone(),
         );
+        let cloned_limits = ServiceResourceLimits::from_parameters(&ctx.source_config.parameters);
         *new_service.config.write().await = Some(new_config.clone());
+        *new_service.resource_limits.write().await = cloned_limits.clone();
 
         // Provision the new container (image pull, volume, port binding, health check).
         new_service
-            .create_container(&self.docker, &new_config)
+            .create_container(&self.docker, &new_config, &cloned_limits)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create new S3/MinIO container: {}", e))?;
 
@@ -2040,7 +2106,9 @@ impl ExternalService for S3Service {
 
         // Create container with new image (keeping the same volume for data persistence)
         info!("Starting S3/MinIO container with new image");
-        self.create_container(&self.docker, &new_s3_config).await?;
+        let limits = self.resource_limits.read().await.clone();
+        self.create_container(&self.docker, &new_s3_config, &limits)
+            .await?;
 
         info!("S3/MinIO upgrade completed successfully");
         Ok(())
@@ -2417,8 +2485,11 @@ mod tests {
         }
     }
 
+    // `flavor = "multi_thread"` is required because `MinioTestContainer`'s
+    // `Drop` impl calls `tokio::task::block_in_place`, which panics on the
+    // default current-thread runtime.
     #[cfg(feature = "docker-tests")]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_s3_backup_and_restore_to_s3() {
         use super::super::test_utils::{
             create_mock_backup, create_mock_db, create_mock_external_service, MinioTestContainer,
@@ -2622,8 +2693,11 @@ mod tests {
             )
             .await
         {
-            Ok(location) => {
-                println!("✓ Backup initiated: {}", location);
+            Ok(outcome) => {
+                println!(
+                    "✓ Backup initiated: {} ({:?} bytes)",
+                    outcome.location, outcome.size_bytes
+                );
                 // Note: Due to the complexity of mc container and Docker networking,
                 // this test verifies the backup workflow can be called, but may not
                 // fully complete the mirror operation in all test environments

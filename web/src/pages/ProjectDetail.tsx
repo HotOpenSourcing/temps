@@ -39,6 +39,7 @@ import { usePageTitle } from '@/hooks/usePageTitle'
 import { DeploymentDetails } from '@/pages/DeploymentDetails'
 import { ErrorEventDetail } from './ErrorEventDetail'
 import { ErrorGroupDetail } from './ErrorGroupDetail'
+import Observe from './Observe'
 import RequestLogs from './RequestLogs'
 import Traces from './Traces'
 import { ProjectAgentActivity } from './AiGateway'
@@ -47,8 +48,6 @@ import { AutofixRedirect } from '@/components/autofixer/AutofixRedirect'
 import { AgentDetailPage } from '@/components/agents/AgentDetailPage'
 import { AutopilotPage } from '@/components/agents/AutopilotPage'
 import { AutopilotRunDetail } from '@/components/agents/AutopilotRunDetail'
-import { WorkspacePage } from '@/components/workspace/WorkspacePage'
-import { NewSessionPage } from '@/components/workspace/NewSessionPage'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useEffect } from 'react'
 import {
@@ -375,6 +374,10 @@ export function ProjectDetail() {
                 element={<ProjectRuntime project={project} />}
               />
               <Route
+                path="observe"
+                element={<Observe project={project} />}
+              />
+              <Route
                 path="settings/*"
                 element={
                   <ProjectSettings project={project} refetch={refetch} />
@@ -415,14 +418,6 @@ export function ProjectDetail() {
               <Route
                 path="revenue"
                 element={<ProjectRevenue project={project} />}
-              />
-              <Route
-                path="workspace"
-                element={<WorkspacePage project={project} />}
-              />
-              <Route
-                path="workspace/new"
-                element={<NewSessionPage project={project} />}
               />
               <Route
                 path="agents"

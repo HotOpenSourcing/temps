@@ -63,9 +63,16 @@ impl WorkflowPlanner {
     /// 1. Environment variables from the env_vars table for the specific environment (via env_var_environments junction table)
     /// 2. Runtime environment variables from external services linked to the project
     /// 3. Sentry DSN environment variables - auto-generated per project/environment:
-    ///    - `SENTRY_DSN` is always added
-    ///    - `NEXT_PUBLIC_SENTRY_DSN` is added when preset is Next.js
-    ///    - `VITE_PUBLIC_SENTRY_DSN` is added when preset is Vite
+    ///    - `SENTRY_DSN` is always added (server-side / generic).
+    ///    - A framework-specific public-DSN var is added so client bundlers expose it.
+    ///      The exact name follows each framework's public-prefix convention so
+    ///      `import.meta.env.<VAR>` / `process.env.<VAR>` resolves at build time:
+    ///      Next.js                                       → `NEXT_PUBLIC_SENTRY_DSN`
+    ///      Nuxt                                          → `NUXT_PUBLIC_SENTRY_DSN`
+    ///      Vite, React, Vue, SolidStart, Remix           → `VITE_SENTRY_DSN`
+    ///      SvelteKit, Astro, Rsbuild                     → `PUBLIC_SENTRY_DSN`
+    ///      Docusaurus                                    → `REACT_APP_SENTRY_DSN`
+    ///      Angular and all backend / generic presets     → no extra var (use `SENTRY_DSN`)
     /// 4. Deployment token environment variables (TEMPS_API_URL and TEMPS_API_TOKEN) - for API access from deployed apps
     /// 5. Cron secret (`CRON_SECRET`) - derived from the deployment token, used to authenticate
     ///    cron job HTTP requests via `Authorization: Bearer <CRON_SECRET>` header
@@ -243,17 +250,11 @@ impl WorkflowPlanner {
                         // Always add SENTRY_DSN for server-side usage
                         env_vars_map.insert("SENTRY_DSN".to_string(), project_dsn.dsn.clone());
 
-                        // Add framework-specific public DSN env var based on preset
-                        match project.preset {
-                            temps_entities::preset::Preset::NextJs => {
-                                env_vars_map
-                                    .insert("NEXT_PUBLIC_SENTRY_DSN".to_string(), project_dsn.dsn);
-                            }
-                            temps_entities::preset::Preset::Vite => {
-                                env_vars_map
-                                    .insert("VITE_PUBLIC_SENTRY_DSN".to_string(), project_dsn.dsn);
-                            }
-                            _ => {}
+                        // Add framework-specific public DSN env var based on preset.
+                        // Each client bundler only exposes vars matching its own prefix
+                        // convention to the browser bundle, so we mirror that mapping.
+                        if let Some(public_var) = public_sentry_dsn_var(project.preset) {
+                            env_vars_map.insert(public_var.to_string(), project_dsn.dsn);
                         }
                     }
                     Err(e) => {
@@ -1157,11 +1158,15 @@ impl WorkflowPlanner {
                 project.preset
             );
 
-            // Convert environment variables to build args
-            let mut build_args_map = serde_json::Map::new();
-            for (key, value) in &env_vars {
-                build_args_map.insert(key.clone(), serde_json::Value::String(value.clone()));
-            }
+            // Build args are derived from env vars and would otherwise be
+            // stored in plaintext under `build_args` in job_config. Seal the
+            // whole map under `build_args_encrypted` instead so an operator
+            // dumping `deployment_jobs.job_config` for debugging never sees
+            // an env-var value they shouldn't.
+            let build_args_map: std::collections::HashMap<String, String> = env_vars
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
 
             // Parse preset_config if present (for Dockerfile preset)
             let mut dockerfile_path = "Dockerfile".to_string();
@@ -1178,17 +1183,27 @@ impl WorkflowPlanner {
                 }
             }
 
+            let mut build_job_config = serde_json::json!({
+                "dockerfile_path": dockerfile_path,
+                "build_context": build_context,
+            });
+            if let Some(obj) = build_job_config.as_object_mut() {
+                crate::services::sensitive_envelope::write_sealed(
+                    obj,
+                    self.encryption_service.as_ref(),
+                    "build_args",
+                    &build_args_map,
+                )
+                .map_err(|e| anyhow::anyhow!("Failed to seal build_args: {}", e))?;
+            }
+
             jobs.push(JobDefinition {
                 job_id: "build_image".to_string(),
                 job_type: "BuildImageJob".to_string(),
                 name: "Build Container Image".to_string(),
                 description: Some("Build Docker image from source code".to_string()),
                 dependencies: build_dependencies.clone(),
-                job_config: Some(serde_json::json!({
-                    "dockerfile_path": dockerfile_path,
-                    "build_args": build_args_map,
-                    "build_context": build_context
-                })),
+                job_config: Some(build_job_config),
                 required_for_completion: true,
             });
 
@@ -1224,26 +1239,51 @@ impl WorkflowPlanner {
             let mut job_config = serde_json::json!({
                 "port": exposed_port,
                 "replicas": replicas,
-                "environment_variables": deploy_env_vars,
                 "image_name": image_name
             });
-            if let Some(ref remote_vars) = remote_deploy_env_vars {
-                info!(
-                    "Storing remote_environment_variables in job config: POSTGRES_HOST={:?}, POSTGRES_URL={:?}",
-                    remote_vars.get("POSTGRES_HOST"),
-                    remote_vars.get("POSTGRES_URL").map(|u| if u.len() > 60 { format!("{}...", &u[..60]) } else { u.clone() })
-                );
-                job_config["remote_environment_variables"] =
-                    serde_json::to_value(remote_vars).unwrap_or_default();
-            } else {
-                info!("No remote_environment_variables to store (single-node mode or no active nodes)");
-            }
-            if !secrets.is_empty() {
-                info!(
-                    "Storing {} secret file(s) in deploy job config",
-                    secrets.len()
-                );
-                job_config["secrets"] = serde_json::to_value(&secrets).unwrap_or_default();
+            if let Some(obj) = job_config.as_object_mut() {
+                // Seal env vars, remote env vars, and secret-file contents.
+                // None of these end up in `job_config` in plaintext anymore;
+                // the executor pulls them back through `read_sealed`.
+                crate::services::sensitive_envelope::write_sealed(
+                    obj,
+                    self.encryption_service.as_ref(),
+                    "environment_variables",
+                    &deploy_env_vars,
+                )
+                .map_err(|e| anyhow::anyhow!("Failed to seal environment_variables: {}", e))?;
+
+                if let Some(ref remote_vars) = remote_deploy_env_vars {
+                    info!(
+                        "Sealing remote_environment_variables in job config ({} keys)",
+                        remote_vars.len()
+                    );
+                    crate::services::sensitive_envelope::write_sealed(
+                        obj,
+                        self.encryption_service.as_ref(),
+                        "remote_environment_variables",
+                        remote_vars,
+                    )
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to seal remote_environment_variables: {}", e)
+                    })?;
+                } else {
+                    info!("No remote_environment_variables to store (single-node mode or no active nodes)");
+                }
+
+                if !secrets.is_empty() {
+                    info!(
+                        "Sealing {} secret file(s) in deploy job config",
+                        secrets.len()
+                    );
+                    crate::services::sensitive_envelope::write_sealed(
+                        obj,
+                        self.encryption_service.as_ref(),
+                        "secrets",
+                        &secrets,
+                    )
+                    .map_err(|e| anyhow::anyhow!("Failed to seal secrets: {}", e))?;
+                }
             }
 
             jobs.push(JobDefinition {
@@ -1554,19 +1594,29 @@ impl WorkflowPlanner {
             vec![]
         };
 
+        let mut compose_job_config = serde_json::json!({
+            "compose_path": compose_path,
+            "project_id": project.id,
+            "environment_id": environment.id,
+            "directory": project.directory,
+        });
+        if let Some(obj) = compose_job_config.as_object_mut() {
+            crate::services::sensitive_envelope::write_sealed(
+                obj,
+                self.encryption_service.as_ref(),
+                "environment_vars",
+                &env_vars,
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to seal compose environment_vars: {}", e))?;
+        }
+
         jobs.push(JobDefinition {
             job_id: "deploy_compose".to_string(),
             job_type: "DeployComposeJob".to_string(),
             name: "Deploy Compose Stack".to_string(),
             description: Some("Pull images and start Docker Compose services".to_string()),
             dependencies: deploy_dependencies,
-            job_config: Some(serde_json::json!({
-                "compose_path": compose_path,
-                "environment_vars": env_vars,
-                "project_id": project.id,
-                "environment_id": environment.id,
-                "directory": project.directory,
-            })),
+            job_config: Some(compose_job_config),
             required_for_completion: true,
         });
 
@@ -1721,26 +1771,49 @@ impl WorkflowPlanner {
         let mut job_config = serde_json::json!({
             "port": exposed_port,
             "replicas": replicas,
-            "environment_variables": deploy_env_vars,
             "image_name": external_image_ref,
             "use_external_image": true,
         });
-        if let Some(ref remote_vars) = remote_deploy_env_vars {
-            info!(
-                "Storing remote_environment_variables in docker image job config: POSTGRES_HOST={:?}",
-                remote_vars.get("POSTGRES_HOST"),
-            );
-            job_config["remote_environment_variables"] =
-                serde_json::to_value(remote_vars).unwrap_or_default();
-        } else {
-            info!("No remote_environment_variables for docker image deployment");
-        }
-        if !secrets.is_empty() {
-            info!(
-                "Storing {} secret file(s) in docker image deploy job config",
-                secrets.len()
-            );
-            job_config["secrets"] = serde_json::to_value(&secrets).unwrap_or_default();
+        if let Some(obj) = job_config.as_object_mut() {
+            crate::services::sensitive_envelope::write_sealed(
+                obj,
+                self.encryption_service.as_ref(),
+                "environment_variables",
+                &deploy_env_vars,
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to seal environment_variables: {}", e))?;
+
+            if let Some(ref remote_vars) = remote_deploy_env_vars {
+                info!(
+                    "Sealing remote_environment_variables in docker image job config ({} keys)",
+                    remote_vars.len()
+                );
+                crate::services::sensitive_envelope::write_sealed(
+                    obj,
+                    self.encryption_service.as_ref(),
+                    "remote_environment_variables",
+                    remote_vars,
+                )
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to seal remote_environment_variables: {}", e)
+                })?;
+            } else {
+                info!("No remote_environment_variables for docker image deployment");
+            }
+
+            if !secrets.is_empty() {
+                info!(
+                    "Sealing {} secret file(s) in docker image deploy job config",
+                    secrets.len()
+                );
+                crate::services::sensitive_envelope::write_sealed(
+                    obj,
+                    self.encryption_service.as_ref(),
+                    "secrets",
+                    &secrets,
+                )
+                .map_err(|e| anyhow::anyhow!("Failed to seal secrets: {}", e))?;
+            }
         }
 
         jobs.push(JobDefinition {
@@ -1884,6 +1957,49 @@ impl WorkflowPlanner {
             project.name
         );
         Ok(jobs)
+    }
+}
+
+/// Returns the framework-specific public-DSN env var name for a preset, or
+/// `None` if the preset has no client bundler (backend-only) or has no
+/// build-time public-prefix convention (Angular reads from `environment.ts`,
+/// generic Docker/Nixpacks/Static presets don't know the framework).
+///
+/// Each entry follows the bundler's own public-prefix rule — that's the only
+/// prefix the bundler will inline into the browser bundle.
+fn public_sentry_dsn_var(preset: temps_entities::preset::Preset) -> Option<&'static str> {
+    use temps_entities::preset::Preset;
+    match preset {
+        // Next.js: `NEXT_PUBLIC_*` is inlined into the client bundle.
+        Preset::NextJs => Some("NEXT_PUBLIC_SENTRY_DSN"),
+        // Nuxt 3+: `NUXT_PUBLIC_*` is exposed via `useRuntimeConfig().public`.
+        Preset::Nuxt => Some("NUXT_PUBLIC_SENTRY_DSN"),
+        // Vite-based frameworks (Remix uses Vite since v2.5; SolidStart is Vinxi/Vite).
+        Preset::Vite | Preset::React | Preset::Vue | Preset::SolidStart | Preset::Remix => {
+            Some("VITE_SENTRY_DSN")
+        }
+        // SvelteKit / Astro / Rsbuild all use `PUBLIC_*` as their public prefix.
+        Preset::SvelteKit | Preset::Astro | Preset::Rsbuild => Some("PUBLIC_SENTRY_DSN"),
+        // Docusaurus is webpack-based and exposes `REACT_APP_*` via DefinePlugin.
+        Preset::Docusaurus => Some("REACT_APP_SENTRY_DSN"),
+        // Angular has no build-time public prefix; users wire `SENTRY_DSN` into
+        // `environment.ts` themselves. Backend / generic presets only need
+        // server-side `SENTRY_DSN`, which is always added.
+        Preset::Angular
+        | Preset::Python
+        | Preset::FastApi
+        | Preset::Flask
+        | Preset::Django
+        | Preset::Rails
+        | Preset::Go
+        | Preset::Rust
+        | Preset::Java
+        | Preset::Laravel
+        | Preset::NodeJs
+        | Preset::Dockerfile
+        | Preset::DockerCompose
+        | Preset::Nixpacks
+        | Preset::Static => None,
     }
 }
 
@@ -2412,5 +2528,74 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn public_sentry_dsn_var_maps_each_preset_to_its_public_prefix() {
+        use temps_entities::preset::Preset;
+
+        // Vite-family — every framework that builds with Vite reads `VITE_*`.
+        for preset in [
+            Preset::Vite,
+            Preset::React,
+            Preset::Vue,
+            Preset::SolidStart,
+            Preset::Remix,
+        ] {
+            assert_eq!(
+                public_sentry_dsn_var(preset),
+                Some("VITE_SENTRY_DSN"),
+                "expected VITE_SENTRY_DSN for {:?}",
+                preset
+            );
+        }
+
+        // Frameworks with their own public prefix.
+        assert_eq!(
+            public_sentry_dsn_var(Preset::NextJs),
+            Some("NEXT_PUBLIC_SENTRY_DSN")
+        );
+        assert_eq!(
+            public_sentry_dsn_var(Preset::Nuxt),
+            Some("NUXT_PUBLIC_SENTRY_DSN")
+        );
+        for preset in [Preset::SvelteKit, Preset::Astro, Preset::Rsbuild] {
+            assert_eq!(
+                public_sentry_dsn_var(preset),
+                Some("PUBLIC_SENTRY_DSN"),
+                "expected PUBLIC_SENTRY_DSN for {:?}",
+                preset
+            );
+        }
+        assert_eq!(
+            public_sentry_dsn_var(Preset::Docusaurus),
+            Some("REACT_APP_SENTRY_DSN")
+        );
+
+        // Backend / generic presets get only server-side SENTRY_DSN.
+        for preset in [
+            Preset::Angular,
+            Preset::Python,
+            Preset::FastApi,
+            Preset::Flask,
+            Preset::Django,
+            Preset::Rails,
+            Preset::Go,
+            Preset::Rust,
+            Preset::Java,
+            Preset::Laravel,
+            Preset::NodeJs,
+            Preset::Dockerfile,
+            Preset::DockerCompose,
+            Preset::Nixpacks,
+            Preset::Static,
+        ] {
+            assert_eq!(
+                public_sentry_dsn_var(preset),
+                None,
+                "expected no public DSN var for {:?}",
+                preset
+            );
+        }
     }
 }

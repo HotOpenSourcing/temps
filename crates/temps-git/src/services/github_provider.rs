@@ -1,6 +1,6 @@
 use super::git_provider::{
     AuthMethod, Branch, Commit, FileContent, GitProviderError, GitProviderService, GitProviderTag,
-    GitProviderType, PullRequest, Repository, User, WebhookConfig,
+    GitProviderType, PullRequest, Repository, ScopedTokenGrant, ScopedTokenOp, User, WebhookConfig,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -11,6 +11,74 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info};
 
 // Response structs for API calls
+
+/// Request body for `POST /app/installations/{id}/access_tokens`.
+///
+/// Both fields are optional: GitHub treats an absent field as "no narrowing
+/// for this dimension", and an empty body (`{}`) as "full installation
+/// scope, all granted permissions" — the historical default.
+///
+/// Use [`Self::for_repo_read`] / [`Self::for_repo_write`] for the common
+/// case of minting a per-operation token for a single repository, and
+/// [`Self::default`] (i.e. `{}`) for full-installation tokens used
+/// internally by token-refresh flows.
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct ScopedTokenRequest {
+    /// Restrict the token to a subset of the installation's repositories
+    /// by name (`acme/web`, not `123456789`). Use `repository_ids` if you
+    /// happen to know the numeric IDs — but names are what we have at
+    /// every callsite in temps.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repositories: Option<Vec<String>>,
+
+    /// Restrict the token to a subset of the installation's permissions.
+    /// Keys are GitHub permission names (`contents`, `pull_requests`,
+    /// `metadata`, …). Values are `read`, `write`, or `admin`. Permissions
+    /// the App wasn't granted at install time can't be added here — GitHub
+    /// will 422.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<std::collections::HashMap<String, String>>,
+}
+
+impl ScopedTokenRequest {
+    /// Token for cloning / fetching a single repo. `contents:read` is the
+    /// minimum permission a `git clone` over HTTPS needs.
+    ///
+    /// Only `contents` is listed: `metadata:read` is granted implicitly by
+    /// GitHub to every installation token that has any repository
+    /// permission, and listing it explicitly here causes GitHub to *strip
+    /// the entire `permissions` block* (silently returning an empty-
+    /// permissions token, which surfaces as `pull:false, push:false` on
+    /// every minted token). The endpoint validates each requested key
+    /// against the App's *declared* permissions, and `metadata` is not in
+    /// that set — it's implicit. Don't add it back.
+    ///
+    /// `repo_name` is the bare repo name (e.g. `temps-landing-new`), NOT
+    /// `owner/repo` — GitHub's access_tokens endpoint expects the unqualified
+    /// form because the owner is fixed by the installation.
+    pub fn for_repo_read(repo_name: &str) -> Self {
+        let mut perms = std::collections::HashMap::new();
+        perms.insert("contents".to_string(), "read".to_string());
+        Self {
+            repositories: Some(vec![repo_name.to_string()]),
+            permissions: Some(perms),
+        }
+    }
+
+    /// Token for pushing to a single repo. `contents:write` covers
+    /// `git push`. See [`Self::for_repo_read`] for why `metadata` is
+    /// deliberately NOT requested.
+    ///
+    /// `repo_name` is the bare repo name (see [`Self::for_repo_read`]).
+    pub fn for_repo_write(repo_name: &str) -> Self {
+        let mut perms = std::collections::HashMap::new();
+        perms.insert("contents".to_string(), "write".to_string());
+        Self {
+            repositories: Some(vec![repo_name.to_string()]),
+            permissions: Some(perms),
+        }
+    }
+}
 
 /// OAuth token response (from /login/oauth/access_token)
 /// GitHub OAuth typically doesn't include refresh_token
@@ -229,10 +297,43 @@ impl GitHubProvider {
 
     /// Generate a GitHub App installation token
     /// GitHub App tokens expire after 1 hour, so they need to be regenerated
+    ///
+    /// Internal full-scope variant: returns just the token string for the
+    /// existing `validate_and_refresh_token` path that doesn't track expiry.
+    /// New callers should use `generate_scoped_installation_token` instead.
     async fn generate_installation_token(
         &self,
         installation_id: i64,
     ) -> Result<String, GitProviderError> {
+        let (token, _expires_at) = self
+            .generate_scoped_installation_token(installation_id, &ScopedTokenRequest::default())
+            .await?;
+        Ok(token)
+    }
+
+    /// Generate a narrowly-scoped GitHub App installation token.
+    ///
+    /// Wraps the GitHub `POST /app/installations/{installation_id}/access_tokens`
+    /// endpoint with optional `repositories` and `permissions` narrowing —
+    /// the same endpoint as `generate_installation_token`, but with a body
+    /// that constrains the resulting token to a subset of the installation's
+    /// repositories and a subset of its granted permissions.
+    ///
+    /// This is the entry point for the in-sandbox credential daemon: every
+    /// `git clone`/`git push` mints a fresh token scoped to a single repo
+    /// with the minimum permission needed, valid for ≤1 hour, instead of
+    /// reusing one full-installation token for the whole session.
+    ///
+    /// # Returns
+    /// `(token, expires_at)` — `expires_at` is the GitHub-reported expiry
+    /// timestamp (`None` only if GitHub omits the field, which it never
+    /// does in practice; callers should treat `None` as "expires soon" and
+    /// re-mint).
+    pub async fn generate_scoped_installation_token(
+        &self,
+        installation_id: i64,
+        request: &ScopedTokenRequest,
+    ) -> Result<(String, Option<DateTime<Utc>>), GitProviderError> {
         match &self.auth_method {
             AuthMethod::GitHubApp {
                 app_id,
@@ -240,14 +341,20 @@ impl GitHubProvider {
                 ..
             } => {
                 info!(
-                    "Generating GitHub App installation token for installation {}",
-                    installation_id
+                    "Generating GitHub App installation token for installation {} (repos={:?}, perms={:?})",
+                    installation_id, request.repositories, request.permissions
                 );
 
                 // Create JWT for GitHub App authentication
                 let app_id_param = octocrab::models::AppId(*app_id as u64);
                 let key = jsonwebtoken::EncodingKey::from_rsa_pem(private_key.as_bytes()).map_err(
                     |e| {
+                        error!(
+                            installation_id,
+                            app_id = *app_id,
+                            error = %e,
+                            "GitHub App scoped token mint failed: invalid private key"
+                        );
                         GitProviderError::InvalidConfiguration(format!(
                             "Invalid private key: {}",
                             e
@@ -256,6 +363,12 @@ impl GitHubProvider {
                 )?;
 
                 let jwt = octocrab::auth::create_jwt(app_id_param, &key).map_err(|e| {
+                    error!(
+                        installation_id,
+                        app_id = *app_id,
+                        error = %e,
+                        "GitHub App scoped token mint failed: JWT creation error"
+                    );
                     GitProviderError::ApiError(format!("Failed to create JWT: {}", e))
                 })?;
 
@@ -264,6 +377,12 @@ impl GitHubProvider {
                     .personal_token(jwt)
                     .build()
                     .map_err(|e| {
+                        error!(
+                            installation_id,
+                            app_id = *app_id,
+                            error = %e,
+                            "GitHub App scoped token mint failed: octocrab client build error"
+                        );
                         GitProviderError::ApiError(format!(
                             "Failed to create GitHub App client: {}",
                             e
@@ -276,35 +395,75 @@ impl GitHubProvider {
                     .installation(octocrab::models::InstallationId(installation_id as u64))
                     .await
                     .map_err(|e| {
+                        error!(
+                            installation_id,
+                            app_id = *app_id,
+                            error = %e,
+                            "GitHub App scoped token mint failed: cannot fetch installation \
+                             (check that app_id matches installation_id and the App is still \
+                             installed)"
+                        );
                         GitProviderError::ApiError(format!("Failed to get installation: {}", e))
                     })?;
 
-                // Create installation access token
-                let create_access_token =
-                    octocrab::params::apps::CreateInstallationAccessToken::default();
                 let gh_access_tokens_url = reqwest::Url::parse(
                     installation.access_tokens_url.as_ref().ok_or_else(|| {
+                        error!(
+                            installation_id,
+                            app_id = *app_id,
+                            "GitHub App scoped token mint failed: installation response had no \
+                             access_tokens_url"
+                        );
                         GitProviderError::ApiError(
                             "No access_tokens_url in installation".to_string(),
                         )
                     })?,
                 )
                 .map_err(|e| {
+                    error!(
+                        installation_id,
+                        app_id = *app_id,
+                        error = %e,
+                        "GitHub App scoped token mint failed: malformed access_tokens_url"
+                    );
                     GitProviderError::ApiError(format!("Failed to parse access_tokens_url: {}", e))
                 })?;
 
+                // Send the request body. When both fields are empty the body
+                // serializes to `{}` and GitHub returns a full-installation
+                // token (matches the historical behavior of this method).
+                // When either is populated GitHub narrows the token.
                 let access: octocrab::models::InstallationToken = octocrab
-                    .post(gh_access_tokens_url.path(), Some(&create_access_token))
+                    .post(gh_access_tokens_url.path(), Some(request))
                     .await
                     .map_err(|e| {
+                        error!(
+                            installation_id,
+                            app_id = *app_id,
+                            repos = ?request.repositories,
+                            perms = ?request.permissions,
+                            error = %e,
+                            "GitHub App scoped token mint failed: GitHub rejected access_tokens \
+                             request (common causes: requested repo not selected on the \
+                             installation, or App lacks the requested permission)"
+                        );
                         GitProviderError::ApiError(format!(
                             "Failed to create installation token: {}",
                             e
                         ))
                     })?;
 
-                debug!("Successfully generated GitHub App installation token");
-                Ok(access.token)
+                let expires_at = access
+                    .expires_at
+                    .as_deref()
+                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| dt.with_timezone(&Utc));
+
+                debug!(
+                    "Successfully generated GitHub App installation token (expires_at={:?})",
+                    expires_at
+                );
+                Ok((access.token, expires_at))
             }
             _ => Err(GitProviderError::InvalidConfiguration(
                 "GitHub App credentials required for installation token generation".to_string(),
@@ -575,6 +734,67 @@ impl GitProviderService for GitHubProvider {
                 Err(e)
             }
         }
+    }
+
+    /// GitHub-side mint of a per-operation, single-repo, narrow-permission
+    /// installation token. Read [`ScopedTokenRequest::for_repo_read`] /
+    /// `for_repo_write` for the body shape; this just routes the right one
+    /// to [`Self::generate_scoped_installation_token`] and packages the
+    /// result for the daemon's consumption.
+    ///
+    /// Only works for `AuthMethod::GitHubApp` connections. PAT and OAuth
+    /// connections fall through to the trait default
+    /// (`Err(NotImplemented)`) — there's no GitHub API to "narrow a PAT"
+    /// at runtime, so a PAT-backed connection cannot serve per-op tokens
+    /// at all. The daemon must refuse the request rather than handing out
+    /// the long-lived PAT.
+    async fn mint_scoped_repo_token(
+        &self,
+        installation_id: Option<&str>,
+        owner: &str,
+        repo: &str,
+        operation: ScopedTokenOp,
+    ) -> Result<ScopedTokenGrant, GitProviderError> {
+        // Only GitHub App connections can mint scoped tokens. Bail loudly
+        // for PAT/OAuth so the daemon doesn't accidentally hand out a
+        // long-lived token instead.
+        let installation_id_str = installation_id.ok_or_else(|| {
+            GitProviderError::InvalidConfiguration(
+                "Per-op scoped tokens require a GitHub App installation_id; \
+                 PAT and OAuth connections are not supported"
+                    .to_string(),
+            )
+        })?;
+
+        let installation_id_i64 = installation_id_str.parse::<i64>().map_err(|e| {
+            GitProviderError::InvalidConfiguration(format!(
+                "Invalid installation_id '{}': {}",
+                installation_id_str, e
+            ))
+        })?;
+
+        // GitHub's `POST /app/installations/{id}/access_tokens` expects bare
+        // repo names in `repositories`, NOT `owner/repo`. Passing the full
+        // name causes a 422 even when the App has access to the repo —
+        // `owner` is determined by the installation itself.
+        let _ = owner;
+        let request = match operation {
+            ScopedTokenOp::Fetch => ScopedTokenRequest::for_repo_read(repo),
+            ScopedTokenOp::Push => ScopedTokenRequest::for_repo_write(repo),
+        };
+
+        let (token, expires_at) = self
+            .generate_scoped_installation_token(installation_id_i64, &request)
+            .await?;
+
+        Ok(ScopedTokenGrant {
+            // GitHub's well-known basic-auth username for installation
+            // tokens. Documented at:
+            // https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/authenticating-as-a-github-app-installation
+            username: "x-access-token".to_string(),
+            password: token,
+            expires_at,
+        })
     }
 
     async fn list_repositories(
@@ -1961,5 +2181,72 @@ impl GitProviderService for GitHubProvider {
             base_branch: pr.base.ref_name,
             head_sha: pr.head.sha,
         })
+    }
+}
+
+#[cfg(test)]
+mod scoped_token_tests {
+    use super::*;
+
+    /// `default()` must serialize to `{}` so the GitHub `access_tokens`
+    /// endpoint returns a full-installation token — the historical
+    /// behavior of `generate_installation_token` before scoping was added.
+    /// Any regression here silently broadens the security blast radius of
+    /// background token-refresh flows.
+    #[test]
+    fn default_serializes_to_empty_object() {
+        let body = serde_json::to_string(&ScopedTokenRequest::default()).unwrap();
+        assert_eq!(body, "{}");
+    }
+
+    /// `for_repo_read` must produce a body that both narrows to a single
+    /// repo AND drops permissions to `contents:read` only.
+    ///
+    /// Critically: `metadata` MUST NOT appear in the permissions map.
+    /// GitHub strips the entire `permissions` block (silently!) when any
+    /// requested key isn't in the App's declared permission set, and
+    /// `metadata` is implicit, not declared. The strip surfaces as a token
+    /// with `push:false, pull:false` on every repo — the failure mode we
+    /// hit in production.
+    #[test]
+    fn for_repo_read_narrows_repo_and_perms() {
+        let req = ScopedTokenRequest::for_repo_read("web");
+        let v: serde_json::Value = serde_json::to_value(&req).unwrap();
+
+        assert_eq!(v["repositories"], serde_json::json!(["web"]));
+        assert_eq!(v["permissions"]["contents"], "read");
+        // metadata must NOT be present — see doc on for_repo_read.
+        assert!(v["permissions"].get("metadata").is_none());
+        // Exactly one permission: contents.
+        assert_eq!(v["permissions"].as_object().unwrap().len(), 1);
+    }
+
+    /// `for_repo_write` must elevate `contents` to `write` while leaving
+    /// every other dimension narrowed. Used for `git push` flows.
+    /// Same `metadata` rule as the read variant — never list it explicitly.
+    #[test]
+    fn for_repo_write_grants_write_only_on_contents() {
+        let req = ScopedTokenRequest::for_repo_write("web");
+        let v: serde_json::Value = serde_json::to_value(&req).unwrap();
+
+        assert_eq!(v["repositories"], serde_json::json!(["web"]));
+        assert_eq!(v["permissions"]["contents"], "write");
+        assert!(v["permissions"].get("metadata").is_none());
+        assert_eq!(v["permissions"].as_object().unwrap().len(), 1);
+    }
+
+    /// GitHub's `POST /app/installations/{id}/access_tokens` expects bare
+    /// repo names in `repositories`, NOT `owner/repo`. The owner is fixed
+    /// by the installation. Regression guard for the original bug where
+    /// we sent `kfsoftware/temps-landing-new` and GitHub 422'd even though
+    /// the App had access to the repo.
+    #[test]
+    fn for_repo_uses_bare_repo_name() {
+        let req = ScopedTokenRequest::for_repo_read("temps-landing-new");
+        assert_eq!(req.repositories.as_ref().unwrap()[0], "temps-landing-new");
+        assert!(
+            !req.repositories.as_ref().unwrap()[0].contains('/'),
+            "GitHub rejects `owner/repo` form; pass bare repo name only"
+        );
     }
 }

@@ -10,6 +10,7 @@
 //! the monitor sends a notification via the shared `NotificationService`.
 //! A recovery notification is sent when the service returns to `operational`.
 
+use crate::externalsvc::postgres_wal_health::{self, PostgresWalHealth};
 use crate::externalsvc::{HealthProbeStatus, ServiceType};
 use crate::services::ExternalServiceManager;
 use chrono::Utc;
@@ -24,6 +25,11 @@ use temps_core::notifications::{
 use temps_entities::{external_service_health_checks, external_services};
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
+
+/// Key under `external_services.health_metadata` for Postgres WAL probe output.
+/// Future engines add sibling keys (e.g., `redis_memory`, `mongo_oplog`) so
+/// the column stays generic.
+const POSTGRES_WAL_KEY: &str = "postgres_wal";
 
 /// How many failed probes in a row before we raise an alert.
 const CONSECUTIVE_FAILURES_BEFORE_ALERT: i32 = 3;
@@ -157,7 +163,7 @@ impl ExternalServiceHealthMonitor {
         // Services that aren't supposed to be running should not be probed —
         // we just record them as down without false alerting (alert is gated
         // on consecutive failures and a stopped service starts at 0).
-        let (status, response_time_ms, error_message) = if service.status != "running" {
+        let (mut status, response_time_ms, mut error_message) = if service.status != "running" {
             (
                 HealthProbeStatus::Down,
                 None,
@@ -169,6 +175,31 @@ impl ExternalServiceHealthMonitor {
         } else {
             self.probe_service(service).await
         };
+
+        // Postgres standalone services get an additional WAL/archive probe.
+        // The result is persisted under `health_metadata.postgres_wal` so the
+        // UI can render warnings. WAL warnings downgrade Operational to
+        // Degraded but never escalate Down upward — liveness wins.
+        let wal_snapshot = if service.service_type == "postgres"
+            && service.topology == "standalone"
+            && !matches!(status, HealthProbeStatus::Down)
+        {
+            self.run_postgres_wal_probe(service).await
+        } else {
+            None
+        };
+
+        if let Some(snapshot) = &wal_snapshot {
+            if snapshot.has_warnings() && matches!(status, HealthProbeStatus::Operational) {
+                status = HealthProbeStatus::Degraded;
+                if error_message.is_none() {
+                    error_message = Some(format!(
+                        "Postgres WAL health: {} warning(s) — see health_metadata for details",
+                        snapshot.warnings.len()
+                    ));
+                }
+            }
+        }
 
         let now = Utc::now();
 
@@ -196,11 +227,20 @@ impl ExternalServiceHealthMonitor {
             0
         };
 
+        let merged_metadata = merge_health_metadata(
+            service.health_metadata.as_ref(),
+            POSTGRES_WAL_KEY,
+            wal_snapshot.as_ref(),
+        );
+
         let mut active: external_services::ActiveModel = service.clone().into();
         active.health_status = Set(Some(status.as_str().to_string()));
         active.last_health_check_at = Set(Some(now));
         active.last_health_error = Set(error_message.clone());
         active.consecutive_health_failures = Set(now_failing);
+        if let Some(metadata) = merged_metadata {
+            active.health_metadata = Set(Some(metadata));
+        }
         if let Err(e) = active.update(self.db.as_ref()).await {
             warn!(
                 "Failed to update health_status on service {}: {}",
@@ -223,6 +263,30 @@ impl ExternalServiceHealthMonitor {
         }
 
         Ok(())
+    }
+
+    /// Run the WAL/archive probe for a standalone Postgres service.
+    ///
+    /// Best-effort: any failure returns `None` and is logged at debug level
+    /// so a stricter Postgres connection (e.g., scram-sha-256 with a probe
+    /// that uses the wrong auth flow) doesn't spam warnings on every cycle.
+    async fn run_postgres_wal_probe(
+        &self,
+        service: &external_services::Model,
+    ) -> Option<PostgresWalHealth> {
+        let service_config = match self.manager.get_service_config(service.id).await {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                debug!(
+                    "WAL probe skipped for service {} ({}): failed to load config: {}",
+                    service.id, service.name, e
+                );
+                return None;
+            }
+        };
+
+        let conn_str = postgres_wal_health::build_conn_str(&service_config.parameters)?;
+        postgres_wal_health::probe_wal_health(&conn_str).await
     }
 
     /// Probe the service using its engine-specific health_probe implementation
@@ -382,6 +446,40 @@ impl ExternalServiceHealthMonitor {
     }
 }
 
+/// Merge a single engine snapshot into the existing `health_metadata` JSON
+/// object under `key`. Preserves sibling keys that other engines may have
+/// written, so future engines can plug in without coordinating writes.
+///
+/// Returns:
+/// - `Some(updated)` when the merged object differs from the input or when a
+///   new snapshot is being recorded.
+/// - `None` when `snapshot` is `None` AND nothing in the input needs touching
+///   (avoids gratuitous UPDATEEs on services with no metadata).
+fn merge_health_metadata<T: serde::Serialize>(
+    existing: Option<&sea_orm::JsonValue>,
+    key: &str,
+    snapshot: Option<&T>,
+) -> Option<sea_orm::JsonValue> {
+    let snapshot = snapshot?;
+    let snapshot_value = match serde_json::to_value(snapshot) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(
+                "Failed to serialize health metadata snapshot for key '{}': {}",
+                key, e
+            );
+            return None;
+        }
+    };
+
+    let mut map = match existing {
+        Some(serde_json::Value::Object(m)) => m.clone(),
+        _ => serde_json::Map::new(),
+    };
+    map.insert(key.to_string(), snapshot_value);
+    Some(serde_json::Value::Object(map))
+}
+
 // ── Tests ────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -393,5 +491,47 @@ mod tests {
         assert_eq!(HealthProbeStatus::Operational.as_str(), "operational");
         assert_eq!(HealthProbeStatus::Degraded.as_str(), "degraded");
         assert_eq!(HealthProbeStatus::Down.as_str(), "down");
+    }
+
+    #[test]
+    fn merge_writes_new_key_into_empty_metadata() {
+        let merged =
+            merge_health_metadata(None, "postgres_wal", Some(&serde_json::json!({"a": 1})));
+        let merged = merged.expect("expected merged value");
+        assert_eq!(merged["postgres_wal"]["a"], 1);
+    }
+
+    #[test]
+    fn merge_preserves_sibling_keys() {
+        let existing = serde_json::json!({"redis_memory": {"used_bytes": 42}});
+        let merged = merge_health_metadata(
+            Some(&existing),
+            "postgres_wal",
+            Some(&serde_json::json!({"pg_wal_bytes": 100})),
+        )
+        .expect("expected merged value");
+        assert_eq!(merged["redis_memory"]["used_bytes"], 42);
+        assert_eq!(merged["postgres_wal"]["pg_wal_bytes"], 100);
+    }
+
+    #[test]
+    fn merge_overwrites_same_key() {
+        let existing = serde_json::json!({"postgres_wal": {"old": true}});
+        let merged = merge_health_metadata(
+            Some(&existing),
+            "postgres_wal",
+            Some(&serde_json::json!({"new": true})),
+        )
+        .expect("expected merged value");
+        assert!(merged["postgres_wal"].get("old").is_none());
+        assert_eq!(merged["postgres_wal"]["new"], true);
+    }
+
+    #[test]
+    fn merge_returns_none_when_snapshot_missing() {
+        let existing = serde_json::json!({"postgres_wal": {"old": true}});
+        let merged =
+            merge_health_metadata::<serde_json::Value>(Some(&existing), "postgres_wal", None);
+        assert!(merged.is_none());
     }
 }

@@ -567,6 +567,22 @@ async fn copy_environment_variables_to_preview(
     Ok(())
 }
 
+/// Returns true if a git push should auto-deploy given the project and
+/// environment deployment configs. The merge mirrors `DeploymentConfig::merge`
+/// (env overrides project; OR-semantics for booleans). When both configs are
+/// absent the answer is false — auto-deploy is opt-in, not opt-out.
+fn is_automatic_deploy_enabled(
+    project_config: Option<&temps_entities::deployment_config::DeploymentConfig>,
+    environment_config: Option<&temps_entities::deployment_config::DeploymentConfig>,
+) -> bool {
+    match (project_config, environment_config) {
+        (Some(project_cfg), Some(env_cfg)) => project_cfg.merge(env_cfg).automatic_deploy,
+        (Some(project_cfg), None) => project_cfg.automatic_deploy,
+        (None, Some(env_cfg)) => env_cfg.automatic_deploy,
+        (None, None) => false,
+    }
+}
+
 // Extracted free function for testing
 async fn process_git_push_event(
     workflow_planner: Arc<WorkflowPlanner>,
@@ -622,12 +638,58 @@ async fn process_git_push_event(
             }
         };
 
+    // ── Auto-deploy gate ─────────────────────────────────────────────────
+    //
+    // Respect the user's "deploy on push" setting before doing any work.
+    // The effective value is computed by merging project + environment
+    // deployment configs (env overrides project). When both sides have
+    // automatic_deploy=false, push events must NOT trigger a deployment —
+    // the user has explicitly opted out.
+    //
+    // Exception: the FIRST deployment for an environment always runs even
+    // when automatic_deploy=false. Without this, an opted-out project would
+    // never get a baseline deployment, and project creation would silently
+    // produce zero deployments.
+    use sea_orm::{EntityTrait, PaginatorTrait, QueryOrder};
+    let auto_deploy_enabled = is_automatic_deploy_enabled(
+        project.deployment_config.as_ref(),
+        environment.deployment_config.as_ref(),
+    );
+    if !auto_deploy_enabled {
+        let existing_count = match deployments::Entity::find()
+            .filter(deployments::Column::EnvironmentId.eq(environment.id))
+            .count(db.as_ref())
+            .await
+        {
+            Ok(n) => n,
+            Err(e) => {
+                error!(
+                    "Failed to count existing deployments for environment {}: {}",
+                    environment.id, e
+                );
+                return;
+            }
+        };
+
+        if existing_count > 0 {
+            info!(
+                "Skipping push event for project {} environment {} ({}): automatic_deploy is disabled",
+                project.id, environment.id, environment.name
+            );
+            return;
+        }
+
+        info!(
+            "Allowing initial deployment for project {} environment {} ({}) despite automatic_deploy=false (no prior deployments)",
+            project.id, environment.id, environment.name
+        );
+    }
+
     // Check for duplicate deployment (same project, environment, and commit)
     // This prevents duplicate deployments from being created if:
     // - Multiple webhook URLs are configured in GitHub (both /webhook/git/github/events and /webhook/source/github/events)
     // - GitHub sends duplicate webhooks
     // - Race condition between concurrent push events
-    use sea_orm::{EntityTrait, PaginatorTrait, QueryOrder};
     let existing_deployment = deployments::Entity::find()
         .filter(deployments::Column::ProjectId.eq(project.id))
         .filter(deployments::Column::EnvironmentId.eq(environment.id))
@@ -1903,5 +1965,55 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    fn cfg_with_auto_deploy(value: bool) -> temps_entities::deployment_config::DeploymentConfig {
+        temps_entities::deployment_config::DeploymentConfig {
+            automatic_deploy: value,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn auto_deploy_disabled_when_both_configs_missing() {
+        assert!(!is_automatic_deploy_enabled(None, None));
+    }
+
+    #[test]
+    fn auto_deploy_disabled_when_project_off_and_env_missing() {
+        let project_cfg = cfg_with_auto_deploy(false);
+        assert!(!is_automatic_deploy_enabled(Some(&project_cfg), None));
+    }
+
+    #[test]
+    fn auto_deploy_enabled_when_project_on_and_env_missing() {
+        let project_cfg = cfg_with_auto_deploy(true);
+        assert!(is_automatic_deploy_enabled(Some(&project_cfg), None));
+    }
+
+    #[test]
+    fn auto_deploy_disabled_when_both_sides_off() {
+        let project_cfg = cfg_with_auto_deploy(false);
+        let env_cfg = cfg_with_auto_deploy(false);
+        assert!(!is_automatic_deploy_enabled(
+            Some(&project_cfg),
+            Some(&env_cfg)
+        ));
+    }
+
+    #[test]
+    fn auto_deploy_enabled_when_env_overrides_project_off() {
+        let project_cfg = cfg_with_auto_deploy(false);
+        let env_cfg = cfg_with_auto_deploy(true);
+        assert!(is_automatic_deploy_enabled(
+            Some(&project_cfg),
+            Some(&env_cfg)
+        ));
+    }
+
+    #[test]
+    fn auto_deploy_enabled_when_only_env_set_on() {
+        let env_cfg = cfg_with_auto_deploy(true);
+        assert!(is_automatic_deploy_enabled(None, Some(&env_cfg)));
     }
 }

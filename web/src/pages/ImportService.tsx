@@ -55,7 +55,7 @@ export function ImportService() {
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: 'Storage', href: '/storage' },
+      { label: 'Databases', href: '/storage' },
       { label: 'Import Service', href: '/storage/import' },
     ])
   }, [setBreadcrumbs])

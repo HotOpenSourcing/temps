@@ -49,6 +49,22 @@ pub struct ServerConfig {
     pub tls_address: Option<String>,
     pub console_address: String,
 
+    // Admin listener (optional). When set, admin/management routes bind here
+    // while the `console_address` listener only serves public ingest routes
+    // (analytics events, error tracking ingest, AI gateway, worker route sync,
+    // etc.). When unset, both surfaces share `console_address` for backwards
+    // compatibility. See [admin-listener-split] for the route classification.
+    pub console_admin_address: Option<String>,
+    /// Comma-separated list of IPs / CIDRs allowed to reach the admin listener.
+    /// Empty / unset = no IP allowlist (admin gated only by binding address).
+    pub admin_allowed_ips: Vec<String>,
+    /// Comma-separated list of HTTP Host headers allowed on the admin listener.
+    /// Empty / unset = no Host check.
+    pub admin_allowed_hosts: Vec<String>,
+    /// When true, honor `X-Forwarded-For` from loopback peers only (for
+    /// reverse-proxy deployments). Defaults to false.
+    pub admin_trust_forwarded_for: bool,
+
     // Generated/derived fields
     pub data_dir: PathBuf,
     pub auth_secret: String,
@@ -64,6 +80,14 @@ pub struct ServerConfig {
     pub postgres_acquire_timeout_secs: Option<u64>,
     pub postgres_idle_timeout_secs: Option<u64>,
     pub postgres_max_lifetime_secs: Option<u64>,
+
+    // ClickHouse analytics backend (optional, opt-in via env vars).
+    // When `clickhouse_url` is unset, Temps runs in PG-only mode and the
+    // CH fan-out worker is not started. See ADR-012.
+    pub clickhouse_url: Option<String>,
+    pub clickhouse_database: Option<String>,
+    pub clickhouse_user: Option<String>,
+    pub clickhouse_password: Option<String>,
 }
 
 impl ServerConfig {
@@ -111,11 +135,48 @@ impl ServerConfig {
         // Get console address - use a random available port
         let console_address = console_address.unwrap_or_else(Self::get_random_console_address);
 
+        // Admin listener (opt-in). When unset, the existing single-listener
+        // mode is used and every route binds to `console_address`.
+        let console_admin_address = std::env::var("TEMPS_CONSOLE_ADMIN_ADDRESS")
+            .ok()
+            .filter(|s| !s.is_empty());
+
+        let admin_allowed_ips = std::env::var("TEMPS_ADMIN_ALLOWED_IPS")
+            .ok()
+            .map(|s| {
+                s.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let admin_allowed_hosts = std::env::var("TEMPS_ADMIN_ALLOWED_HOSTS")
+            .ok()
+            .map(|s| {
+                s.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let admin_trust_forwarded_for = std::env::var("TEMPS_ADMIN_TRUST_FORWARDED_FOR")
+            .ok()
+            .map(|s| matches!(s.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false);
+
         Ok(ServerConfig {
             address,
             database_url,
             tls_address,
             console_address,
+            console_admin_address,
+            admin_allowed_ips,
+            admin_allowed_hosts,
+            admin_trust_forwarded_for,
             data_dir,
             auth_secret,
             encryption_key,
@@ -146,7 +207,34 @@ impl ServerConfig {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .or(Some(1800)),
+
+            // ClickHouse analytics backend. All four keys must be present
+            // for CH to be considered enabled — partial config is treated
+            // as off so a half-configured operator never silently loses
+            // analytics.
+            clickhouse_url: std::env::var("TEMPS_CLICKHOUSE_URL")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            clickhouse_database: std::env::var("TEMPS_CLICKHOUSE_DATABASE")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            clickhouse_user: std::env::var("TEMPS_CLICKHOUSE_USER")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            clickhouse_password: std::env::var("TEMPS_CLICKHOUSE_PASSWORD")
+                .ok()
+                .filter(|s| !s.is_empty()),
         })
+    }
+
+    /// Returns true when all four ClickHouse env vars are populated and
+    /// the analytics fan-out path can be enabled. Partial config returns
+    /// false (fail closed).
+    pub fn is_clickhouse_enabled(&self) -> bool {
+        self.clickhouse_url.is_some()
+            && self.clickhouse_database.is_some()
+            && self.clickhouse_user.is_some()
+            && self.clickhouse_password.is_some()
     }
 
     /// Generate a 32-byte auth secret (64 hex characters)

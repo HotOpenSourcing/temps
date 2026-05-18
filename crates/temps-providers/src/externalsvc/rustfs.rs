@@ -24,11 +24,13 @@ use std::time::Duration;
 use temps_core::EncryptionService;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::utils::ensure_network_exists;
 
-use super::{ExternalService, HealthProbeResult, ServiceConfig, ServiceType};
+use super::{
+    ExternalService, HealthProbeResult, ServiceConfig, ServiceResourceLimits, ServiceType,
+};
 
 /// Default RustFS Docker image (from Docker Hub)
 pub const DEFAULT_RUSTFS_IMAGE: &str = "rustfs/rustfs:1.0.0-alpha.98";
@@ -341,6 +343,8 @@ pub struct RustfsService {
     name: String,
     config: Arc<RwLock<Option<RustfsConfig>>>,
     client: Arc<RwLock<Option<Client>>>,
+    /// Resource limits captured at init time, applied to recreate paths.
+    resource_limits: Arc<RwLock<ServiceResourceLimits>>,
     docker: Arc<Docker>,
     /// Reserved for encrypting/decrypting credentials when storing to database
     #[allow(dead_code)]
@@ -360,6 +364,7 @@ impl RustfsService {
             name,
             config: Arc::new(RwLock::new(None)),
             client: Arc::new(RwLock::new(None)),
+            resource_limits: Arc::new(RwLock::new(ServiceResourceLimits::default())),
             docker,
             encryption_service,
         }
@@ -449,7 +454,12 @@ impl RustfsService {
         Ok((exit_code == 0, stdout, stderr))
     }
 
-    async fn create_container(&self, docker: &Docker, config: &RustfsConfig) -> Result<()> {
+    async fn create_container(
+        &self,
+        docker: &Docker,
+        config: &RustfsConfig,
+        resource_limits: &ServiceResourceLimits,
+    ) -> Result<()> {
         // Pull the image first
         info!("Pulling RustFS image {}", config.docker_image);
 
@@ -570,7 +580,7 @@ impl RustfsService {
             )])),
         });
 
-        let host_config = bollard::models::HostConfig {
+        let mut host_config = bollard::models::HostConfig {
             port_bindings: Some(HashMap::from([
                 (
                     "9000/tcp".to_string(),
@@ -608,6 +618,7 @@ impl RustfsService {
             pids_limit: Some(512),
             ..Default::default()
         };
+        resource_limits.apply_to_host_config(&mut host_config);
 
         let container_config = bollard::models::ContainerCreateBody {
             image: Some(config.docker_image.to_string()),
@@ -770,10 +781,71 @@ impl RustfsService {
     }
 }
 
+impl RustfsService {
+    /// Per-tenant bucket name shared between provisioning and preview paths.
+    fn bucket_name_for(project_id: &str, environment: &str) -> String {
+        format!("{}-{}", project_id, environment)
+            .replace('_', "-")
+            .to_lowercase()
+    }
+
+    /// Build the `S3_*` / `AWS_*` env vars for a given bucket. Shared between
+    /// `get_runtime_env_vars` and `preview_runtime_env_vars`.
+    fn build_runtime_env_vars(
+        &self,
+        config: ServiceConfig,
+        bucket_name: &str,
+    ) -> Result<HashMap<String, String>> {
+        let effective_host = self.get_container_name();
+        let effective_port = DEFAULT_RUSTFS_API_PORT.to_string();
+        let endpoint = format!("http://{}:{}", effective_host, effective_port);
+
+        let access_key = config
+            .parameters
+            .get("access_key")
+            .and_then(|v| v.as_str())
+            .context("Missing RustFS access_key parameter")?;
+        let secret_key = config
+            .parameters
+            .get("secret_key")
+            .and_then(|v| v.as_str())
+            .context("Missing RustFS secret_key parameter")?;
+        let region = config
+            .parameters
+            .get("region")
+            .and_then(|v| v.as_str())
+            .unwrap_or("us-east-1");
+
+        let mut env_vars = HashMap::new();
+
+        env_vars.insert("S3_BUCKET".to_string(), bucket_name.to_string());
+        env_vars.insert("S3_ENDPOINT".to_string(), endpoint.clone());
+        env_vars.insert("S3_HOST".to_string(), effective_host.clone());
+        env_vars.insert("S3_PORT".to_string(), effective_port);
+        env_vars.insert("S3_ACCESS_KEY".to_string(), access_key.to_string());
+        env_vars.insert("S3_SECRET_KEY".to_string(), secret_key.to_string());
+        env_vars.insert("S3_REGION".to_string(), region.to_string());
+
+        env_vars.insert("AWS_ACCESS_KEY_ID".to_string(), access_key.to_string());
+        env_vars.insert("AWS_SECRET_ACCESS_KEY".to_string(), secret_key.to_string());
+        env_vars.insert("AWS_DEFAULT_REGION".to_string(), region.to_string());
+        env_vars.insert("AWS_ENDPOINT_URL".to_string(), endpoint);
+
+        Ok(env_vars)
+    }
+}
+
 #[async_trait]
 impl ExternalService for RustfsService {
     async fn init(&self, config: ServiceConfig) -> Result<HashMap<String, String>> {
         info!("Initializing RustFS service: {}", config.name);
+
+        // Pull resource limits before consuming the parameters JSON.
+        let resource_limits = ServiceResourceLimits::from_parameters(&config.parameters);
+        if let Err(e) = resource_limits.validate() {
+            return Err(anyhow::anyhow!("Invalid resource limits: {}", e));
+        }
+        *self.resource_limits.write().await = resource_limits.clone();
 
         // Parse input configuration
         let input_config: RustfsInputConfig = serde_json::from_value(config.parameters.clone())
@@ -783,7 +855,8 @@ impl ExternalService for RustfsService {
         let runtime_config = RustfsConfig::from_input_async(input_config, &self.docker).await;
 
         // Create container
-        self.create_container(&self.docker, &runtime_config).await?;
+        self.create_container(&self.docker, &runtime_config, &resource_limits)
+            .await?;
 
         // Create S3 client
         let client = self.create_s3_client(&runtime_config).await?;
@@ -1098,48 +1171,20 @@ impl ExternalService for RustfsService {
         project_id: &str,
         environment: &str,
     ) -> Result<HashMap<String, String>> {
-        let bucket_name = format!("{}-{}", project_id, environment)
-            .replace('_', "-")
-            .to_lowercase();
-
+        let bucket_name = Self::bucket_name_for(project_id, environment);
         self.ensure_bucket(config.clone(), &bucket_name).await?;
+        self.build_runtime_env_vars(config, &bucket_name)
+    }
 
-        let effective_host = self.get_container_name();
-        let effective_port = DEFAULT_RUSTFS_API_PORT.to_string();
-        let endpoint = format!("http://{}:{}", effective_host, effective_port);
-
-        let access_key = config
-            .parameters
-            .get("access_key")
-            .and_then(|v| v.as_str())
-            .context("Missing RustFS access_key parameter")?;
-        let secret_key = config
-            .parameters
-            .get("secret_key")
-            .and_then(|v| v.as_str())
-            .context("Missing RustFS secret_key parameter")?;
-        let region = config
-            .parameters
-            .get("region")
-            .and_then(|v| v.as_str())
-            .unwrap_or("us-east-1");
-
-        let mut env_vars = HashMap::new();
-
-        env_vars.insert("S3_BUCKET".to_string(), bucket_name);
-        env_vars.insert("S3_ENDPOINT".to_string(), endpoint.clone());
-        env_vars.insert("S3_HOST".to_string(), effective_host.clone());
-        env_vars.insert("S3_PORT".to_string(), effective_port);
-        env_vars.insert("S3_ACCESS_KEY".to_string(), access_key.to_string());
-        env_vars.insert("S3_SECRET_KEY".to_string(), secret_key.to_string());
-        env_vars.insert("S3_REGION".to_string(), region.to_string());
-
-        env_vars.insert("AWS_ACCESS_KEY_ID".to_string(), access_key.to_string());
-        env_vars.insert("AWS_SECRET_ACCESS_KEY".to_string(), secret_key.to_string());
-        env_vars.insert("AWS_DEFAULT_REGION".to_string(), region.to_string());
-        env_vars.insert("AWS_ENDPOINT_URL".to_string(), endpoint);
-
-        Ok(env_vars)
+    async fn preview_runtime_env_vars(
+        &self,
+        config: ServiceConfig,
+        project_id: &str,
+        environment: &str,
+    ) -> Result<HashMap<String, String>> {
+        let bucket_name = Self::bucket_name_for(project_id, environment);
+        // Preview: skip ensure_bucket so the UI doesn't provision buckets.
+        self.build_runtime_env_vars(config, &bucket_name)
     }
 
     fn get_local_address(&self, service_config: ServiceConfig) -> Result<String> {
@@ -1214,7 +1259,7 @@ impl ExternalService for RustfsService {
     async fn backup_to_s3(
         &self,
         _s3_client: &aws_sdk_s3::Client,
-        _s3_credentials: &super::S3Credentials,
+        s3_credentials: &super::S3Credentials,
         backup: temps_entities::backups::Model,
         s3_source: &temps_entities::s3_sources::Model,
         _subpath: &str,
@@ -1222,7 +1267,7 @@ impl ExternalService for RustfsService {
         pool: &temps_database::DbConnection,
         external_service: &temps_entities::external_services::Model,
         service_config: ServiceConfig,
-    ) -> Result<String> {
+    ) -> Result<super::BackupOutcome> {
         use chrono::Utc;
         use sea_orm::*;
 
@@ -1390,16 +1435,39 @@ impl ExternalService for RustfsService {
             .await?;
 
         if success {
+            // Compute size by listing the destination prefix.
+            let dest_s3_client = s3_credentials.build_s3_client().await;
+            let size_bytes = match super::s3_util::list_total_size(
+                &dest_s3_client,
+                &s3_credentials.bucket_name,
+                &format!("{}/", subpath_root.trim_matches('/')),
+            )
+            .await
+            {
+                Ok(n) => Some(n),
+                Err(e) => {
+                    warn!("RustFS mirror succeeded but failed to compute size: {}", e);
+                    None
+                }
+            };
+
             let mut backup_update: temps_entities::external_service_backups::ActiveModel =
                 backup_record.clone().into();
             backup_update.state = Set("completed".to_string());
             backup_update.finished_at = Set(Some(Utc::now()));
+            backup_update.size_bytes = Set(size_bytes);
             temps_entities::external_service_backups::Entity::update(backup_update)
                 .exec(pool)
                 .await?;
 
-            info!("RustFS backup completed successfully");
-            Ok(backup_prefix.to_string())
+            info!(
+                "RustFS backup completed successfully ({:?} bytes)",
+                size_bytes
+            );
+            Ok(super::BackupOutcome::new(
+                backup_prefix.to_string(),
+                size_bytes,
+            ))
         } else {
             let error_message = error_logs.join("\n");
 
@@ -1697,10 +1765,14 @@ impl ExternalService for RustfsService {
             self.docker.clone(),
             self.encryption_service.clone(),
         );
+        // Inherit limits from the source service so the restored copy
+        // runs with the same caps. Unlimited when the source had none.
+        let cloned_limits = ServiceResourceLimits::from_parameters(&ctx.source_config.parameters);
         *new_service.config.write().await = Some(new_config.clone());
+        *new_service.resource_limits.write().await = cloned_limits.clone();
 
         new_service
-            .create_container(&self.docker, &new_config)
+            .create_container(&self.docker, &new_config, &cloned_limits)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create new RustFS container: {}", e))?;
 

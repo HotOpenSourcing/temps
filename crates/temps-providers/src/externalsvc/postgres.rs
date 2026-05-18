@@ -14,12 +14,22 @@ use std::time::Duration;
 use temps_entities::external_service_backups;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use urlencoding;
 
 use crate::utils::ensure_network_exists;
 
-use super::{ExternalService, HealthProbeResult, RuntimeEnvVar, ServiceConfig, ServiceType};
+/// Hard ceiling for a single backup `docker exec`. Hit this and we give up,
+/// surface the captured output, and mark the backup row as failed. Six hours
+/// covers very large WAL-G + pg_dumpall runs while still bounding stuck-exec
+/// blast radius — without this, a hung exec would keep the row in `running`
+/// indefinitely.
+const BACKUP_EXEC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+
+use super::{
+    ExternalService, HealthProbeResult, RuntimeEnvVar, ServiceConfig, ServiceResourceLimits,
+    ServiceType,
+};
 
 /// POSIX-safe shell escaping: wraps value in single quotes, escaping any
 /// embedded single quotes. Safe for use in `sh -c` command strings.
@@ -229,6 +239,11 @@ fn find_available_port(start_port: u16) -> Option<u16> {
 pub struct PostgresService {
     name: String,
     config: Arc<RwLock<Option<PostgresConfig>>>,
+    /// Resource limits captured at init time and reused by `start()` when
+    /// recreating a container that was removed externally. Defaults to
+    /// unlimited; populated from the `resources` block in the
+    /// `ServiceConfig::parameters` JSON.
+    resource_limits: Arc<RwLock<ServiceResourceLimits>>,
     docker: Arc<Docker>,
 }
 
@@ -237,6 +252,7 @@ impl PostgresService {
         Self {
             name,
             config: Arc::new(RwLock::new(None)),
+            resource_limits: Arc::new(RwLock::new(ServiceResourceLimits::default())),
             docker,
         }
     }
@@ -254,7 +270,13 @@ impl PostgresService {
         format!("postgres-{}", self.name)
     }
 
-    async fn create_container(&self, docker: &Docker, config: &PostgresConfig) -> Result<()> {
+    async fn create_container(
+        &self,
+        docker: &Docker,
+        config: &PostgresConfig,
+        resource_limits: &ServiceResourceLimits,
+        enable_archiving: bool,
+    ) -> Result<()> {
         // Pull image first
         info!("Pulling PostgreSQL image {}", config.docker_image);
 
@@ -363,7 +385,7 @@ impl PostgresService {
             "POSTGRES_HOST_AUTH_METHOD=md5".to_string(), // Use md5 password authentication for better compatibility
         ];
 
-        let host_config = bollard::models::HostConfig {
+        let mut host_config = bollard::models::HostConfig {
             port_bindings: Some(HashMap::from([(
                 "5432/tcp".to_string(),
                 Some(vec![bollard::models::PortBinding {
@@ -384,6 +406,7 @@ impl PostgresService {
             pids_limit: Some(512),
             ..Default::default()
         };
+        resource_limits.apply_to_host_config(&mut host_config);
 
         ensure_network_exists(docker)
             .await
@@ -401,13 +424,13 @@ impl PostgresService {
             exposed_ports: Some(Vec::from(["5432/tcp".to_string()])),
             env: Some(env_vars.iter().map(|s| s.to_string()).collect()),
             labels: Some(container_labels),
-            // NOTE: archive_command is NOT set here on purpose.
-            // Command-line `-c` parameters take highest priority in PostgreSQL and
-            // cannot be overridden by ALTER SYSTEM or postgresql.auto.conf.
-            // We leave archive_command unset so it defaults to '' (disabled).
-            // After the first backup, enable_wal_archiving() uses ALTER SYSTEM to set
-            // archive_command to source the walg.env file and run wal-g wal-push.
-            // archive_mode=on is required for WAL archiving to work once enabled.
+            // archive_mode is computed from on-disk truth, not stored state:
+            // `/var/lib/postgresql/walg.env` exists on the volume iff WAL-G
+            // archiving has been configured for this service. The
+            // reconcile-on-start path in `start()` recomputes and recreates
+            // the container if this value drifts. This makes the bad combo
+            // (archive_mode=on, archive_command='') unrepresentable for any
+            // service that's been Stop+Start'd at least once.
             cmd: Some(vec![
                 "postgres".to_string(),
                 "-c".to_string(),
@@ -415,7 +438,10 @@ impl PostgresService {
                 "-c".to_string(),
                 "wal_level=replica".to_string(),
                 "-c".to_string(),
-                "archive_mode=on".to_string(),
+                format!(
+                    "archive_mode={}",
+                    if enable_archiving { "on" } else { "off" }
+                ),
                 "-c".to_string(),
                 "archive_timeout=60".to_string(),
             ]),
@@ -679,6 +705,16 @@ impl PostgresService {
     /// - Is accessible via `volumes_from` in helper containers
     /// - Is NOT inside PGDATA (so pg_basebackup/wal-g don't back it up — credentials
     ///   should not be stored inside backups)
+    ///
+    /// Flow:
+    ///   1. Write `walg.env` onto the volume. From this moment, the volume
+    ///      records "WAL-G is configured" — `compute_desired_enable_archiving`
+    ///      will return true on every subsequent start.
+    ///   2. Write `archive_command` via ALTER SYSTEM so an immediate
+    ///      `wal-g wal-push` works on the running container (SIGHUP-reloadable).
+    ///   3. Recreate the container so `archive_mode=on` lands in CMD args.
+    ///      `archive_mode` is postmaster-context — recreate is the only way
+    ///      to flip it. Volume is preserved; PGDATA is intact.
     async fn enable_wal_archiving(
         &self,
         container_name: &str,
@@ -687,24 +723,15 @@ impl PostgresService {
     ) -> Result<()> {
         use bollard::exec::{CreateExecOptions, StartExecOptions};
 
-        // Write credentials file (shared helper — same file is used by
-        // restore_command during recovery).
+        // Step 1: write walg.env onto the volume. This is the durable truth
+        // source `compute_desired_enable_archiving` reads on every start.
         self.write_walg_env_file(container_name, walg_env).await?;
         let walg_env_path = "/var/lib/postgresql/walg.env";
 
-        // Enable archive_command via ALTER SYSTEM.
-        // The archive_command sources the env file, then runs wal-g wal-push.
-        // Using 'source' (POSIX: '.') to load env vars into the shell before wal-g runs.
-        //
-        // Note: ALTER SYSTEM writes to postgresql.auto.conf. If archive_command was previously
-        // set there (e.g., from a restore), this overwrites it. pg_reload_conf() applies
-        // the change without restart because archive_command is a SIGHUP-reloadable parameter.
+        // Step 2: set archive_command via ALTER SYSTEM. SIGHUP-reloadable —
+        // takes effect immediately. archive_mode comes in step 3 via CMD.
         let archive_command = format!(". {} && wal-g wal-push %p", walg_env_path);
-
-        // Use two separate -c flags because ALTER SYSTEM cannot run inside a
-        // transaction block, and psql wraps multiple statements in a single -c
-        // into a transaction.
-        let alter_sql = format!(
+        let alter_command_sql = format!(
             "ALTER SYSTEM SET archive_command = '{}'",
             archive_command.replace('\'', "''")
         );
@@ -723,7 +750,7 @@ impl PostgresService {
                         "-d",
                         &postgres_config.database,
                         "-c",
-                        &alter_sql,
+                        &alter_command_sql,
                         "-c",
                         reload_sql,
                     ]),
@@ -760,11 +787,232 @@ impl PostgresService {
         }
 
         info!(
-            "Enabled continuous WAL archiving in container '{}' (archive_command: {})",
-            container_name, archive_command
+            "Wrote walg.env + archive_command in container '{}'. Recreating container so archive_mode=on lands in CMD.",
+            container_name
+        );
+
+        // Step 3: recreate so archive_mode=on lands in CMD args. We go through
+        // `stop()` → `docker.remove_container` → `create_container(.., true)`
+        // → `docker.start_container` → `wait_for_container_health`. Same path
+        // `start()`'s reconcile branch uses.
+        self.stop().await?;
+        self.docker
+            .remove_container(
+                container_name,
+                Some(bollard::query_parameters::RemoveContainerOptions {
+                    force: true,
+                    ..Default::default()
+                }),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to remove container '{}' before re-creating with archive_mode=on: {}",
+                    container_name,
+                    e
+                )
+            })?;
+
+        let limits = self.resource_limits.read().await.clone();
+        self.create_container(&self.docker, postgres_config, &limits, true)
+            .await?;
+        self.docker
+            .start_container(
+                container_name,
+                None::<bollard::query_parameters::StartContainerOptions>,
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to start container '{}' after recreating with archive_mode=on: {}",
+                    container_name,
+                    e
+                )
+            })?;
+        self.wait_for_container_health(&self.docker, container_name)
+            .await?;
+
+        info!(
+            "Recreated container '{}' with archive_mode=on. WAL-G archiving active.",
+            container_name
         );
 
         Ok(())
+    }
+
+    /// Compute the desired `archive_mode` for this service's container CMD.
+    ///
+    /// Truth source: `/var/lib/postgresql/walg.env` existing on the
+    /// service's data volume. WAL-G archiving is enabled iff that credential
+    /// file is present — it's written by `enable_wal_archiving()` and lives
+    /// on the persistent volume, so it survives container recreates, Temps
+    /// restarts, and node failovers.
+    ///
+    /// On any inspection error, returns `false` (archiving off) — the safer
+    /// default. A spurious `false` causes archiving to be disabled until the
+    /// operator notices; a spurious `true` would cause WAL bloat, which is
+    /// the exact bug we're trying to avoid.
+    async fn compute_desired_enable_archiving(&self) -> bool {
+        let container_name = self.get_container_name();
+        let volume_name = format!("{}_data", container_name);
+        self.walg_env_exists_on_volume(&volume_name).await
+    }
+
+    /// Returns true iff `/var/lib/postgresql/walg.env` exists on the named
+    /// Docker volume. Runs a one-shot `busybox` container with the volume
+    /// mounted read-only. Any error (image pull, exec failure) returns
+    /// false — we err on the side of not enabling archiving.
+    async fn walg_env_exists_on_volume(&self, volume_name: &str) -> bool {
+        use bollard::query_parameters::{
+            CreateContainerOptions, CreateImageOptions, RemoveContainerOptions,
+            StartContainerOptions, WaitContainerOptions,
+        };
+        use futures::StreamExt;
+
+        // Pull busybox; cheap (~700 KB) and cached after first use.
+        let mut pull_stream = self.docker.create_image(
+            Some(CreateImageOptions {
+                from_image: Some("busybox".to_string()),
+                tag: Some("latest".to_string()),
+                ..Default::default()
+            }),
+            None,
+            None,
+        );
+        while let Some(result) = pull_stream.next().await {
+            if result.is_err() {
+                // Best-effort; treat unavailability as "no archiving".
+                return false;
+            }
+        }
+
+        let probe_name = format!("temps-walg-probe-{}", uuid::Uuid::new_v4());
+        let host_config = bollard::models::HostConfig {
+            mounts: Some(vec![bollard::models::Mount {
+                target: Some("/var/lib/postgresql".to_string()),
+                source: Some(volume_name.to_string()),
+                typ: Some(bollard::models::MountTypeEnum::VOLUME),
+                read_only: Some(true),
+                ..Default::default()
+            }]),
+            auto_remove: Some(false),
+            ..Default::default()
+        };
+
+        let create_result = self
+            .docker
+            .create_container(
+                Some(CreateContainerOptions {
+                    name: Some(probe_name.clone()),
+                    ..Default::default()
+                }),
+                bollard::models::ContainerCreateBody {
+                    image: Some("busybox:latest".to_string()),
+                    cmd: Some(vec![
+                        "sh".to_string(),
+                        "-c".to_string(),
+                        "test -f /var/lib/postgresql/walg.env".to_string(),
+                    ]),
+                    host_config: Some(host_config),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        if create_result.is_err() {
+            return false;
+        }
+
+        // Best effort cleanup: always try to remove the probe container.
+        let cleanup = |name: String| async move {
+            let _ = self
+                .docker
+                .remove_container(
+                    &name,
+                    Some(RemoveContainerOptions {
+                        force: true,
+                        ..Default::default()
+                    }),
+                )
+                .await;
+        };
+
+        if self
+            .docker
+            .start_container(&probe_name, None::<StartContainerOptions>)
+            .await
+            .is_err()
+        {
+            cleanup(probe_name).await;
+            return false;
+        }
+
+        let mut wait_stream = self
+            .docker
+            .wait_container(&probe_name, None::<WaitContainerOptions>);
+
+        let mut exit_code: Option<i64> = None;
+        while let Some(item) = wait_stream.next().await {
+            if let Ok(resp) = item {
+                exit_code = Some(resp.status_code);
+                break;
+            }
+        }
+
+        cleanup(probe_name).await;
+
+        // `test -f` exits 0 when the file is present.
+        matches!(exit_code, Some(0))
+    }
+
+    /// Returns true when the running container's CMD specifies an
+    /// `archive_mode` value that disagrees with what we'd emit now.
+    /// Returns false when the value matches OR when we can't determine it
+    /// (don't recreate on inspection failure — stability over correctness
+    /// for this branch).
+    async fn container_cmd_archive_mode_differs(
+        &self,
+        container: &bollard::models::ContainerSummary,
+        desired: bool,
+    ) -> bool {
+        let id = match container.id.as_deref() {
+            Some(id) => id,
+            None => return false,
+        };
+        let info = match self
+            .docker
+            .inspect_container(
+                id,
+                None::<bollard::query_parameters::InspectContainerOptions>,
+            )
+            .await
+        {
+            Ok(i) => i,
+            Err(_) => return false,
+        };
+        let cmd = info
+            .config
+            .as_ref()
+            .and_then(|c| c.cmd.as_ref())
+            .map(|v| v.iter().map(|s| s.as_str()).collect::<Vec<_>>())
+            .unwrap_or_default();
+
+        // Find `archive_mode=<value>` token.
+        let actual_on = cmd.iter().any(|tok| {
+            let t = tok.trim();
+            t.eq_ignore_ascii_case("archive_mode=on")
+                || t.eq_ignore_ascii_case("archive_mode=always")
+        });
+        let actual_off = cmd
+            .iter()
+            .any(|tok| tok.trim().eq_ignore_ascii_case("archive_mode=off"));
+
+        if !actual_on && !actual_off {
+            // Container predates our CMD-baking — don't recreate.
+            return false;
+        }
+        let actual = actual_on; // true = on, false = off
+        actual != desired
     }
 
     async fn wait_for_container_health(&self, docker: &Docker, container_id: &str) -> Result<()> {
@@ -907,6 +1155,47 @@ impl PostgresService {
 
     async fn drop_database(&self, _name: &str) -> Result<()> {
         Ok(())
+    }
+
+    /// Build the `POSTGRES_*` env vars for a given per-tenant resource name.
+    /// Shared between `get_runtime_env_vars` (which also provisions the DB)
+    /// and `preview_runtime_env_vars` (which doesn't).
+    fn build_runtime_env_vars(
+        &self,
+        service_config: ServiceConfig,
+        resource_name: &str,
+    ) -> Result<HashMap<String, String>> {
+        let config: PostgresConfig = self.get_postgres_config(service_config)?;
+        let mut env_vars = HashMap::new();
+
+        let effective_host = self.get_container_name();
+        let effective_port = POSTGRES_INTERNAL_PORT.to_string();
+
+        env_vars.insert("POSTGRES_DATABASE".to_string(), resource_name.to_string());
+        env_vars.insert(
+            "POSTGRES_URL".to_string(),
+            format!(
+                "postgresql://{}:{}@{}:{}/{}",
+                urlencoding::encode(&config.username),
+                urlencoding::encode(&config.password),
+                effective_host,
+                effective_port,
+                resource_name
+            ),
+        );
+        env_vars.insert("POSTGRES_HOST".to_string(), effective_host);
+        env_vars.insert("POSTGRES_PORT".to_string(), effective_port);
+        // `POSTGRES_DB` is the canonical name (matches the official Postgres
+        // Docker image and what every app library expects). `POSTGRES_NAME`
+        // is kept as a back-compat alias for older deployments that already
+        // wired their app config to that key — drop it once a migration
+        // window has passed.
+        env_vars.insert("POSTGRES_DB".to_string(), resource_name.to_string());
+        env_vars.insert("POSTGRES_NAME".to_string(), resource_name.to_string());
+        env_vars.insert("POSTGRES_USER".to_string(), config.username.clone());
+        env_vars.insert("POSTGRES_PASSWORD".to_string(), config.password.clone());
+
+        Ok(env_vars)
     }
 
     pub(crate) fn normalize_database_name(name: &str) -> String {
@@ -1891,16 +2180,17 @@ impl PostgresService {
     /// 1. Writes WAL-G S3 credentials to `/var/lib/postgresql/walg.env` on the shared volume
     /// 2. Enables continuous WAL archiving via `ALTER SYSTEM SET archive_command`
     /// 3. Calls `pg_reload_conf()` so PostgreSQL picks up the change without restart
+    #[allow(clippy::too_many_arguments)]
     async fn backup_to_s3_walg(
         &self,
+        s3_client: &aws_sdk_s3::Client,
         s3_credentials: &super::S3Credentials,
         backup: temps_entities::backups::Model,
         subpath_root: &str,
         pool: &temps_database::DbConnection,
         external_service: &temps_entities::external_services::Model,
         service_config: ServiceConfig,
-    ) -> anyhow::Result<String> {
-        use bollard::exec::CreateExecOptions;
+    ) -> anyhow::Result<super::BackupOutcome> {
         use chrono::Utc;
         use sea_orm::*;
 
@@ -1934,7 +2224,97 @@ impl PostgresService {
             s3_credentials.bucket_name,
             subpath_root.trim_matches('/')
         );
+        // Bucket-relative prefix used to list backup objects after success.
+        let s3_list_prefix = format!("{}/walg/", subpath_root.trim_matches('/'));
 
+        // Run the backup, then either persist success or mark failure. Any
+        // `?` propagation in the inner block lands in the failure branch.
+        let result = self
+            .run_walg_backup_push(
+                &container_name,
+                &walg_s3_prefix,
+                s3_credentials,
+                &postgres_config,
+            )
+            .await;
+
+        match result {
+            Ok(walg_env) => {
+                // Compute size by listing S3. WAL-G streams chunks; we
+                // don't see them locally.
+                let size_bytes = match super::s3_util::list_total_size(
+                    s3_client,
+                    &s3_credentials.bucket_name,
+                    &s3_list_prefix,
+                )
+                .await
+                {
+                    Ok(n) => Some(n),
+                    Err(e) => {
+                        warn!(
+                            "WAL-G backup succeeded but failed to compute size for s3://{}/{}: {}",
+                            s3_credentials.bucket_name, s3_list_prefix, e
+                        );
+                        None
+                    }
+                };
+
+                let mut backup_update: external_service_backups::ActiveModel =
+                    backup_record.clone().into();
+                backup_update.state = Set("completed".to_string());
+                backup_update.finished_at = Set(Some(Utc::now()));
+                backup_update.s3_location = Set(walg_s3_prefix.clone());
+                backup_update.size_bytes = Set(size_bytes);
+                backup_update.update(pool).await?;
+
+                info!(
+                    "PostgreSQL WAL-G backup completed successfully (prefix: {}, size: {:?})",
+                    walg_s3_prefix, size_bytes
+                );
+
+                // Enable continuous WAL archiving.
+                // Failures here are logged but do NOT fail the backup.
+                if let Err(e) = self
+                    .enable_wal_archiving(&container_name, &walg_env, &postgres_config)
+                    .await
+                {
+                    error!(
+                        "Failed to enable WAL archiving in container '{}': {}. \
+                         Base backup succeeded but continuous WAL archiving is not active.",
+                        container_name, e
+                    );
+                }
+
+                Ok(super::BackupOutcome::new(walg_s3_prefix, size_bytes))
+            }
+            Err(e) => {
+                let error_msg = format!("WAL-G backup failed: {}", e);
+                error!("{}", error_msg);
+                let mut backup_update: external_service_backups::ActiveModel =
+                    backup_record.clone().into();
+                backup_update.state = Set("failed".to_string());
+                backup_update.error_message = Set(Some(error_msg.clone()));
+                backup_update.finished_at = Set(Some(Utc::now()));
+                if let Err(update_err) = backup_update.update(pool).await {
+                    error!(
+                        "Failed to mark external_service_backups row {} as failed: {}",
+                        backup_record.id, update_err
+                    );
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Build the wal-g env, run `wal-g backup-push` via `docker exec`, and
+    /// return the env vector so the caller can also wire up WAL archiving.
+    async fn run_walg_backup_push(
+        &self,
+        container_name: &str,
+        walg_s3_prefix: &str,
+        s3_credentials: &super::S3Credentials,
+        postgres_config: &PostgresConfig,
+    ) -> anyhow::Result<Vec<String>> {
         let mut walg_env: Vec<String> = vec![
             format!("WALG_S3_PREFIX={}", walg_s3_prefix),
             format!("AWS_ACCESS_KEY_ID={}", s3_credentials.access_key_id),
@@ -1948,7 +2328,7 @@ impl PostgresService {
         ];
 
         if let Some(resolved_endpoint) = s3_credentials
-            .resolve_endpoint_for_container(&self.docker, &container_name)
+            .resolve_endpoint_for_container(&self.docker, container_name)
             .await
         {
             walg_env.push(format!("AWS_ENDPOINT={}", resolved_endpoint));
@@ -1957,101 +2337,25 @@ impl PostgresService {
             walg_env.push("AWS_S3_FORCE_PATH_STYLE=true".to_string());
         }
 
-        let walg_cmd = vec!["sh", "-c", "wal-g backup-push $PGDATA 2>&1"];
-        let walg_env_refs: Vec<&str> = walg_env.iter().map(|s| s.as_str()).collect();
-
         info!(
             "Running wal-g backup-push in container '{}' (S3 prefix: {})",
             container_name, walg_s3_prefix
         );
 
-        let exec = self
-            .docker
-            .create_exec(
-                &container_name,
-                CreateExecOptions {
-                    cmd: Some(walg_cmd),
-                    attach_stdout: Some(false),
-                    attach_stderr: Some(false),
-                    env: Some(walg_env_refs),
-                    ..Default::default()
-                },
-            )
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to create wal-g exec in container {}: {}",
-                    container_name,
-                    e
-                )
-            })?;
+        super::exec_util::run_exec(
+            &self.docker,
+            container_name,
+            vec![
+                "sh".into(),
+                "-c".into(),
+                "wal-g backup-push $PGDATA 2>&1".into(),
+            ],
+            Some(walg_env.clone()),
+            BACKUP_EXEC_TIMEOUT,
+        )
+        .await?;
 
-        use bollard::exec::StartExecOptions;
-        self.docker
-            .start_exec(
-                &exec.id,
-                Some(StartExecOptions {
-                    detach: true,
-                    ..Default::default()
-                }),
-            )
-            .await?;
-
-        loop {
-            let inspect = self.docker.inspect_exec(&exec.id).await?;
-            if let Some(running) = inspect.running {
-                if !running {
-                    break;
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        }
-
-        let exec_inspect = self.docker.inspect_exec(&exec.id).await?;
-        if let Some(exit_code) = exec_inspect.exit_code {
-            if exit_code != 0 {
-                let error_msg = format!(
-                    "wal-g backup-push failed with exit code {} in container '{}'",
-                    exit_code, container_name
-                );
-                error!("{}", error_msg);
-                let mut backup_update: external_service_backups::ActiveModel =
-                    backup_record.clone().into();
-                backup_update.state = Set("failed".to_string());
-                backup_update.error_message = Set(Some(error_msg.clone()));
-                backup_update.finished_at = Set(Some(Utc::now()));
-                let _ = backup_update.update(pool).await;
-                return Err(anyhow::anyhow!("{}", error_msg));
-            }
-        }
-
-        let backup_location = walg_s3_prefix.clone();
-
-        let mut backup_update: external_service_backups::ActiveModel = backup_record.clone().into();
-        backup_update.state = Set("completed".to_string());
-        backup_update.finished_at = Set(Some(Utc::now()));
-        backup_update.s3_location = Set(backup_location.clone());
-        backup_update.update(pool).await?;
-
-        info!(
-            "PostgreSQL WAL-G backup completed successfully (prefix: {})",
-            walg_s3_prefix
-        );
-
-        // Enable continuous WAL archiving.
-        // Failures here are logged but do NOT fail the backup.
-        if let Err(e) = self
-            .enable_wal_archiving(&container_name, &walg_env, &postgres_config)
-            .await
-        {
-            error!(
-                "Failed to enable WAL archiving in container '{}': {}. \
-                 Base backup succeeded but continuous WAL archiving is not active.",
-                container_name, e
-            );
-        }
-
-        Ok(backup_location)
+        Ok(walg_env)
     }
 
     /// Backup PostgreSQL data to S3 using pg_dump via a sidecar container.
@@ -2069,10 +2373,7 @@ impl PostgresService {
         pool: &temps_database::DbConnection,
         external_service: &temps_entities::external_services::Model,
         service_config: ServiceConfig,
-    ) -> anyhow::Result<String> {
-        use bollard::exec::{CreateExecOptions, StartExecOptions};
-        use bollard::models::ContainerCreateBody as Config;
-        use bollard::query_parameters::RemoveContainerOptions;
+    ) -> anyhow::Result<super::BackupOutcome> {
         use chrono::Utc;
         use sea_orm::*;
 
@@ -2100,6 +2401,57 @@ impl PostgresService {
         }
         .insert(pool)
         .await?;
+
+        let outcome = self
+            .run_pg_dumpall_to_s3(s3_client, s3_source, subpath, &postgres_config)
+            .await;
+
+        match outcome {
+            Ok((backup_key, size_bytes)) => {
+                let mut backup_update: external_service_backups::ActiveModel =
+                    backup_record.clone().into();
+                backup_update.state = Set("completed".to_string());
+                backup_update.finished_at = Set(Some(Utc::now()));
+                backup_update.size_bytes = Set(Some(size_bytes));
+                backup_update.s3_location = Set(backup_key.clone());
+                backup_update.update(pool).await?;
+                Ok(super::BackupOutcome::new(backup_key, Some(size_bytes)))
+            }
+            Err(e) => {
+                let error_msg = format!("pg_dumpall backup failed: {}", e);
+                error!("{}", error_msg);
+                let mut backup_update: external_service_backups::ActiveModel =
+                    backup_record.clone().into();
+                backup_update.state = Set("failed".to_string());
+                backup_update.error_message = Set(Some(error_msg.clone()));
+                backup_update.finished_at = Set(Some(Utc::now()));
+                if let Err(update_err) = backup_update.update(pool).await {
+                    error!(
+                        "Failed to mark external_service_backups row {} as failed: {}",
+                        backup_record.id, update_err
+                    );
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Pull image, spin up the sidecar, run `pg_dumpall | gzip` to a bind
+    /// mount, upload to S3, clean up. Returns `(backup_key, size_bytes)`.
+    ///
+    /// All cleanup (sidecar removal, temp file deletion) is best-effort and
+    /// runs regardless of which step failed — so the caller only has to
+    /// decide whether to mark the DB row as completed or failed.
+    async fn run_pg_dumpall_to_s3(
+        &self,
+        s3_client: &aws_sdk_s3::Client,
+        s3_source: &temps_entities::s3_sources::Model,
+        subpath: &str,
+        postgres_config: &PostgresConfig,
+    ) -> anyhow::Result<(String, i64)> {
+        use bollard::models::ContainerCreateBody as Config;
+        use bollard::query_parameters::RemoveContainerOptions;
+        use chrono::Utc;
 
         let db_container_name = self.get_container_name();
         let sidecar_image = postgres_config.docker_image.clone();
@@ -2133,10 +2485,8 @@ impl PostgresService {
         let sidecar_name = format!("temps-pg-backup-{}", uuid::Uuid::new_v4());
         let password_env = format!("PGPASSWORD={}", postgres_config.password);
 
-        // Create a host directory for the bind mount so pg_dump writes directly to disk,
-        // bypassing the Temps process entirely. Previous approach streamed pg_dump output
-        // through Bollard's exec HTTP stream (attach_stdout: true), which caused unbounded
-        // memory growth because hyper/Bollard buffers the chunked HTTP response internally.
+        // Create a host directory for the bind mount so pg_dump writes
+        // directly to disk, bypassing the Temps process entirely.
         let backup_dir = std::env::temp_dir().join("temps-extpg-backup");
         tokio::fs::create_dir_all(&backup_dir).await.map_err(|e| {
             anyhow::anyhow!(
@@ -2148,6 +2498,12 @@ impl PostgresService {
         let backup_filename = format!("{}.sql.gz", uuid::Uuid::new_v4());
         let host_backup_path = backup_dir.join(&backup_filename);
         let container_backup_path = format!("/backup/{}", backup_filename);
+        let stderr_path_in_container = format!("/backup/{}.stderr", uuid::Uuid::new_v4());
+        let host_stderr_path = backup_dir.join(
+            std::path::Path::new(&stderr_path_in_container)
+                .file_name()
+                .unwrap(),
+        );
 
         let sidecar_config = Config {
             image: Some(sidecar_image.clone()),
@@ -2191,103 +2547,105 @@ impl PostgresService {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to start pg_dump sidecar container: {}", e))?;
 
-        let remove_sidecar = |docker: std::sync::Arc<bollard::Docker>, name: String| async move {
-            let _ = docker
-                .remove_container(
-                    &name,
-                    Some(RemoveContainerOptions {
-                        force: true,
-                        ..Default::default()
-                    }),
-                )
-                .await;
+        // Cleanup runs regardless of success/failure. We capture clones so
+        // the closure outlives the function-level `?` boundary.
+        let cleanup = || {
+            let docker = self.docker.clone();
+            let sidecar = sidecar_name.clone();
+            let host_backup = host_backup_path.clone();
+            let host_stderr = host_stderr_path.clone();
+            async move {
+                let _ = docker
+                    .remove_container(
+                        &sidecar,
+                        Some(RemoveContainerOptions {
+                            force: true,
+                            ..Default::default()
+                        }),
+                    )
+                    .await;
+                let _ = tokio::fs::remove_file(&host_backup).await;
+                let _ = tokio::fs::remove_file(&host_stderr).await;
+            }
         };
 
         let port_str = POSTGRES_INTERNAL_PORT.to_string();
 
         info!(
-            "Running pg_dump sidecar for service '{}' (host={}, bind-mount mode)",
+            "Running pg_dumpall sidecar for service '{}' (host={}, bind-mount mode)",
             self.name, db_container_name
         );
 
-        // Run pg_dumpall | gzip inside the sidecar, writing directly to the bind-mounted
-        // host filesystem. This keeps the Temps process memory flat regardless of DB size.
-        // pg_dumpall dumps the entire cluster (all databases, roles, tablespaces) instead
-        // of a single database. `--database` is only the bootstrap connection target.
-        let stderr_path = format!("/backup/{}.stderr", uuid::Uuid::new_v4());
+        // Run pg_dumpall | gzip inside the sidecar, writing directly to the
+        // bind-mounted host filesystem. pg_dumpall dumps the entire cluster
+        // (all DBs, roles, tablespaces); `--database` is just the bootstrap
+        // connection target.
         let pg_dump_shell_cmd = format!(
             "pg_dumpall --clean --if-exists --no-password --host={} --port={} --username={} --database={} 2>{} | gzip > {}",
-            shell_escape(&db_container_name), shell_escape(&port_str), shell_escape(&postgres_config.username), shell_escape(&postgres_config.database),
-            stderr_path, container_backup_path
+            shell_escape(&db_container_name),
+            shell_escape(&port_str),
+            shell_escape(&postgres_config.username),
+            shell_escape(&postgres_config.database),
+            stderr_path_in_container,
+            container_backup_path,
         );
 
-        let exec = self
-            .docker
-            .create_exec(
-                &sidecar_name,
-                CreateExecOptions {
-                    cmd: Some(vec!["sh", "-c", &pg_dump_shell_cmd]),
-                    attach_stdout: Some(false),
-                    attach_stderr: Some(false),
-                    env: Some(vec![password_env.as_str()]),
-                    ..Default::default()
-                },
-            )
+        let exec_result = super::exec_util::run_exec(
+            &self.docker,
+            &sidecar_name,
+            vec!["sh".into(), "-c".into(), pg_dump_shell_cmd],
+            Some(vec![password_env.clone()]),
+            BACKUP_EXEC_TIMEOUT,
+        )
+        .await;
+
+        // Read sidecar-side stderr (pg_dumpall writes to it via 2>) for
+        // diagnostics. Best-effort; missing file is fine.
+        let stderr_from_file = tokio::fs::read(&host_stderr_path)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to create pg_dump exec: {}", e))?;
+            .ok()
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_default();
 
-        // Start the exec in detached mode — no HTTP stream through the Temps process
-        self.docker
-            .start_exec(
-                &exec.id,
-                Some(StartExecOptions {
-                    detach: true,
-                    ..Default::default()
-                }),
-            )
-            .await?;
-
-        // Poll for completion instead of streaming
-        loop {
-            let inspect = self.docker.inspect_exec(&exec.id).await?;
-            if let Some(running) = inspect.running {
-                if !running {
-                    break;
+        if let Err(e) = exec_result {
+            cleanup().await;
+            return Err(anyhow::anyhow!(
+                "pg_dumpall exec failed: {}{}",
+                e,
+                if stderr_from_file.is_empty() {
+                    String::new()
+                } else {
+                    format!("\npg_dumpall stderr:\n{}", stderr_from_file)
                 }
+            ));
+        }
+
+        if !stderr_from_file.is_empty() {
+            tracing::debug!(
+                "pg_dumpall stderr for service '{}': {}",
+                self.name,
+                stderr_from_file
+            );
+        }
+
+        let size_bytes = match tokio::fs::metadata(&host_backup_path).await {
+            Ok(m) => m.len() as i64,
+            Err(e) => {
+                cleanup().await;
+                return Err(anyhow::anyhow!(
+                    "Failed to stat backup file {}: {}",
+                    host_backup_path.display(),
+                    e
+                ));
             }
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        };
+
+        if size_bytes == 0 {
+            cleanup().await;
+            return Err(anyhow::anyhow!(
+                "PostgreSQL backup failed: backup file has zero size (pg_dumpall produced no output)"
+            ));
         }
-
-        // Read stderr from the file inside the container (via bind mount on host)
-        let host_stderr_path =
-            backup_dir.join(std::path::Path::new(&stderr_path).file_name().unwrap());
-        let stderr_data = tokio::fs::read(&host_stderr_path).await.unwrap_or_default();
-        let _ = tokio::fs::remove_file(&host_stderr_path).await;
-
-        // Check if command was successful
-        let exec_inspect = self.docker.inspect_exec(&exec.id).await?;
-        if let Some(exit_code) = exec_inspect.exit_code {
-            if exit_code != 0 {
-                let stderr = String::from_utf8_lossy(&stderr_data);
-                remove_sidecar(self.docker.clone(), sidecar_name.clone()).await;
-                let _ = tokio::fs::remove_file(&host_backup_path).await;
-                let error_msg = format!("pg_dump failed with exit code {}: {}", exit_code, stderr);
-                let mut backup_update: external_service_backups::ActiveModel =
-                    backup_record.clone().into();
-                backup_update.state = Set("failed".to_string());
-                backup_update.error_message = Set(Some(error_msg.clone()));
-                backup_update.finished_at = Set(Some(Utc::now()));
-                backup_update.update(pool).await?;
-                return Err(anyhow::anyhow!("{}", error_msg));
-            }
-        }
-
-        if !stderr_data.is_empty() {
-            let stderr = String::from_utf8_lossy(&stderr_data);
-            tracing::debug!("pg_dump stderr for service '{}': {}", self.name, stderr);
-        }
-
-        remove_sidecar(self.docker.clone(), sidecar_name).await;
 
         let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
         let backup_key = format!(
@@ -2296,61 +2654,43 @@ impl PostgresService {
             timestamp
         );
 
-        let size_bytes = tokio::fs::metadata(&host_backup_path)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to stat backup file {}: {}",
+        let body = match aws_sdk_s3::primitives::ByteStream::from_path(&host_backup_path).await {
+            Ok(b) => b,
+            Err(e) => {
+                cleanup().await;
+                return Err(anyhow::anyhow!(
+                    "Failed to open backup file {} for upload: {}",
                     host_backup_path.display(),
                     e
-                )
-            })?
-            .len() as i32;
+                ));
+            }
+        };
 
-        if size_bytes == 0 {
-            let _ = tokio::fs::remove_file(&host_backup_path).await;
-            let mut backup_update: external_service_backups::ActiveModel =
-                backup_record.clone().into();
-            backup_update.state = Set("failed".to_string());
-            backup_update.finished_at = Set(Some(Utc::now()));
-            backup_update.error_message =
-                Set(Some("Backup failed: backup file has zero size".to_string()));
-            backup_update.update(pool).await?;
-            return Err(anyhow::anyhow!(
-                "PostgreSQL backup failed: backup file has zero size"
-            ));
-        }
-
-        s3_client
+        if let Err(e) = s3_client
             .put_object()
             .bucket(&s3_source.bucket_name)
             .key(&backup_key)
-            .body(aws_sdk_s3::primitives::ByteStream::from_path(&host_backup_path).await?)
+            .body(body)
             .content_type("application/x-gzip")
             .send()
             .await
-            .map_err(|e| {
-                error!(
-                    "Failed to upload backup to S3: {:?} - Message: {}",
-                    e,
-                    e.to_string()
-                );
-                anyhow::anyhow!("Failed to upload backup to S3: {}", e)
-            })?;
+        {
+            cleanup().await;
+            return Err(anyhow::anyhow!(
+                "Failed to upload backup to s3://{}/{}: {}",
+                s3_source.bucket_name,
+                backup_key,
+                e
+            ));
+        }
 
-        // Clean up the bind-mount backup file
-        let _ = tokio::fs::remove_file(&host_backup_path).await;
+        cleanup().await;
+        info!(
+            "Successfully uploaded pg_dumpall backup to s3://{}/{} ({} bytes)",
+            s3_source.bucket_name, backup_key, size_bytes
+        );
 
-        info!("Successfully uploaded pg_dump backup to S3: {}", backup_key);
-
-        let mut backup_update: external_service_backups::ActiveModel = backup_record.clone().into();
-        backup_update.state = Set("completed".to_string());
-        backup_update.finished_at = Set(Some(Utc::now()));
-        backup_update.size_bytes = Set(Some(size_bytes));
-        backup_update.s3_location = Set(backup_key.clone());
-        backup_update.update(pool).await?;
-
-        Ok(backup_key)
+        Ok((backup_key, size_bytes))
     }
 }
 
@@ -2405,7 +2745,7 @@ impl ExternalService for PostgresService {
         pool: &temps_database::DbConnection,
         external_service: &temps_entities::external_services::Model,
         service_config: ServiceConfig,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<super::BackupOutcome> {
         let container_name = self.get_container_name();
 
         if self.container_has_walg(&container_name).await {
@@ -2414,6 +2754,7 @@ impl ExternalService for PostgresService {
                 container_name
             );
             self.backup_to_s3_walg(
+                s3_client,
                 s3_credentials,
                 backup,
                 subpath_root,
@@ -2446,14 +2787,27 @@ impl ExternalService for PostgresService {
             config.name, config.service_type, config.version
         );
 
+        // Pull resource limits out of the raw parameters JSON before the
+        // typed config consumes it. Missing/malformed `resources` block
+        // defaults to unlimited, preserving legacy behavior for services
+        // created before this field existed.
+        let resource_limits = ServiceResourceLimits::from_parameters(&config.parameters);
+        if let Err(e) = resource_limits.validate() {
+            return Err(anyhow::anyhow!("Invalid resource limits: {}", e));
+        }
+
         // Parse input config and transform to runtime config
         let postgres_config = self.get_postgres_config(config)?;
 
-        // Store runtime config
+        // Store runtime config and limits so `start()` can recreate the
+        // container with the same constraints if it has been removed.
         *self.config.write().await = Some(postgres_config.clone());
+        *self.resource_limits.write().await = resource_limits.clone();
 
-        // Create Docker container
-        self.create_container(&self.docker, &postgres_config)
+        // Create Docker container. New services always start with archiving
+        // off — `enable_wal_archiving()` recreates with archiving on when
+        // WAL-G is later configured.
+        self.create_container(&self.docker, &postgres_config, &resource_limits, false)
             .await?;
 
         // Serialize the full runtime config to save to database
@@ -2616,37 +2970,20 @@ impl ExternalService for PostgresService {
         // Create the database
         self.create_database(service_config.clone(), &resource_name)
             .await?;
-        let config: PostgresConfig = self.get_postgres_config(service_config)?;
-        let mut env_vars = HashMap::new();
+        self.build_runtime_env_vars(service_config, &resource_name)
+    }
 
-        // Always use container name and internal port for container-to-container communication
-        let effective_host = self.get_container_name();
-        let effective_port = POSTGRES_INTERNAL_PORT.to_string();
-
-        // Database-specific variable
-        env_vars.insert("POSTGRES_DATABASE".to_string(), resource_name.clone());
-
-        // Connection URL
-        env_vars.insert(
-            "POSTGRES_URL".to_string(),
-            format!(
-                "postgresql://{}:{}@{}:{}/{}",
-                urlencoding::encode(&config.username),
-                urlencoding::encode(&config.password),
-                effective_host,
-                effective_port,
-                resource_name
-            ),
-        );
-
-        // Individual connection parameters
-        env_vars.insert("POSTGRES_HOST".to_string(), effective_host);
-        env_vars.insert("POSTGRES_PORT".to_string(), effective_port);
-        env_vars.insert("POSTGRES_NAME".to_string(), resource_name.clone());
-        env_vars.insert("POSTGRES_USER".to_string(), config.username.clone());
-        env_vars.insert("POSTGRES_PASSWORD".to_string(), config.password.clone());
-
-        Ok(env_vars)
+    async fn preview_runtime_env_vars(
+        &self,
+        service_config: ServiceConfig,
+        project_id: &str,
+        environment: &str,
+    ) -> Result<HashMap<String, String>> {
+        let resource_name = format!("{}_{}", project_id, environment);
+        let resource_name = Self::normalize_database_name(&resource_name);
+        // Preview path: skip `create_database` so the UI can show what a
+        // deployment would receive without actually provisioning the DB.
+        self.build_runtime_env_vars(service_config, &resource_name)
     }
     fn get_docker_environment_variables(
         &self,
@@ -2680,6 +3017,11 @@ impl ExternalService for PostgresService {
         env_vars.insert("POSTGRES_URL".to_string(), url);
         env_vars.insert("POSTGRES_HOST".to_string(), effective_host);
         env_vars.insert("POSTGRES_PORT".to_string(), effective_port);
+        // `POSTGRES_DB` is the canonical name (matches the official Postgres
+        // Docker image and what every app library expects). `POSTGRES_NAME`
+        // is kept as a back-compat alias for older deployments — see the
+        // sibling provision_resource() impl for the full rationale.
+        env_vars.insert("POSTGRES_DB".to_string(), database.clone());
         env_vars.insert("POSTGRES_NAME".to_string(), database.clone());
         env_vars.insert("POSTGRES_USER".to_string(), username.clone());
         env_vars.insert("POSTGRES_PASSWORD".to_string(), password.clone());
@@ -2727,6 +3069,16 @@ impl ExternalService for PostgresService {
         let container_name = self.get_container_name();
         info!("Starting PostgreSQL container {}", container_name);
 
+        // Reconcile-on-start. The desired `archive_mode` is derived from
+        // on-disk truth: `/var/lib/postgresql/walg.env` exists on the
+        // service's volume iff WAL-G archiving has been configured. If the
+        // existing container's CMD doesn't match (e.g., it was created by an
+        // older version that baked archive_mode=on unconditionally), we
+        // recreate the container here. This is the only path that auto-
+        // repairs config drift — and it's operator-initiated (Stop+Start),
+        // so the downtime is expected.
+        let desired_enable_archiving = self.compute_desired_enable_archiving().await;
+
         // Check if container exists and get its status
         let containers = self
             .docker
@@ -2740,8 +3092,42 @@ impl ExternalService for PostgresService {
             }))
             .await?;
 
-        if containers.is_empty() {
-            // Container doesn't exist, create and start it
+        let mut need_create = containers.is_empty();
+        if let Some(container) = containers.first() {
+            // Inspect the existing CMD. If it disagrees with what we'd emit
+            // now, force a recreate by stopping + removing the old container
+            // and falling through to the create branch.
+            let drift = self
+                .container_cmd_archive_mode_differs(container, desired_enable_archiving)
+                .await;
+            if drift {
+                info!(
+                    "Container {} has archive_mode CMD drift (desired={}). \
+                     Recreating to apply correct config.",
+                    container_name, desired_enable_archiving
+                );
+                let _ = self
+                    .docker
+                    .stop_container(
+                        &container_name,
+                        None::<bollard::query_parameters::StopContainerOptions>,
+                    )
+                    .await;
+                self.docker
+                    .remove_container(
+                        &container_name,
+                        Some(bollard::query_parameters::RemoveContainerOptions {
+                            force: true,
+                            ..Default::default()
+                        }),
+                    )
+                    .await
+                    .context("Failed to remove drifted container during reconcile")?;
+                need_create = true;
+            }
+        }
+
+        if need_create {
             let config = self
                 .config
                 .read()
@@ -2749,9 +3135,12 @@ impl ExternalService for PostgresService {
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("PostgreSQL configuration not found"))?
                 .clone();
-            self.create_container(&self.docker, &config).await?;
+            let limits = self.resource_limits.read().await.clone();
+            self.create_container(&self.docker, &config, &limits, desired_enable_archiving)
+                .await?;
         } else {
-            // Container exists, check if it's running
+            // Container exists and CMD matches desired state. Just start it
+            // if it isn't already running.
             let container = &containers[0];
             let is_running = matches!(
                 container.state,
@@ -2759,7 +3148,6 @@ impl ExternalService for PostgresService {
             );
 
             if !is_running {
-                // Only start if container is not running
                 let start_result = self
                     .docker
                     .start_container(
@@ -2771,7 +3159,7 @@ impl ExternalService for PostgresService {
                 match start_result {
                     Ok(_) => info!("Started existing PostgreSQL container {}", container_name),
                     Err(e) => {
-                        // Check if error is "container already started", which is not a real error
+                        // "already started" is benign — we raced ourselves.
                         let error_msg = e.to_string();
                         if !error_msg.contains("already started") {
                             return Err(e)
@@ -2913,6 +3301,11 @@ impl ExternalService for PostgresService {
         env_vars.insert("POSTGRES_URL".to_string(), url);
         env_vars.insert("POSTGRES_HOST".to_string(), effective_host);
         env_vars.insert("POSTGRES_PORT".to_string(), effective_port);
+        // `POSTGRES_DB` is the canonical name (matches the official Postgres
+        // Docker image and what every app library expects). `POSTGRES_NAME`
+        // is kept as a back-compat alias — see the sibling
+        // provision_resource() impl for the full rationale.
+        env_vars.insert("POSTGRES_DB".to_string(), database.clone());
         env_vars.insert("POSTGRES_NAME".to_string(), database.clone());
         env_vars.insert("POSTGRES_USER".to_string(), username.clone());
         env_vars.insert("POSTGRES_PASSWORD".to_string(), password.clone());
@@ -2997,7 +3390,12 @@ impl ExternalService for PostgresService {
                 old_version
             );
             self.stop().await?;
-            self.create_container(&self.docker, &new_pg_config).await?;
+            let limits = self.resource_limits.read().await.clone();
+            // Preserve archiving state across the image swap by reading
+            // `walg.env` from the existing volume — same rule as `start()`.
+            let enable_archiving = self.compute_desired_enable_archiving().await;
+            self.create_container(&self.docker, &new_pg_config, &limits, enable_archiving)
+                .await?;
             info!("PostgreSQL image swap completed successfully");
         } else {
             // Major version upgrade — requires pg_upgrade
@@ -3005,7 +3403,10 @@ impl ExternalService for PostgresService {
             self.stop().await?;
             self.run_pg_upgrade(&old_pg_config, &new_pg_config, old_version, new_version)
                 .await?;
-            self.create_container(&self.docker, &new_pg_config).await?;
+            let limits = self.resource_limits.read().await.clone();
+            let enable_archiving = self.compute_desired_enable_archiving().await;
+            self.create_container(&self.docker, &new_pg_config, &limits, enable_archiving)
+                .await?;
             info!("PostgreSQL major version upgrade completed successfully");
         }
 
@@ -3226,13 +3627,21 @@ impl ExternalService for PostgresService {
         // Build a new PostgresService for the target name.
         let new_service = PostgresService::new(new_service_name.clone(), self.docker.clone());
 
+        // Carry resource limits over from the source service so the
+        // restored copy inherits the same constraints (or unlimited if
+        // none were set on the source).
+        let cloned_limits = ServiceResourceLimits::from_parameters(&ctx.source_config.parameters);
+
         // Stash the runtime config so later methods (restore_from_walg -> get_postgres_config)
         // can resolve via ServiceConfig.
         *new_service.config.write().await = Some(source_config.clone());
+        *new_service.resource_limits.write().await = cloned_limits.clone();
 
-        // Create the new container+volume.
+        // Create the new container+volume. Restored services start with
+        // archiving off — the operator decides whether to wire WAL-G to the
+        // new service explicitly.
         new_service
-            .create_container(&self.docker, &source_config)
+            .create_container(&self.docker, &source_config, &cloned_limits, false)
             .await?;
 
         // Build a ServiceConfig that parses cleanly back into PostgresConfig.
@@ -3329,9 +3738,12 @@ impl ExternalService for PostgresService {
             source_config.port = new_port;
 
             let new_service = PostgresService::new(new_name.clone(), self.docker.clone());
+            let cloned_limits =
+                ServiceResourceLimits::from_parameters(&ctx.source_config.parameters);
             *new_service.config.write().await = Some(source_config.clone());
+            *new_service.resource_limits.write().await = cloned_limits.clone();
             new_service
-                .create_container(&self.docker, &source_config)
+                .create_container(&self.docker, &source_config, &cloned_limits, false)
                 .await?;
 
             let new_service_config = ServiceConfig {
@@ -3491,18 +3903,38 @@ mod tests {
     #[cfg(feature = "docker-tests")]
     #[tokio::test]
     async fn test_port_change_after_creation() {
+        // Use OS-assigned ports so this test doesn't collide with anything
+        // else on the runner. Hardcoded ports (6543/6544 previously) flaked
+        // whenever another parallel test or background process held the
+        // socket. We only need two distinct free ports; the test doesn't
+        // actually *bind* the container to them, just verifies that
+        // get_local_address reflects the configured value.
+        use std::net::TcpListener;
+        let pick = || {
+            TcpListener::bind("127.0.0.1:0")
+                .expect("failed to bind for port allocation")
+                .local_addr()
+                .expect("failed to read local addr")
+                .port()
+        };
+        let initial_port = pick();
+        let new_port = loop {
+            let p = pick();
+            if p != initial_port {
+                break p;
+            }
+        };
+
         let docker = Arc::new(Docker::connect_with_local_defaults().unwrap());
         let service = PostgresService::new("test-port-change".to_string(), docker);
 
-        // Create initial config with a specific port
-        let initial_port = "6543";
         let config1 = ServiceConfig {
             name: "test-postgres".to_string(),
             service_type: super::ServiceType::Postgres,
             version: None,
             parameters: serde_json::json!({
                 "host": "localhost",
-                "port": initial_port,
+                "port": initial_port.to_string(),
                 "database": "testdb",
                 "username": "testuser",
                 "password": "testpass123",
@@ -3518,17 +3950,19 @@ mod tests {
 
         // Verify initial port is set
         let local_addr = service.get_local_address(config1.clone()).unwrap();
-        assert!(local_addr.contains("6543"), "Initial port should be 6543");
+        let initial_port_str = initial_port.to_string();
+        assert!(
+            local_addr.contains(&initial_port_str),
+            "Initial port should be {initial_port_str}, got '{local_addr}'"
+        );
 
-        // Create new config with different port
-        let new_port = "6544";
         let config2 = ServiceConfig {
             name: "test-postgres".to_string(),
             service_type: super::ServiceType::Postgres,
             version: None,
             parameters: serde_json::json!({
                 "host": "localhost",
-                "port": new_port,
+                "port": new_port.to_string(),
                 "database": "testdb",
                 "username": "testuser",
                 "password": "testpass123",
@@ -3540,7 +3974,11 @@ mod tests {
 
         // Verify new port configuration is recognized
         let new_local_addr = service.get_local_address(config2).unwrap();
-        assert!(new_local_addr.contains("6544"), "New port should be 6544");
+        let new_port_str = new_port.to_string();
+        assert!(
+            new_local_addr.contains(&new_port_str),
+            "New port should be {new_port_str}, got '{new_local_addr}'"
+        );
 
         // Cleanup
         let _ = service.cleanup().await;
@@ -4174,9 +4612,37 @@ mod tests {
         );
     }
 
+    // `flavor = "multi_thread"` is required because `MinioTestContainer`'s
+    // `Drop` impl calls `tokio::task::block_in_place`, which panics on the
+    // default current-thread runtime.
     #[cfg(feature = "docker-tests")]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_postgres_backup_and_restore_to_s3() {
+        // Whole-test wall-clock budget. Anything above this is a hang — fail
+        // loudly with a diagnostic instead of stalling the CI runner for 90 min.
+        // See incident: GitHub run 25940925537 (PR #89) burned 86 min on this
+        // test because it never returned. Sister tests in redis.rs and
+        // mongodb.rs already wrap themselves the same way.
+        //
+        // The body pulls the wal-g image, boots Postgres, creates a table,
+        // runs a full base backup to MinIO, then a full restore — comfortably
+        // under 5 minutes on cold runners but can hang indefinitely on a
+        // wedged Docker daemon if left unbounded.
+        const TEST_TIMEOUT: Duration = Duration::from_secs(300);
+
+        tokio::time::timeout(TEST_TIMEOUT, run_postgres_backup_and_restore_to_s3())
+            .await
+            .expect(
+                "test_postgres_backup_and_restore_to_s3 exceeded 300s — likely hung on \
+                 Postgres/Docker/wal-g wait",
+            );
+    }
+
+    /// Body of `test_postgres_backup_and_restore_to_s3`, extracted so the
+    /// outer test can wrap it in `tokio::time::timeout` without a giant
+    /// async block at the call site.
+    #[cfg(feature = "docker-tests")]
+    async fn run_postgres_backup_and_restore_to_s3() {
         use super::super::test_utils::{
             create_mock_backup, create_mock_db, create_mock_external_service, MinioTestContainer,
         };
@@ -4363,9 +4829,12 @@ mod tests {
             )
             .await
         {
-            Ok(location) => {
-                println!("✓ Backup completed to: {}", location);
-                location
+            Ok(outcome) => {
+                println!(
+                    "✓ Backup completed to: {} ({:?} bytes)",
+                    outcome.location, outcome.size_bytes
+                );
+                outcome.location
             }
             Err(e) => {
                 println!("Backup failed: {}. Skipping test", e);
@@ -4827,6 +5296,7 @@ mod tests {
             name: "b".into(),
             backup_id: "id".into(),
             schedule_id: None,
+            schedule_run_id: None,
             backup_type: "external_service".into(),
             state: "completed".into(),
             started_at: chrono::Utc::now(),
@@ -4842,6 +5312,7 @@ mod tests {
             created_by: 1,
             expires_at: None,
             tags: "".into(),
+            last_heartbeat_at: None,
         };
         let source_service = temps_entities::external_services::Model {
             id: 1,
@@ -4860,12 +5331,21 @@ mod tests {
             last_health_check_at: None,
             last_health_error: None,
             consecutive_health_failures: 0,
+            health_metadata: None,
         };
         // Build a MockDatabase for the `pool` slot — restore_pitr for
         // Postgres doesn't touch it in the legacy-reject path.
         let mock_db =
             sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres).into_connection();
-        let s3_client = {
+        // Build the S3 client. The AWS SDK eagerly initialises its rustls
+        // TrustStore at `Client::from_conf` time, and on hosts without any
+        // system root CAs (some CI runners, minimal containers, macOS
+        // without keychain access) it panics with "TrustStore configured
+        // to enable native roots but no valid root certificates parsed!".
+        // We wrap construction in `catch_unwind` and skip the test on that
+        // specific panic — mirroring the pattern in
+        // `externalsvc/test_utils.rs::MinioTestContainer::start`.
+        let s3_client = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let aws_creds = aws_sdk_s3::config::Credentials::new("k", "s", None, None, "test");
             let conf = aws_sdk_s3::Config::builder()
                 .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
@@ -4873,6 +5353,27 @@ mod tests {
                 .credentials_provider(aws_creds)
                 .build();
             aws_sdk_s3::Client::from_conf(conf)
+        })) {
+            Ok(c) => c,
+            Err(panic_payload) => {
+                let panic_msg = panic_payload
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| {
+                        panic_payload
+                            .downcast_ref::<&'static str>()
+                            .map(ToString::to_string)
+                    })
+                    .unwrap_or_else(|| "(non-string panic payload)".to_string());
+                if panic_msg.contains("TrustStore") || panic_msg.contains("certificate") {
+                    println!(
+                        "Skipping test: AWS SDK panicked initialising rustls TrustStore: {}",
+                        panic_msg
+                    );
+                    return;
+                }
+                panic!("AWS SDK panic constructing S3 client: {}", panic_msg);
+            }
         };
         let ctx = crate::externalsvc::RestoreContext {
             s3_client: &s3_client,

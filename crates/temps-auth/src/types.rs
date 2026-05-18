@@ -1,3 +1,4 @@
+use crate::avatar::generate_avatar_data_url;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -126,6 +127,26 @@ pub struct UpdateSelfRequest {
     pub name: Option<String>,
 }
 
+// In-app password change for the authenticated user. Distinct from the
+// out-of-band password-reset flow because it requires the current
+// password as a re-auth gate and runs while the user is logged in. When
+// the user has MFA enabled, `mfa_code` is required and validated against
+// either a TOTP value or a recovery code (same gate as login).
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct ChangePasswordRequest {
+    #[schema(example = "current_password_value")]
+    pub current_password: String,
+    #[schema(example = "new_password_value")]
+    pub new_password: String,
+    /// TOTP code (or recovery code). Required iff the user has MFA enabled.
+    #[schema(example = "123456")]
+    pub mfa_code: Option<String>,
+    /// When true, every session OTHER than the one making this request is
+    /// revoked. Defaults to false; the UI surfaces this as a checkbox.
+    #[serde(default)]
+    pub revoke_other_sessions: bool,
+}
+
 // Add new request/response types
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct VerifyMfaRequest {
@@ -152,10 +173,7 @@ impl From<temps_entities::users::Model> for RouteUser {
             name: db_user.name.clone(),
             username: db_user.name.clone(),
             email: db_user.email.clone(),
-            image: format!(
-                "https://ui-avatars.com/api/?name={}&background=random",
-                urlencoding::encode(&db_user.name)
-            ),
+            image: generate_avatar_data_url(&db_user.name),
             mfa_enabled: db_user.mfa_enabled,
             email_verified: db_user.email_verified,
             created_at: db_user.created_at.timestamp_millis(),

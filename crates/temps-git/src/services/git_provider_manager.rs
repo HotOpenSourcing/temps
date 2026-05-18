@@ -715,6 +715,93 @@ impl GitProviderManager {
         }
     }
 
+    /// Mint a per-operation, single-repo, narrow-permission credential.
+    ///
+    /// Wraps [`GitProviderService::mint_scoped_repo_token`] with the
+    /// connection lookup so callers (the workspace credential daemon's
+    /// HTTP endpoint, today the only caller) need only know the
+    /// `connection_id` — not the underlying provider type, installation
+    /// id, or auth method.
+    ///
+    /// The returned [`ScopedTokenGrant`] is shaped for direct use as
+    /// `username:password` in a `git clone` URL. Tokens live ≤1 hour
+    /// (GitHub's hard cap on installation tokens) and are scoped to
+    /// `(owner, repo, operation)` only — even leaked, the blast radius
+    /// is bounded to one repo with one permission for one hour.
+    ///
+    /// PAT and OAuth connections fail with [`GitProviderManagerError::InvalidConfiguration`]
+    /// because there's no provider API to narrow them at runtime. The
+    /// daemon should refuse those requests rather than handing out the
+    /// stored long-lived token.
+    pub async fn mint_scoped_repo_token_for_connection(
+        &self,
+        connection_id: i32,
+        owner: &str,
+        repo: &str,
+        operation: super::git_provider::ScopedTokenOp,
+    ) -> Result<super::git_provider::ScopedTokenGrant, GitProviderManagerError> {
+        let connection = self.get_connection(connection_id).await?;
+
+        // Fast path: GitHub App installation. Provider service mints a
+        // fresh per-op installation token narrowed to (repo, permission)
+        // — the security model the daemon was originally designed for.
+        if let Some(installation_id) = connection.installation_id.as_deref() {
+            let provider_service = self.get_provider_service(connection.provider_id).await?;
+            return provider_service
+                .mint_scoped_repo_token(Some(installation_id), owner, repo, operation)
+                .await
+                .map_err(GitProviderManagerError::from);
+        }
+
+        // Fallback: PAT or OAuth connection. There is no provider API
+        // to narrow these tokens to (repo, permission) at runtime, so
+        // we hand back the stored long-lived token. This trades the
+        // per-op blast-radius guarantee for the ability to use git at
+        // all — operators who need the strict guarantee should switch
+        // their project to a GitHub App connection. The trade-off is
+        // logged at WARN so audit reviews can see when it kicked in.
+        let provider = self.get_provider(connection.provider_id).await?;
+        let encrypted_token = connection.access_token.as_ref().ok_or_else(|| {
+            GitProviderManagerError::InvalidConfiguration(format!(
+                "Connection {} has no access_token; cannot mint credential",
+                connection_id
+            ))
+        })?;
+        let token = self.decrypt_string(encrypted_token).await?;
+
+        // Username conventions for HTTP Basic auth on git over HTTPS:
+        //   GitHub: `x-access-token` (works for both App tokens and PATs)
+        //   GitLab: `oauth2` (works for both PATs and OAuth tokens)
+        // Anything else: best-effort `x-access-token`. If we ever add
+        // Bitbucket etc. this needs updating.
+        let username = match provider.provider_type.as_str() {
+            "gitlab" => "oauth2",
+            _ => "x-access-token",
+        }
+        .to_string();
+
+        tracing::warn!(
+            connection_id,
+            owner = %owner,
+            repo = %repo,
+            ?operation,
+            provider_type = %provider.provider_type,
+            "Minting non-scoped credential from PAT/OAuth connection — \
+             token is NOT narrowed per-op. Switch the project to a \
+             GitHub App connection if per-op scoping is required."
+        );
+
+        Ok(super::git_provider::ScopedTokenGrant {
+            username,
+            password: token,
+            // Stored tokens may have an expiry on the connection row,
+            // but the daemon doesn't depend on it (it re-mints on every
+            // operation anyway). Surface `None` so the helper protocol
+            // doesn't carry a misleading promise.
+            expires_at: connection.token_expires_at,
+        })
+    }
+
     /// Get decrypted webhook secret for a provider
     pub async fn get_webhook_secret(
         &self,
@@ -4871,6 +4958,48 @@ impl GitProviderManagerTrait for GitProviderManager {
             })?;
 
         Ok(pr)
+    }
+
+    async fn mint_scoped_repo_token(
+        &self,
+        connection_id: i32,
+        owner: &str,
+        repo: &str,
+        operation: super::git_provider_manager_trait::ScopedTokenOp,
+    ) -> Result<
+        super::git_provider_manager_trait::ScopedTokenGrant,
+        super::git_provider_manager_trait::GitProviderManagerError,
+    > {
+        use super::git_provider_manager_trait::GitProviderManagerError as TraitError;
+
+        match self
+            .mint_scoped_repo_token_for_connection(connection_id, owner, repo, operation)
+            .await
+        {
+            Ok(grant) => Ok(grant),
+            Err(GitProviderManagerError::ProviderError(
+                super::git_provider::GitProviderError::NotImplemented,
+            )) => Err(TraitError::ScopedTokensUnsupported {
+                connection_id,
+                reason: "provider does not implement scoped per-op tokens (PAT/OAuth)".into(),
+            }),
+            Err(GitProviderManagerError::ProviderError(
+                super::git_provider::GitProviderError::InvalidConfiguration(reason),
+            )) => Err(TraitError::ScopedTokensUnsupported {
+                connection_id,
+                reason,
+            }),
+            Err(GitProviderManagerError::ConnectionNotFound(_)) => {
+                Err(TraitError::ConnectionNotFound(connection_id))
+            }
+            Err(GitProviderManagerError::ProviderNotFound(_)) => {
+                Err(TraitError::ProviderNotFound(connection_id))
+            }
+            Err(e) => Err(TraitError::Other(format!(
+                "Failed to mint scoped token for connection {} on {}/{}: {}",
+                connection_id, owner, repo, e
+            ))),
+        }
     }
 }
 

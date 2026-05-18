@@ -4,6 +4,7 @@ use tokio::process::Command;
 
 use super::{AiCliProvider, AiCliStatus, AiRunConfig, AiRunResult};
 use crate::error::AgentError;
+use crate::sandbox::user::SANDBOX_USER;
 
 /// Check if a Unix user exists by name.
 fn user_exists(name: &str) -> bool {
@@ -132,8 +133,8 @@ impl AiCliProvider for ClaudeCliProvider {
         // argv slots, has no shell-string parameter, and is available
         // on every Linux distro temps targets (util-linux).
         let mut cmd = if is_root {
-            let run_user = if user_exists("temps") {
-                "temps"
+            let run_user = if user_exists(SANDBOX_USER) {
+                SANDBOX_USER
             } else {
                 "nobody"
             };
@@ -147,10 +148,15 @@ impl AiCliProvider for ClaudeCliProvider {
             .arg(&config.prompt)
             .arg("--output-format")
             .arg("stream-json")
-            .arg("--max-turns")
-            .arg(config.max_turns.to_string())
             .arg("--dangerously-skip-permissions")
             .arg("--verbose");
+        // max_turns <= 0 means "no limit": skip the flag entirely so the
+        // CLI uses its own (effectively unbounded) default. The timeout +
+        // daily-budget caps still bound the run, so this isn't a free path
+        // to infinite cost.
+        if config.max_turns > 0 {
+            cmd.arg("--max-turns").arg(config.max_turns.to_string());
+        }
         if let Some(m) = config.model.as_deref() {
             if !m.is_empty() {
                 cmd.arg("--model").arg(m);
@@ -268,8 +274,8 @@ impl AiCliProvider for ClaudeCliProvider {
         // Same shell-free pattern as `run`: argv slots all the way down,
         // never a single `su -c '<string>'` that re-parses user data.
         let mut cmd = if is_root {
-            let run_user = if user_exists("temps") {
-                "temps"
+            let run_user = if user_exists(SANDBOX_USER) {
+                SANDBOX_USER
             } else {
                 "nobody"
             };
@@ -284,10 +290,12 @@ impl AiCliProvider for ClaudeCliProvider {
             .arg(&config.prompt)
             .arg("--output-format")
             .arg("stream-json")
-            .arg("--max-turns")
-            .arg(config.max_turns.to_string())
             .arg("--dangerously-skip-permissions")
             .arg("--verbose");
+        // See first invocation: max_turns <= 0 disables the cap entirely.
+        if config.max_turns > 0 {
+            cmd.arg("--max-turns").arg(config.max_turns.to_string());
+        }
         if let Some(m) = config.model.as_deref() {
             if !m.is_empty() {
                 cmd.arg("--model").arg(m);

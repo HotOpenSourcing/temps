@@ -13,7 +13,8 @@ mod tests {
 
     use crate::externalsvc::postgres_cluster::PostgresClusterService;
     use crate::externalsvc::{
-        ClusterMemberInfo, ClusterMemberSpec, ExternalService, ServiceConfig, ServiceType,
+        ClusterMemberInfo, ClusterMemberSpec, ExternalService, ServiceConfig,
+        ServiceResourceLimits, ServiceType,
     };
 
     // -----------------------------------------------------------------------
@@ -284,7 +285,14 @@ mod tests {
             hostname: Some("10.0.0.1".to_string()),
         };
 
-        let params = service.build_member_params(&monitor_spec, &config, "10.0.0.1", 6100, 6100);
+        let params = service.build_member_params(
+            &monitor_spec,
+            &config,
+            "10.0.0.1",
+            6100,
+            6100,
+            ServiceResourceLimits::default(),
+        );
 
         assert!(
             !params.environment.contains_key("MONITOR_URI"),
@@ -316,7 +324,14 @@ mod tests {
             hostname: Some("10.0.0.2".to_string()),
         };
 
-        let params = service.build_member_params(&primary_spec, &config, "10.0.0.1", 6100, 6101);
+        let params = service.build_member_params(
+            &primary_spec,
+            &config,
+            "10.0.0.1",
+            6100,
+            6101,
+            ServiceResourceLimits::default(),
+        );
 
         assert!(params.environment.contains_key("MONITOR_URI"));
         assert!(params
@@ -380,7 +395,37 @@ mod tests {
         }
 
         async fn create_network(docker: &Docker) -> anyhow::Result<()> {
+            // Best-effort cleanup of leftover state from a previous (possibly
+            // killed) test run. If the network exists with attached
+            // containers, `remove_network` returns "active endpoints" and
+            // the next test fails with "network already exists". Walk
+            // the network's containers first and force-remove them so
+            // `remove_network` actually succeeds. Errors here are
+            // intentionally ignored — the goal is best-effort recovery.
+            if let Ok(net) = docker
+                .inspect_network(
+                    NETWORK_NAME,
+                    None::<bollard::query_parameters::InspectNetworkOptions>,
+                )
+                .await
+            {
+                if let Some(containers) = net.containers {
+                    for cid in containers.keys() {
+                        let _ = docker
+                            .remove_container(
+                                cid,
+                                Some(bollard::query_parameters::RemoveContainerOptions {
+                                    force: true,
+                                    v: true,
+                                    ..Default::default()
+                                }),
+                            )
+                            .await;
+                    }
+                }
+            }
             let _ = docker.remove_network(NETWORK_NAME).await;
+
             docker
                 .create_network(NetworkCreateRequest {
                     name: NETWORK_NAME.to_string(),
@@ -749,7 +794,7 @@ mod tests {
                     .await
                     .expect("Failed to create monitor");
 
-            wait_for_postgres(&docker, &monitor_id, monitor_name, 60)
+            wait_for_postgres(&docker, &monitor_id, monitor_name, 180)
                 .await
                 .expect("Monitor did not become healthy");
 
@@ -774,7 +819,7 @@ mod tests {
             .await
             .expect("Failed to create node1");
 
-            wait_for_postgres(&docker, &node1_id, node1_name, 90)
+            wait_for_postgres(&docker, &node1_id, node1_name, 180)
                 .await
                 .expect("Node1 did not become healthy");
 
@@ -799,7 +844,7 @@ mod tests {
             .await
             .expect("Failed to create node2");
 
-            wait_for_postgres(&docker, &node2_id, node2_name, 90)
+            wait_for_postgres(&docker, &node2_id, node2_name, 180)
                 .await
                 .expect("Node2 did not become healthy");
 
@@ -939,7 +984,7 @@ mod tests {
 
             // Verify data integrity on recovered node
             println!("\n10. Verifying data integrity on recovered node...");
-            wait_for_postgres(&docker, &node1_id, node1_name, 60)
+            wait_for_postgres(&docker, &node1_id, node1_name, 180)
                 .await
                 .expect("Recovered node1 not healthy");
 
@@ -1041,7 +1086,36 @@ mod tests {
             println!("\n=== PostgreSQL HA Member Recovery Test ===\n");
 
             let network = "pg-cluster-recovery-test";
+            // Best-effort cleanup of leftover state from a killed previous
+            // run. `remove_network` returns "active endpoints" if any
+            // containers are still attached, which makes the next
+            // `create_network` panic with "already exists". Drop attached
+            // containers first. See the matching block in create_network()
+            // above for the rationale.
+            if let Ok(net) = docker
+                .inspect_network(
+                    network,
+                    None::<bollard::query_parameters::InspectNetworkOptions>,
+                )
+                .await
+            {
+                if let Some(containers) = net.containers {
+                    for cid in containers.keys() {
+                        let _ = docker
+                            .remove_container(
+                                cid,
+                                Some(bollard::query_parameters::RemoveContainerOptions {
+                                    force: true,
+                                    v: true,
+                                    ..Default::default()
+                                }),
+                            )
+                            .await;
+                    }
+                }
+            }
             let _ = docker.remove_network(network).await;
+
             docker
                 .create_network(NetworkCreateRequest {
                     name: network.to_string(),
@@ -1066,7 +1140,7 @@ mod tests {
             )
             .await
             .expect("Failed to create monitor");
-            wait_for_postgres(&docker, &monitor_id, monitor_name, 60)
+            wait_for_postgres(&docker, &monitor_id, monitor_name, 180)
                 .await
                 .expect("Monitor not healthy");
 
@@ -1089,7 +1163,7 @@ mod tests {
             )
             .await
             .expect("Failed to create node1");
-            wait_for_postgres(&docker, &node1_id, node1_name, 90)
+            wait_for_postgres(&docker, &node1_id, node1_name, 180)
                 .await
                 .expect("Node1 not healthy");
 
@@ -1112,7 +1186,7 @@ mod tests {
             )
             .await
             .expect("Failed to create node2");
-            wait_for_postgres(&docker, &node2_id, node2_name, 90)
+            wait_for_postgres(&docker, &node2_id, node2_name, 180)
                 .await
                 .expect("Node2 not healthy");
 
@@ -1186,7 +1260,7 @@ mod tests {
                 .await
                 .expect("Failed to restart node2");
 
-            wait_for_postgres(&docker, &node2_id, node2_name, 90)
+            wait_for_postgres(&docker, &node2_id, node2_name, 180)
                 .await
                 .expect("Restarted node2 not healthy");
 

@@ -5,14 +5,17 @@ use std::collections::HashMap;
 use utoipa::ToSchema;
 
 pub mod cluster_role;
+pub mod exec_util;
 pub mod mongodb;
 pub mod postgres;
 pub mod postgres_cluster;
 pub mod postgres_role_reconciler;
 pub mod postgres_upgrade;
+pub mod postgres_wal_health;
 pub mod redis;
 pub mod rustfs;
 pub mod s3;
+pub mod s3_util;
 
 // Test utilities for backup and restore testing
 #[cfg(test)]
@@ -37,6 +40,31 @@ pub use redis::RedisService;
 pub use rustfs::RustfsService;
 pub use s3::S3Service;
 
+/// Result of a successful `backup_to_s3` call.
+///
+/// Engines must always return the final S3 location. They should also return
+/// `size_bytes` whenever it can be determined cheaply (e.g., a known temp
+/// file's length). When the engine can't compute size locally — for example
+/// WAL-G, which streams chunks straight to S3 — it returns `None` and the
+/// service-layer orchestrator falls back to listing the S3 prefix.
+#[derive(Debug, Clone)]
+pub struct BackupOutcome {
+    /// Where the backup landed (S3 URL or relative key, engine-specific).
+    pub location: String,
+    /// Size of the backup in bytes if the engine can determine it without
+    /// a separate S3 list. `None` means "ask S3".
+    pub size_bytes: Option<i64>,
+}
+
+impl BackupOutcome {
+    pub fn new(location: impl Into<String>, size_bytes: Option<i64>) -> Self {
+        Self {
+            location: location.into(),
+            size_bytes,
+        }
+    }
+}
+
 /// Decrypted S3 credentials for services that need to pass them to external tools
 /// (e.g., WAL-G running inside a Docker container via `docker exec`).
 /// The `backup_to_s3` orchestrator decrypts the encrypted credentials from the
@@ -53,6 +81,37 @@ pub struct S3Credentials {
 }
 
 impl S3Credentials {
+    /// Build an `aws_sdk_s3::Client` from already-decrypted credentials.
+    /// Used by post-backup steps (e.g. listing the WAL-G prefix to compute
+    /// size) when we already hold a decrypted credential set and don't
+    /// want to round-trip back through the encryption service.
+    pub async fn build_s3_client(&self) -> aws_sdk_s3::Client {
+        let creds = aws_sdk_s3::config::Credentials::new(
+            self.access_key_id.clone(),
+            self.secret_key.clone(),
+            None,
+            None,
+            "temps-backup",
+        );
+
+        let mut config_builder = aws_sdk_s3::config::Config::builder()
+            .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
+            .region(aws_sdk_s3::config::Region::new(self.region.clone()))
+            .force_path_style(self.force_path_style)
+            .credentials_provider(creds);
+
+        if let Some(endpoint) = &self.endpoint {
+            let endpoint_url = if endpoint.starts_with("http") {
+                endpoint.clone()
+            } else {
+                format!("http://{}", endpoint)
+            };
+            config_builder = config_builder.endpoint_url(endpoint_url);
+        }
+
+        aws_sdk_s3::Client::from_conf(config_builder.build())
+    }
+
     /// Resolve the S3 endpoint for use inside a Docker container.
     ///
     /// When WAL-G runs inside a Docker container via `docker exec`, `localhost` in the
@@ -200,6 +259,115 @@ pub struct ServiceConfig {
     pub service_type: ServiceType,
     pub version: Option<String>,
     pub parameters: serde_json::Value,
+}
+
+/// Optional cgroup resource limits applied to a service container.
+///
+/// All fields are `Option<i64>`: `None` means "no limit" (the kernel default),
+/// matching Docker's behavior when the corresponding `HostConfig` field is
+/// left at zero. Operators opt in to limits explicitly through the
+/// `PATCH /external-services/{id}/resources` endpoint or by writing the
+/// `resources` block into `ServiceConfig::parameters` at create time.
+///
+/// These map directly onto bollard fields:
+/// - `memory_mb`     → `HostConfig.memory`        (bytes)
+/// - `memory_swap_mb`→ `HostConfig.memory_swap`   (bytes; ≥ memory)
+/// - `nano_cpus`     → `HostConfig.nano_cpus`     (1e9 = 1 full CPU)
+/// - `cpu_shares`    → `HostConfig.cpu_shares`    (relative weight, default 1024)
+///
+/// IMPORTANT: enabling hard memory limits causes the kernel OOM killer to
+/// terminate the container when the working set exceeds the limit. The
+/// container will restart (RestartPolicy::ALWAYS) but in-flight queries
+/// fail. Surface this clearly in any UI that lets users set limits.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ServiceResourceLimits {
+    /// Hard memory limit in MiB. None = unlimited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mb: Option<i64>,
+    /// Memory + swap limit in MiB. None = unlimited.
+    /// MUST be >= memory_mb when both are set; Docker rejects the request otherwise.
+    /// Set equal to `memory_mb` to disable swap entirely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_swap_mb: Option<i64>,
+    /// CPU quota in nano-cpus. 1_000_000_000 = 1 full CPU core. None = unlimited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nano_cpus: Option<i64>,
+    /// Relative CPU weight (default 1024). Only used when `nano_cpus` is None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_shares: Option<i64>,
+}
+
+impl ServiceResourceLimits {
+    /// True when no limits are set — the container runs unconstrained.
+    pub fn is_unlimited(&self) -> bool {
+        self.memory_mb.is_none()
+            && self.memory_swap_mb.is_none()
+            && self.nano_cpus.is_none()
+            && self.cpu_shares.is_none()
+    }
+
+    /// Validate that memory_swap >= memory when both are set, and that no
+    /// negative values slipped through.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(mem) = self.memory_mb {
+            if mem <= 0 {
+                return Err(format!("memory_mb must be > 0, got {}", mem));
+            }
+        }
+        if let Some(swap) = self.memory_swap_mb {
+            if swap <= 0 {
+                return Err(format!("memory_swap_mb must be > 0, got {}", swap));
+            }
+            if let Some(mem) = self.memory_mb {
+                if swap < mem {
+                    return Err(format!(
+                        "memory_swap_mb ({}) must be >= memory_mb ({})",
+                        swap, mem
+                    ));
+                }
+            }
+        }
+        if let Some(nc) = self.nano_cpus {
+            if nc <= 0 {
+                return Err(format!("nano_cpus must be > 0, got {}", nc));
+            }
+        }
+        if let Some(cs) = self.cpu_shares {
+            if cs <= 0 {
+                return Err(format!("cpu_shares must be > 0, got {}", cs));
+            }
+        }
+        Ok(())
+    }
+
+    /// Extract a `ServiceResourceLimits` block from a service-config parameters JSON.
+    ///
+    /// Looks for a `resources` object at the top level. Missing or malformed
+    /// blocks resolve to `ServiceResourceLimits::default()` (unlimited) so existing
+    /// services continue to run unconstrained until an operator opts in.
+    pub fn from_parameters(parameters: &serde_json::Value) -> Self {
+        parameters
+            .get("resources")
+            .and_then(|v| serde_json::from_value::<ServiceResourceLimits>(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Apply these limits to a bollard `HostConfig`. Fields with `None`
+    /// values are left untouched, preserving Docker defaults.
+    pub fn apply_to_host_config(&self, host_config: &mut bollard::models::HostConfig) {
+        if let Some(mb) = self.memory_mb {
+            host_config.memory = Some(mb.saturating_mul(1024 * 1024));
+        }
+        if let Some(mb) = self.memory_swap_mb {
+            host_config.memory_swap = Some(mb.saturating_mul(1024 * 1024));
+        }
+        if let Some(nc) = self.nano_cpus {
+            host_config.nano_cpus = Some(nc);
+        }
+        if let Some(cs) = self.cpu_shares {
+            host_config.cpu_shares = Some(cs);
+        }
+    }
 }
 
 /// Capabilities a service exposes for the generic restore framework.
@@ -642,6 +810,25 @@ pub trait ExternalService: Send + Sync {
     ) -> Result<HashMap<String, String>> {
         Ok(HashMap::new())
     }
+
+    /// Side-effect-free variant of [`Self::get_runtime_env_vars`] for the UI
+    /// preview path. Same `<project>_<env>` convention, but must not
+    /// provision databases, buckets, or other external resources — the user
+    /// is just looking at what their deployment *would* receive.
+    ///
+    /// Default delegates to `get_runtime_env_vars`. Services with
+    /// provisioning side effects (Postgres `CREATE DATABASE`, S3 bucket
+    /// create, etc.) override this to skip the side effect while still
+    /// returning per-tenant values.
+    async fn preview_runtime_env_vars(
+        &self,
+        config: ServiceConfig,
+        project_id: &str,
+        environment: &str,
+    ) -> Result<HashMap<String, String>> {
+        self.get_runtime_env_vars(config, project_id, environment)
+            .await
+    }
     fn get_local_address(&self, service_config: ServiceConfig) -> Result<String>;
 
     /// Get the effective host and port for connecting to this service
@@ -673,7 +860,7 @@ pub trait ExternalService: Send + Sync {
         _pool: &temps_database::DbConnection,
         _external_service: &temps_entities::external_services::Model,
         _service_config: ServiceConfig,
-    ) -> Result<String> {
+    ) -> Result<BackupOutcome> {
         Err(anyhow::anyhow!("Backup not implemented for this service"))
     }
 
@@ -859,5 +1046,104 @@ pub trait ExternalService: Send + Sync {
         _additional_config: serde_json::Value,
     ) -> Result<ServiceConfig> {
         Err(anyhow::anyhow!("Import not implemented for this service"))
+    }
+}
+
+#[cfg(test)]
+mod resource_limits_tests {
+    use super::*;
+
+    #[test]
+    fn default_is_unlimited() {
+        let limits = ServiceResourceLimits::default();
+        assert!(limits.is_unlimited());
+    }
+
+    #[test]
+    fn validate_rejects_zero_and_negative_values() {
+        // memory must be > 0
+        assert!(ServiceResourceLimits {
+            memory_mb: Some(0),
+            ..Default::default()
+        }
+        .validate()
+        .is_err());
+        assert!(ServiceResourceLimits {
+            memory_mb: Some(-1),
+            ..Default::default()
+        }
+        .validate()
+        .is_err());
+
+        // swap < memory is rejected (Docker would refuse the request anyway)
+        assert!(ServiceResourceLimits {
+            memory_mb: Some(512),
+            memory_swap_mb: Some(256),
+            ..Default::default()
+        }
+        .validate()
+        .is_err());
+
+        // swap == memory is fine — that disables swap
+        assert!(ServiceResourceLimits {
+            memory_mb: Some(512),
+            memory_swap_mb: Some(512),
+            ..Default::default()
+        }
+        .validate()
+        .is_ok());
+    }
+
+    #[test]
+    fn from_parameters_reads_resources_block() {
+        let params = serde_json::json!({
+            "port": "5432",
+            "resources": {
+                "memory_mb": 1024,
+                "nano_cpus": 1_000_000_000_i64
+            }
+        });
+        let limits = ServiceResourceLimits::from_parameters(&params);
+        assert_eq!(limits.memory_mb, Some(1024));
+        assert_eq!(limits.nano_cpus, Some(1_000_000_000));
+        assert_eq!(limits.cpu_shares, None);
+        assert_eq!(limits.memory_swap_mb, None);
+    }
+
+    #[test]
+    fn from_parameters_missing_block_is_unlimited() {
+        let params = serde_json::json!({ "port": "5432" });
+        let limits = ServiceResourceLimits::from_parameters(&params);
+        assert!(limits.is_unlimited());
+    }
+
+    #[test]
+    fn apply_to_host_config_only_sets_some_fields() {
+        let limits = ServiceResourceLimits {
+            memory_mb: Some(512),
+            nano_cpus: Some(500_000_000),
+            ..Default::default()
+        };
+        let mut hc = bollard::models::HostConfig::default();
+        limits.apply_to_host_config(&mut hc);
+        // 512 MiB = 536870912 bytes
+        assert_eq!(hc.memory, Some(536_870_912));
+        assert_eq!(hc.nano_cpus, Some(500_000_000));
+        // Untouched fields stay None — Docker default = unlimited.
+        assert_eq!(hc.memory_swap, None);
+        assert_eq!(hc.cpu_shares, None);
+    }
+
+    #[test]
+    fn apply_to_host_config_unlimited_leaves_host_config_untouched() {
+        let limits = ServiceResourceLimits::default();
+        let mut hc = bollard::models::HostConfig {
+            cpu_shares: Some(1024), // pretend something else set this
+            ..Default::default()
+        };
+        limits.apply_to_host_config(&mut hc);
+        // None values must not overwrite — preserves whatever the engine set.
+        assert_eq!(hc.cpu_shares, Some(1024));
+        assert_eq!(hc.memory, None);
     }
 }

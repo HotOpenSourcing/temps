@@ -632,6 +632,8 @@ export type AppSettingsResponse = {
     security_headers: SecurityHeadersSettings;
 };
 
+export type ArchiveMode = 'off' | 'on' | 'always' | 'unknown';
+
 export type AssignRoleRequest = {
     role_type: string;
     user_id: number;
@@ -825,25 +827,125 @@ export type AvailablePermissions = {
 };
 
 /**
+ * Response body for the list-backup-alerts endpoint.
+ */
+export type BackupAlertListResponse = {
+    /**
+     * All currently open (unresolved) alerts, newest first.
+     */
+    alerts: Array<BackupAlertResponse>;
+};
+
+/**
+ * A single open backup alert surfaced in the UI banner.
+ *
+ * Alerts are auto-opened by the watcher and auto-resolved when the triggering
+ * condition clears. No manual dismiss is required or supported.
+ *
+ * The optional `schedule_s3_source_id` field is included so the UI can
+ * deep-link an `overdue_schedule` alert to the S3 source detail page that
+ * hosts the schedule. `stalled_job` alerts no longer carry a deep-link
+ * target — the alert message text contains the backup id for display.
+ */
+export type BackupAlertResponse = {
+    /**
+     * Database id of the alert row.
+     */
+    id: number;
+    /**
+     * `"overdue_schedule"` or `"stalled_job"`.
+     */
+    kind: string;
+    /**
+     * Human-readable description of the alert condition.
+     */
+    message: string;
+    /**
+     * RFC 3339 timestamp when the alert was opened.
+     */
+    opened_at: string;
+    /**
+     * FK to `backup_schedules.id`. Set for `overdue_schedule` alerts.
+     */
+    schedule_id?: number | null;
+    /**
+     * Human-readable name of the linked schedule, if applicable.
+     */
+    schedule_name?: string | null;
+    /**
+     * FK to `backup_schedules.s3_source_id`. The UI uses this to deep-link
+     * the alert to the S3 source detail page that hosts the schedule.
+     * Set for `overdue_schedule` alerts.
+     */
+    schedule_s3_source_id?: number | null;
+    /**
+     * `"warning"` or `"critical"`.
+     */
+    severity: string;
+};
+
+/**
  * Response type for backup
  */
 export type BackupResponse = {
+    /**
+     * How many times this job has been claimed and run. `null` for legacy
+     * backups with no `backup_jobs` row.
+     */
+    attempts?: number | null;
     backup_id: string;
     backup_type: string;
     checksum?: string | null;
     completed_at?: number | null;
     compression_type: string;
     created_by: number;
+    /**
+     * Name of the engine step currently executing (e.g., `"walg_push"`).
+     * `null` when no `backup_jobs` row exists for this backup (legacy rows
+     * pre-dating ADR-014), or when the job has not yet completed its first step.
+     */
+    current_step?: string | null;
     error_message?: string | null;
     expires_at?: number | null;
+    external_service?: null | ExternalServiceSummary;
     file_count?: number | null;
     id: number;
+    /**
+     * Last time the worker reported progress. Older than ~5 minutes while
+     * `state == "running"` indicates a stalled backup the UI should flag.
+     */
+    last_heartbeat_at?: number | null;
+    /**
+     * Best-effort partial size while a backup is still running, computed
+     * by listing the S3 prefix. Null when the backup is finished
+     * (`size_bytes` is authoritative in that case).
+     */
+    live_size_bytes?: number | null;
+    /**
+     * Maximum attempts before the job is permanently failed. `null` for
+     * legacy backups.
+     */
+    max_attempts?: number | null;
+    /**
+     * Resolved wall-clock timeout for this backup job (seconds). `null` for
+     * legacy backups. Derived from the three-tier resolution order:
+     * caller override → schedule override → engine default.
+     */
+    max_runtime_secs?: number | null;
     metadata: unknown;
     name: string;
     s3_location: string;
     s3_source_id: number;
     schedule_id?: number | null;
-    size_bytes: number;
+    /**
+     * Final size of the backup once completed. Null while running.
+     */
+    size_bytes?: number | null;
+    /**
+     * True when `state == "running"` but the heartbeat is stale, suggesting
+     * the worker process died mid-backup.
+     */
+    stalled: boolean;
     started_at: number;
     state: string;
     tags: Array<string>;
@@ -859,6 +961,12 @@ export type BackupScheduleResponse = {
     enabled: boolean;
     id: number;
     last_run?: number | null;
+    /**
+     * Per-schedule wall-clock timeout override for backup jobs (seconds).
+     * `null` means the engine-family default is used. See
+     * `temps_backup_core::timeouts::default_max_runtime_secs`.
+     */
+    max_runtime_secs?: number | null;
     name: string;
     next_run?: number | null;
     retention_period: number;
@@ -965,6 +1073,18 @@ export type BuildConfiguration = {
 };
 
 /**
+ * Response body for cancel endpoints.
+ */
+export type CancelBackupResponse = {
+    /**
+     * Number of rows that were actually flipped to `failed`. `0` is a valid
+     * success and means the backup was already terminal — the call is
+     * idempotent.
+     */
+    cancelled: number;
+};
+
+/**
  * Challenge configuration (future feature)
  * For CAPTCHA, JS challenges, proof-of-work, etc.
  */
@@ -1022,6 +1142,20 @@ export type ChallengeValidationStatus = {
     validated?: string | null;
 };
 
+export type ChangePasswordRequest = {
+    current_password: string;
+    /**
+     * TOTP code (or recovery code). Required iff the user has MFA enabled.
+     */
+    mfa_code?: string | null;
+    new_password: string;
+    /**
+     * When true, every session OTHER than the one making this request is
+     * revoked. Defaults to false; the UI surfaces this as a checkbox.
+     */
+    revoke_other_sessions?: boolean;
+};
+
 export type ChatCompletionChoice = {
     finish_reason?: string | null;
     index: number;
@@ -1071,46 +1205,157 @@ export type ChatMessage = {
     tool_calls?: Array<unknown> | null;
 };
 
-export type CliLoginPasswordRequest = {
+/**
+ * A single child backup entry in the `GET /backups/{id}/children` response.
+ *
+ * Each entry corresponds to one `external_service_backups` row joined with
+ * `external_services`, providing service metadata without a second request.
+ */
+export type ChildBackupEntryResponse = {
     /**
-     * Friendly device name shown to the user when they audit API keys.
-     * Defaults to `cli` when omitted.
+     * Backup variant (e.g. "full", "incremental").
      */
-    device_name?: string | null;
+    backup_type: string;
     /**
-     * User email.
+     * Compression algorithm used (e.g. "gzip", "lz4").
      */
-    email: string;
+    compression_type: string;
     /**
-     * Six-digit TOTP code. Required only when the user has MFA enabled.
+     * Engine-reported error message when `state = "failed"`.
      */
-    mfa_code?: string | null;
+    error_message?: string | null;
     /**
-     * Opaque session token returned by a prior `/auth/cli/login` call when
-     * MFA was required. Must be passed back together with `mfa_code`.
+     * When the child backup finished, if known.
      */
-    mfa_session_token?: string | null;
+    finished_at?: string | null;
     /**
-     * User password.
+     * Row ID from `external_service_backups`.
      */
-    password: string;
+    id: number;
+    /**
+     * Object key or `s3://` URL where the backup data lives.
+     */
+    s3_location: string;
+    /**
+     * FK to `external_services.id`.
+     */
+    service_id: number;
+    /**
+     * Human-readable name of the external service (e.g. "redis-prod").
+     */
+    service_name: string;
+    /**
+     * Service type string (e.g. "postgres", "redis", "mongodb", "s3").
+     */
+    service_type: string;
+    /**
+     * Size of the child backup in bytes, if available.
+     */
+    size_bytes?: number | null;
+    /**
+     * When the child backup started (RFC 3339).
+     */
+    started_at: string;
+    /**
+     * Current state: "pending" | "running" | "completed" | "failed".
+     */
+    state: string;
 };
 
-export type CliLoginRequest = {
-    password: string;
-    username: string;
+/**
+ * Response body for `GET /backups/{id}/children`.
+ *
+ * Returns an empty `children` list (not 404) when the parent backup has no
+ * child records (e.g. control-plane backups).
+ */
+export type ChildBackupListResponse = {
+    /**
+     * Zero or more child backup entries ordered by `external_service_backups.id` ASC.
+     */
+    children: Array<ChildBackupEntryResponse>;
 };
 
-export type CliLoginResponse = {
-    mfa_required: boolean;
-    mfa_session_token: string;
+export type CliDeviceApproveRequest = {
+    user_code: string;
+};
+
+export type CliDeviceApproveResponse = {
+    status: string;
+    user_code: string;
+};
+
+export type CliDeviceLookupResponse = {
+    client_name?: string | null;
+    expires_at: string;
+    requested_ip?: string | null;
+    /**
+     * `pending` | `approved` | `denied` | `expired`.
+     */
+    status: string;
+    user_code: string;
+};
+
+export type CliDevicePollRequest = {
+    device_code: string;
+};
+
+export type CliDevicePollResponse = {
+    status: 'authorization_pending';
+} | {
+    status: 'slow_down';
+} | {
+    status: 'access_denied';
+} | {
+    status: 'expired_token';
 } | {
     api_key: string;
     email: string;
     expires_at?: string | null;
     key_prefix: string;
     role: string;
+    status: 'approved';
     user_id: number;
+};
+
+export type CliDeviceStartRequest = {
+    /**
+     * Friendly hostname / client identifier shown in the browser approval
+     * screen. Sanitized before display.
+     */
+    client_name?: string | null;
+};
+
+export type CliDeviceStartResponse = {
+    /**
+     * Opaque secret the CLI polls with. Never display to a human.
+     */
+    device_code: string;
+    /**
+     * Seconds until the device_code expires.
+     */
+    expires_in: number;
+    /**
+     * Suggested polling interval, in seconds.
+     */
+    interval: number;
+    /**
+     * Short human-readable code the user types into the browser.
+     */
+    user_code: string;
+    /**
+     * Base verification URL — the CLI may display this when the
+     * pre-filled URL is too long to be useful.
+     */
+    verification_uri: string;
+    /**
+     * `verification_uri` with `user_code` pre-filled. Open this directly.
+     */
+    verification_uri_complete: string;
+};
+
+export type CliLoginRequest = {
+    password: string;
+    username: string;
 };
 
 /**
@@ -1645,6 +1890,105 @@ export type ContainerResponse = {
     name: string;
 };
 
+/**
+ * Snapshot of a container's lifecycle state from `docker inspect`.
+ * `restart_count` and `oom_killed` are the load-bearing fields when
+ * diagnosing crash loops — the kernel OOM killer never reaches the
+ * application's logs, so seeing `oom_killed=true` is the only signal
+ * that a memory limit was the cause.
+ */
+export type ContainerRuntimeInfo = {
+    /**
+     * Container Docker id, when present. None = container does not exist
+     * (was never created or was removed externally).
+     */
+    container_id?: string | null;
+    /**
+     * Stable name of the Docker container (e.g. `postgres-mydb`).
+     */
+    container_name: string;
+    /**
+     * Last container exit code, when known. Non-zero = unclean stop.
+     */
+    exit_code?: number | null;
+    /**
+     * ISO-8601 timestamp of the most recent termination, when known.
+     */
+    finished_at?: string | null;
+    /**
+     * Currently-effective Docker image (e.g. `gotempsh/postgres-walg:18-bookworm`).
+     */
+    image?: string | null;
+    /**
+     * True when the container's last termination was caused by the
+     * kernel OOM killer. Set if the user enabled hard memory limits
+     * and the working set exceeded them.
+     */
+    oom_killed?: boolean | null;
+    /**
+     * Currently-applied resource limits read off the container's
+     * `HostConfig`. Compare this against the user-configured limits to
+     * detect drift (an old container that never picked up new caps).
+     */
+    resource_limits: ServiceResourceLimits;
+    /**
+     * Total restarts since the container was created. Useful for
+     * detecting crash loops — a steady stream means something is killing
+     * the container repeatedly (frequently OOM).
+     */
+    restart_count?: number | null;
+    /**
+     * `service_members.role` for cluster members; "standalone" otherwise.
+     */
+    role: string;
+    /**
+     * ISO-8601 timestamp of when the container last started. None when
+     * it has never started (i.e. created but never run).
+     */
+    started_at?: string | null;
+    /**
+     * Bollard container state ("running", "exited", "dead", etc.). None
+     * when the container does not exist.
+     */
+    status?: string | null;
+};
+
+/**
+ * Live resource usage sample for a single container.
+ *
+ * `cpu_percent` is computed by Docker's standard formula:
+ * ((cpu_delta / system_delta) * online_cpus) * 100
+ * `memory_percent` is `(memory_usage / memory_limit) * 100` — when no
+ * memory limit is set the limit reported by Docker is the host's total
+ * RAM, so a 5% reading means "5% of host RAM", not "5% of allocated".
+ */
+export type ContainerStatsSample = {
+    container_name: string;
+    /**
+     * CPU usage as a percentage. `None` when the container is not running
+     * (Docker returns no usable counters).
+     */
+    cpu_percent?: number | null;
+    /**
+     * Memory limit in bytes (host RAM if no limit set).
+     */
+    memory_limit_bytes?: number | null;
+    /**
+     * Memory usage as a percentage of `memory_limit_bytes`.
+     */
+    memory_percent?: number | null;
+    /**
+     * Resident memory usage in bytes.
+     */
+    memory_usage_bytes?: number | null;
+    /**
+     * Number of cores Docker observed at sample time. Used by the UI
+     * to label "x/y cores" instead of just a percent.
+     */
+    online_cpus?: number | null;
+    role: string;
+};
+
 export type ContentPart = {
     image_url?: unknown;
     text?: string | null;
@@ -1792,6 +2136,13 @@ export type CreateBackupScheduleRequest = {
     backup_type: string;
     description?: string | null;
     enabled: boolean;
+    /**
+     * Optional wall-clock timeout override for jobs created by this schedule
+     * (seconds). When set, overrides the engine-family default. `null` means
+     * "use engine default." The per-job `max_runtime_secs` in
+     * `EnqueueJobParams` can still override this for ad-hoc triggers.
+     */
+    max_runtime_secs?: number | null;
     name: string;
     retention_period: number;
     /**
@@ -1882,6 +2233,13 @@ export type CreateEnvironmentVariableRequest = {
      * Include this environment variable in preview environments (default: true)
      */
     include_in_preview?: boolean;
+    /**
+     * When true the variable is treated as write-only: never returned in
+     * plaintext from the API, masked in the UI, and updates that omit the
+     * value preserve the existing ciphertext. The flag is one-way — secret
+     * vars cannot be demoted back to regular vars.
+     */
+    is_secret?: boolean;
     key: string;
     value: string;
 };
@@ -1993,6 +2351,12 @@ export type CreateMonitorRequest = {
     check_path?: string | null;
     environment_id: number;
     monitor_type: string;
+    name: string;
+};
+
+export type CreateNotificationEmailProviderRequest = {
+    config: EmailConfig;
+    enabled?: boolean | null;
     name: string;
 };
 
@@ -3816,6 +4180,29 @@ export type EndpointDto = {
     ttl: number;
 };
 
+/**
+ * A single job that was successfully enqueued during a fan-out run.
+ */
+export type EnqueuedJob = {
+    /**
+     * FK to `backups.id` for this job.
+     */
+    backup_id: number;
+    /**
+     * Engine key (e.g. `"control_plane"`, `"redis"`, `"postgres_pgdump"`).
+     */
+    engine: string;
+    /**
+     * FK to `backup_jobs.id` for this job.
+     */
+    job_id: number;
+    /**
+     * FK to `external_services.id` when this is an external-service job.
+     * `None` for the control-plane job.
+     */
+    target_service_id?: number | null;
+};
+
 export type EnrichVisitorRequest = {
     custom_data: {
         [key: string]: unknown;
@@ -4017,6 +4404,13 @@ export type EnvironmentResponse = {
      */
     sleeping: boolean;
     slug: string;
+    /**
+     * The host label stored for this environment (e.g.
+     * `myproject-production`). This is the prefix that is combined with the
+     * platform's preview domain at request time to produce `main_url`. Edit
+     * this via the rename-subdomain endpoint, not the full URL.
+     */
+    subdomain: string;
     updated_at: number;
 };
 
@@ -4059,9 +4453,18 @@ export type EnvironmentVariableResponse = {
      * Include this environment variable in preview environments
      */
     include_in_preview: boolean;
+    /**
+     * Whether the variable is a write-only secret. Secrets always have
+     * `value: None` in responses.
+     */
+    is_secret: boolean;
     key: string;
     updated_at: number;
-    value: string;
+    /**
+     * Plaintext value for non-secret vars (or `"***"` mask for list responses).
+     * `None` for secret vars — secrets are write-only.
+     */
+    value?: string | null;
 };
 
 export type EnvironmentVariableValueResponse = {
@@ -4130,6 +4533,20 @@ export type ErrorGroupStatsResponse = {
 export type ErrorResponse = {
     details?: string | null;
     error: string;
+};
+
+export type ErrorRow = {
+    deployment_id?: number | null;
+    environment_id?: number | null;
+    error_class: string;
+    error_group_id: number;
+    fingerprint: string;
+    id: number;
+    message?: string | null;
+    stacktrace_preview: unknown;
+    stacktrace_truncated: boolean;
+    trace_id?: string | null;
+    ts: string;
 };
 
 export type ErrorTimeSeriesDataResponse = {
@@ -4271,6 +4688,12 @@ export type EventDetailResponse = {
      */
     unique_visitors: number;
 };
+
+/**
+ * Tag enum for filter parameters and routing. Matches the variant
+ * discriminator used by `ObservabilityEvent`.
+ */
+export type EventKind = 'request' | 'span' | 'error' | 'revenue';
 
 export type EventMetricsPayload = {
     /**
@@ -4498,6 +4921,15 @@ export type EventsCountQuery = {
     start_date: string;
 };
 
+export type EventsResponse = {
+    /**
+     * Echo of the kinds filter actually applied (server-resolved). Useful
+     * for clients that pass `kinds=` empty and want to know what they got.
+     */
+    applied_kinds: Array<EventKind>;
+    events: Array<ObservabilityEvent>;
+};
+
 export type ExecBody = {
     cmd: Array<string>;
     cwd?: string | null;
@@ -4715,6 +5147,26 @@ export type ExternalServiceInfo = {
     version?: string | null;
 };
 
+/**
+ * Summary of the external service that owns a backup. Only populated for
+ * external-service backups (Redis, Postgres, etc.); absent for control-plane
+ * backups.
+ */
+export type ExternalServiceSummary = {
+    /**
+     * Database id of the external service.
+     */
+    id: number;
+    /**
+     * Human-readable service name (e.g. "redis-prod").
+     */
+    name: string;
+    /**
+     * Service type string (e.g. "postgres", "redis", "mongodb").
+     */
+    service_type: string;
+};
+
 export type FieldResponse = {
     /**
      * Field type (Int32, String, Timestamp, etc.)
@@ -4728,6 +5180,58 @@ export type FieldResponse = {
      * Whether the field is nullable
      */
     nullable: boolean;
+};
+
+export type FullError = {
+    /**
+     * Full JSONB blob from `error_events.data` — stack trace, breadcrumbs,
+     * request context, everything. Schema is documented per source SDK.
+     */
+    data?: unknown;
+    deployment_id?: number | null;
+    environment_id?: number | null;
+    error_class: string;
+    error_group_id: number;
+    fingerprint: string;
+    id: number;
+    message?: string | null;
+    trace_id?: string | null;
+    ts: string;
+};
+
+/**
+ * One un-truncated row, returned by the `/full/{type}/{id}` endpoint when
+ * the user clicks "Show full". Same shape as the list rows, but with the
+ * raw heavy fields restored (no truncation flags) so the side panel can
+ * render the long form.
+ */
+export type FullEvent = (FullRequest & {
+    type: 'request';
+}) | (FullError & {
+    type: 'error';
+}) | (RevenueRow & {
+    type: 'revenue';
+}) | (SpanRow & {
+    type: 'span';
+});
+
+export type FullRequest = {
+    client_ip?: string | null;
+    deployment_id?: number | null;
+    environment_id?: number | null;
+    error_group_id?: number | null;
+    host: string;
+    id: number;
+    latency_ms?: number | null;
+    method: string;
+    path: string;
+    referrer?: string | null;
+    request_headers?: unknown;
+    response_headers?: unknown;
+    status: number;
+    trace_id?: string | null;
+    ts: string;
+    user_agent?: string | null;
 };
 
 export type FunnelMetricsResponse = {
@@ -6713,26 +7217,6 @@ export type McpDefinitionResponse = {
     updated_at: string;
 };
 
-export type MemoryFactResponse = {
-    agent_id: number;
-    confidence: number;
-    created_at: string;
-    fact: string;
-    id: number;
-    last_used_at?: string | null;
-    project_id: number;
-    source_run_ids: Array<number>;
-    superseded_by?: number | null;
-    tags: Array<string>;
-    times_used: number;
-    updated_at: string;
-};
-
-export type MemoryListResponse = {
-    facts: Array<MemoryFactResponse>;
-    total: number;
-};
-
 export type MessageContent = string | Array<ContentPart>;
 
 /**
@@ -7244,6 +7728,29 @@ export type NotificationProviderResponse = {
     provider_type: string;
     updated_at: number;
 };
+
+/**
+ * Discriminated union of every row that can appear in the Observe list.
+ *
+ * Serializes to `{ "type": "request" | "span" | ... , ...rest }` so the UI
+ * can switch on `event.type` without ambiguity.
+ *
+ * **No `Log` variant**: runtime stdout/stderr lines live on a dedicated
+ * Logs page rather than Observe. Logs are too high-volume to interleave
+ * with business signals (requests, errors, revenue) without dominating
+ * the timeline, and they have their own retention/storage constraints
+ * (TimescaleDB hypertable + chunked file/S3 store) that don't compose
+ * with the merge service's per-kind LIMIT strategy.
+ */
+export type ObservabilityEvent = (RequestRow & {
+    type: 'request';
+}) | (SpanRow & {
+    type: 'span';
+}) | (ErrorRow & {
+    type: 'error';
+}) | (RevenueRow & {
+    type: 'revenue';
+});
 
 export type OpenAiError = {
     code?: string | null;
@@ -8177,6 +8684,42 @@ export type PortMapping = {
     protocol: Protocol;
 };
 
+export type PostgresWalHealth = {
+    /**
+     * Number of `archive_status*.ready` files — un-shipped WAL segments.
+     */
+    archive_backlog: number;
+    /**
+     * The literal `archive_command` setting. May be empty or `/bin/true`
+     * when archiving is effectively disabled despite `archive_mode = on`.
+     */
+    archive_command?: string | null;
+    archive_mode: ArchiveMode;
+    archiver_failed_count?: number | null;
+    archiver_last_failed_at?: string | null;
+    /**
+     * `max_wal_size` setting in bytes (parsed from `pg_settings`).
+     */
+    max_wal_size_bytes: number;
+    /**
+     * Age of the oldest WAL file in `pg_wal/` (seconds).
+     */
+    oldest_wal_age_secs: number;
+    /**
+     * Total size of files under `pg_wal/`, from `pg_ls_waldir()`.
+     */
+    pg_wal_bytes: number;
+    /**
+     * When the snapshot was taken.
+     */
+    probed_at: string;
+    stale_slots: Array<StaleSlot>;
+    /**
+     * Computed warnings, ordered by severity (critical first).
+     */
+    warnings: Array<WalWarning>;
+};
+
 /**
  * Union type for preset configurations
  * Use the appropriate configuration type based on your preset
@@ -8305,11 +8848,6 @@ export type PreviewGatewaySettingsResponse = {
     default_image: string;
     host_port: number;
     image: string;
-};
-
-export type PreviewPortUrl = {
-    port: number;
-    url: string;
 };
 
 export type PricingResponse = {
@@ -9418,6 +9956,28 @@ export type RepositorySyncStartedResponse = {
     syncing: boolean;
 };
 
+export type RequestRow = {
+    client_ip?: string | null;
+    country?: string | null;
+    deployment_id?: number | null;
+    environment_id?: number | null;
+    error_group_id?: number | null;
+    headers_truncated: boolean;
+    host: string;
+    id: number;
+    latency_ms?: number | null;
+    method: string;
+    path: string;
+    query_string?: string | null;
+    referrer?: string | null;
+    request_headers: unknown;
+    response_headers: unknown;
+    status: number;
+    trace_id?: string | null;
+    ts: string;
+    user_agent?: string | null;
+};
+
 export type ResetPasswordRequest = {
     new_password: string;
     token: string;
@@ -9488,6 +10048,33 @@ export type ResourceInfo = {
 };
 
 /**
+ * Per-container outcome of a live `docker update` call. Surfaced from the
+ * PATCH /resources endpoint so the UI can tell the operator whether the
+ * new caps are already in effect or whether they only apply on next
+ * recreate (e.g., container was missing).
+ */
+export type ResourceLimitApplyResult = {
+    container_name: string;
+    /**
+     * Populated only when `outcome == "failed"`.
+     */
+    error?: string | null;
+    /**
+     * One of:
+     * - "applied"  — Docker accepted the update; caps are live now.
+     * - "missing"  — container does not exist; caps stored, will apply on next start.
+     * - "stopped"  — container exists but isn't running; Docker still
+     * accepts the update (the new caps apply on next start).
+     * - "failed"   — `docker update` returned an error (see `error`).
+     */
+    outcome: string;
+    /**
+     * `service_members.role` for cluster members; "standalone" otherwise.
+     */
+    role: string;
+};
+
+/**
  * Resource limits and requests
  */
 export type ResourceLimits = {
@@ -9517,6 +10104,20 @@ export type ResourceLimitsResponse = {
     cpu_request?: number | null;
     memory_limit?: number | null;
     memory_request?: number | null;
+};
+
+/**
+ * Response from PATCH /external-services/{id}/resources.
+ */
+export type ResourceLimitsUpdateResponse = {
+    /**
+     * Per-container result of trying to apply the limits live.
+     */
+    applied: Array<ResourceLimitApplyResult>;
+    /**
+     * The limits that were persisted to the encrypted config.
+     */
+    limits: ServiceResourceLimits;
 };
 
 /**
@@ -9674,6 +10275,19 @@ export type RetryClusterRequest = {
      * the preserved service_members records.
      */
     members?: Array<ClusterMemberRequest>;
+};
+
+export type RevenueRow = {
+    amount_minor?: number | null;
+    currency?: string | null;
+    customer_ref?: string | null;
+    deployment_id?: number | null;
+    environment_id?: number | null;
+    event_type: string;
+    id: number;
+    provider: string;
+    trace_id?: string | null;
+    ts: string;
 };
 
 /**
@@ -9928,6 +10542,231 @@ export type ScanResponse = {
     updated_at: string;
 };
 
+/**
+ * A single run-history entry for the schedule detail page (deliverable 1).
+ *
+ * Combines one `backups` row with the most-recent `backup_jobs` row for that
+ * backup via a lateral JOIN.  Fields from `backup_jobs` are `None` for legacy
+ * backup rows that pre-date ADR-014.
+ */
+export type ScheduleRunEntry = {
+    /**
+     * Number of claim-and-run attempts so far. `None` for legacy rows.
+     */
+    attempts?: number | null;
+    /**
+     * DB id of the `backups` row.
+     */
+    backup_id: number;
+    /**
+     * UUID string (`backups.backup_id`).
+     */
+    backup_uuid: string;
+    /**
+     * Last completed step reported by the engine (e.g. `"upload"`).
+     * `None` when no step has been persisted yet.
+     */
+    current_step?: string | null;
+    /**
+     * Engine-reported error message when `state = "failed"`.
+     */
+    error_message?: string | null;
+    /**
+     * When the backup finished, if known.
+     */
+    finished_at?: string | null;
+    /**
+     * Most recent `backup_jobs.id` for this backup. `None` for legacy rows.
+     */
+    job_id?: number | null;
+    /**
+     * S3 object key or URL where the backup data lives.
+     */
+    s3_location: string;
+    /**
+     * Final size in bytes once completed. `None` while running.
+     */
+    size_bytes?: number | null;
+    /**
+     * When the backup was started (ISO 8601 / RFC 3339).
+     */
+    started_at: string;
+    /**
+     * Current state: `"pending"`, `"running"`, `"completed"`, `"failed"`.
+     */
+    state: string;
+};
+
+/**
+ * A single job entry inside an expanded schedule run, returned by
+ * [`BackupService::list_schedule_run_jobs`].
+ */
+export type ScheduleRunJobEntry = {
+    /**
+     * `backups.id` for this job.
+     */
+    backup_id: number;
+    /**
+     * `backups.backup_id` UUID string.
+     */
+    backup_uuid: string;
+    /**
+     * Engine key (e.g. `"control_plane"`, `"redis"`).
+     */
+    engine: string;
+    /**
+     * Engine-reported error message when `state = "failed"`.
+     */
+    error_message?: string | null;
+    /**
+     * When this child backup finished, if known.
+     */
+    finished_at?: string | null;
+    /**
+     * FK to `s3_sources.id` — needed for the backup detail link.
+     */
+    s3_source_id: number;
+    /**
+     * `external_services.id` — `NULL` for the control-plane job.
+     */
+    service_id?: number | null;
+    /**
+     * Name of the external service, or `"control plane"` for the
+     * control-plane job.
+     */
+    service_name: string;
+    /**
+     * Size in bytes once completed; `None` while running.
+     */
+    size_bytes?: number | null;
+    /**
+     * When this child backup started (ISO 8601 / RFC 3339).
+     */
+    started_at: string;
+    /**
+     * Current state of this child backup.
+     */
+    state: string;
+};
+
+/**
+ * Paginated run-history response for a backup schedule (deliverable 1).
+ */
+export type ScheduleRunListResponse = {
+    /**
+     * Current page (1-based).
+     */
+    page: number;
+    /**
+     * Number of items per page (clamped to 1–100).
+     */
+    page_size: number;
+    /**
+     * Run entries, newest first.
+     */
+    runs: Array<ScheduleRunEntry>;
+    /**
+     * Total number of runs across all pages.
+     */
+    total: number;
+};
+
+/**
+ * HTTP response body for `POST /api/backups/schedules/{id}/run` (fan-out).
+ */
+export type ScheduleRunResponse = {
+    /**
+     * All jobs that were enqueued in this fan-out.
+     */
+    jobs: Array<EnqueuedJob>;
+    /**
+     * The `schedule_runs.id` of the newly created run.
+     */
+    schedule_run_id: number;
+};
+
+/**
+ * Summary of one scheduler tick (or one "Run now" click), returned by
+ * [`BackupService::list_schedule_runs`].
+ *
+ * The `aggregate_state` is computed at read time from child backup counts:
+ * - `"running"` — at least one child is `"pending"` or `"running"`.
+ * - `"failed"` — at least one child is `"failed"` and none are running.
+ * - `"completed"` — all children are `"completed"`.
+ */
+export type ScheduleRunSummary = {
+    /**
+     * Aggregate state computed from child counts (see struct docs).
+     */
+    aggregate_state: string;
+    /**
+     * Number of children in `state = "completed"`.
+     */
+    completed_jobs: number;
+    /**
+     * Number of children in `state = "failed"`.
+     */
+    failed_jobs: number;
+    /**
+     * When all children reached a terminal state. `None` while any child is
+     * still `"pending"` or `"running"`.
+     */
+    finished_at?: string | null;
+    /**
+     * Number of children in `state = "pending"`.
+     */
+    pending_jobs: number;
+    /**
+     * `schedule_runs.id` for this tick.
+     */
+    run_id: number;
+    /**
+     * Number of children in `state = "running"`.
+     */
+    running_jobs: number;
+    /**
+     * FK to `backup_schedules.id`.
+     */
+    schedule_id: number;
+    /**
+     * When the fan-out started (ISO 8601 / RFC 3339).
+     */
+    started_at: string;
+    /**
+     * Total number of child backup jobs in this run.
+     */
+    total_jobs: number;
+    /**
+     * How the run was triggered: `"cron"` or `"manual"`.
+     */
+    triggered_by: string;
+};
+
+/**
+ * Paginated list of schedule run summaries returned by the new
+ * [`BackupService::list_schedule_runs`].
+ */
+export type ScheduleRunSummaryList = {
+    /**
+     * Current page (1-based).
+     */
+    page: number;
+    /**
+     * Number of items per page.
+     */
+    page_size: number;
+    /**
+     * Run summaries, newest first. Includes synthetic single-job rows for
+     * legacy `backups` rows that have `schedule_id` set but no
+     * `schedule_run_id` (pre-fan-out history).
+     */
+    runs: Array<ScheduleRunSummary>;
+    /**
+     * Total number of run entries across all pages.
+     */
+    total: number;
+};
+
 export type ScreenshotSettings = {
     enabled?: boolean;
     provider?: string;
@@ -10141,11 +10980,6 @@ export type SendEmailResponseBody = {
     status: string;
 };
 
-export type SendMessageBody = {
-    content: string;
-    metadata?: unknown;
-};
-
 export type SentryChunkUploadResponse = {
     accept: Array<string>;
     chunkSize: number;
@@ -10233,6 +11067,92 @@ export type ServiceAccessInfo = {
  * What to do with a service during migration
  */
 export type ServiceAction = 'create' | 'link-external' | 'skip';
+
+/**
+ * A single backup entry in the per-service backup list.
+ */
+export type ServiceBackupEntryResponse = {
+    /**
+     * UUID string assigned at backup creation time.
+     */
+    backup_id: string;
+    /**
+     * Backup variant (e.g. "full", "incremental").
+     */
+    backup_type: string;
+    /**
+     * Compression algorithm used (e.g. "gzip").
+     */
+    compression_type: string;
+    /**
+     * Engine-reported error message, populated when `state = "failed"`.
+     */
+    error_message?: string | null;
+    /**
+     * Row ID from `external_service_backups`.
+     */
+    external_service_backup_id: number;
+    /**
+     * ISO 8601 timestamp when the backup finished, if known.
+     */
+    finished_at?: string | null;
+    /**
+     * Row ID from the `backups` table.
+     */
+    id: number;
+    /**
+     * Human-friendly display name.
+     */
+    name: string;
+    /**
+     * Object key or `s3://` URL for the backup data.
+     */
+    s3_location: string;
+    /**
+     * FK to `s3_sources.id`.
+     */
+    s3_source_id: number;
+    /**
+     * Human-readable name of the S3 source.
+     */
+    s3_source_name: string;
+    /**
+     * Size of the backup in bytes, if available.
+     */
+    size_bytes?: number | null;
+    /**
+     * ISO 8601 timestamp when the backup started.
+     */
+    started_at: string;
+    /**
+     * Current state: "completed", "running", "failed".
+     */
+    state: string;
+};
+
+/**
+ * Paginated list of backups for a specific external service.
+ *
+ * Returned by `GET /backups/external-services/{service_id}/backups`.
+ */
+export type ServiceBackupListResponse = {
+    /**
+     * Backups belonging to this service, newest first.
+     */
+    backups: Array<ServiceBackupEntryResponse>;
+    /**
+     * Current page (1-based).
+     */
+    page: number;
+    /**
+     * Number of items per page.
+     */
+    page_size: number;
+    /**
+     * Total number of backups for this service across all pages.
+     */
+    total: number;
+};
 
 export type ServiceHealthResponse = {
     /**
@@ -10374,6 +11294,63 @@ export type ServicePlan = {
      * Service version to create (e.g., "16" for Postgres 16)
      */
     version?: string | null;
+};
+
+/**
+ * Optional cgroup resource limits applied to a service container.
+ *
+ * All fields are `Option<i64>`: `None` means "no limit" (the kernel default),
+ * matching Docker's behavior when the corresponding `HostConfig` field is
+ * left at zero. Operators opt in to limits explicitly through the
+ * `PATCH /external-services/{id}/resources` endpoint or by writing the
+ * `resources` block into `ServiceConfig::parameters` at create time.
+ *
+ * These map directly onto bollard fields:
+ * - `memory_mb`     → `HostConfig.memory`        (bytes)
+ * - `memory_swap_mb`→ `HostConfig.memory_swap`   (bytes; ≥ memory)
+ * - `nano_cpus`     → `HostConfig.nano_cpus`     (1e9 = 1 full CPU)
+ * - `cpu_shares`    → `HostConfig.cpu_shares`    (relative weight, default 1024)
+ *
+ * IMPORTANT: enabling hard memory limits causes the kernel OOM killer to
+ * terminate the container when the working set exceeds the limit. The
+ * container will restart (RestartPolicy::ALWAYS) but in-flight queries
+ * fail. Surface this clearly in any UI that lets users set limits.
+ */
+export type ServiceResourceLimits = {
+    /**
+     * Relative CPU weight (default 1024). Only used when `nano_cpus` is None.
+     */
+    cpu_shares?: number | null;
+    /**
+     * Hard memory limit in MiB. None = unlimited.
+     */
+    memory_mb?: number | null;
+    /**
+     * Memory + swap limit in MiB. None = unlimited.
+     * MUST be >= memory_mb when both are set; Docker rejects the request otherwise.
+     * Set equal to `memory_mb` to disable swap entirely.
+     */
+    memory_swap_mb?: number | null;
+    /**
+     * CPU quota in nano-cpus. 1_000_000_000 = 1 full CPU core. None = unlimited.
+     */
+    nano_cpus?: number | null;
+};
+
+/**
+ * Aggregate runtime info for an external service. For standalone services,
+ * `members` has exactly one entry. For clusters, one entry per member.
+ */
+export type ServiceRuntimeReport = {
+    members: Array<ContainerRuntimeInfo>;
+    service_id: number;
+    topology: string;
+};
+
+export type ServiceStatsReport = {
+    members: Array<ContainerStatsSample>;
+    service_id: number;
+    topology: string;
 };
 
 export type ServiceTypeInfo = {
@@ -11045,6 +12022,22 @@ export type SpanRecord = {
     trace_id: string;
 };
 
+export type SpanRow = {
+    attributes: unknown;
+    attributes_truncated: boolean;
+    deployment_id?: number | null;
+    duration_ms?: number | null;
+    environment_id?: number | null;
+    id: string;
+    operation: string;
+    parent_span_id?: string | null;
+    service: string;
+    span_id: string;
+    status?: string | null;
+    trace_id: string;
+    ts: string;
+};
+
 /**
  * Span status code.
  */
@@ -11108,6 +12101,12 @@ export type SpeedMetricsPayload = {
     viewportWidth?: number | null;
 };
 
+export type StaleSlot = {
+    active: boolean;
+    retained_bytes: number;
+    slot_name: string;
+};
+
 export type StartAnalysisRequest = {
     error_group_id: number;
     user_context?: string | null;
@@ -11144,56 +12143,6 @@ export type StartRestoreRequest = RestoreRequestMode & {
      * is used.
      */
     s3_source_id?: number | null;
-};
-
-export type StartSessionRequest = {
-    /**
-     * When resuming from an agent run, pass the run ID so that Claude CLI
-     * session files are injected into the workspace sandbox for `--resume`.
-     */
-    agent_run_id?: number | null;
-    /**
-     * Override the provider's default model for this session only. Leave
-     * `None` to use `agent_sandbox.providers[id].default_model` from platform
-     * settings (which itself can be `None`, meaning "let the CLI pick").
-     */
-    ai_model?: string | null;
-    ai_provider?: string | null;
-    /**
-     * Optional: when set, the sandbox clones `base_branch_name` from the
-     * remote and then creates `branch_name` as a new local branch on top of
-     * it. Use this to start a session "off main" without touching the remote.
-     */
-    base_branch_name?: string | null;
-    /**
-     * Branch to check out in the workspace sandbox. Defaults to the project's main branch.
-     * If `base_branch_name` is also set, this is the *new* branch to be created
-     * locally off `base_branch_name`.
-     */
-    branch_name?: string | null;
-    /**
-     * CPU limit in vCPU cores (e.g. 2.0). `None` → server default applies.
-     */
-    cpu_limit?: number | null;
-    /**
-     * Slugs of MCP server definitions to inject into the sandbox. Deep-merged
-     * into `/home/temps/.claude.json` (user-level config, kept out of the
-     * bind-mounted repo to avoid leaking resolved secrets into PR diffs) at
-     * session start. Resolved from `project_mcp_definitions` (falls back to
-     * global).
-     */
-    mcp_servers?: Array<string> | null;
-    /**
-     * Memory limit in MB. `None` → server default applies.
-     */
-    memory_limit_mb?: number | null;
-    metadata?: unknown;
-    /**
-     * Slugs of skill definitions to inject into the sandbox. Resolved from
-     * `project_skill_definitions` (falls back to global). Written to
-     * `/home/temps/.claude/skills/<slug>/` at session start.
-     */
-    skills?: Array<string> | null;
 };
 
 export type StatResponse = {
@@ -11398,12 +12347,6 @@ export type StripeConfig = {
      * `price_allowlist` via OR — if either list has a match, accept.
      */
     product_allowlist?: Array<string>;
-};
-
-export type SupersedeBody = {
-    new_fact: string;
-    new_tags?: Array<string>;
-    source_run_id?: number | null;
 };
 
 export type SyncedRepositoryListQuery = {
@@ -11973,6 +12916,47 @@ export type UpdateAutomaticDeployRequest = {
 };
 
 /**
+ * Request body for updating an existing backup schedule via `PATCH /api/backups/schedules/{id}`.
+ *
+ * All fields are optional; only present fields are updated. Absent fields
+ * leave the corresponding column unchanged.
+ */
+export type UpdateBackupScheduleRequest = {
+    /**
+     * New human-readable description. Pass an empty string `""` to clear.
+     */
+    description?: string | null;
+    /**
+     * Enable or disable the schedule. Skipped when `None`.
+     */
+    enabled?: boolean | null;
+    /**
+     * Per-schedule wall-clock timeout override (seconds).
+     *
+     * - `None` (field absent) — leave current value unchanged
+     * - `Some(None)` (field present, JSON `null`) — clear override; fall back to engine default
+     * - `Some(Some(n))` — set to `n` seconds (must be >= 60)
+     */
+    max_runtime_secs?: number | null;
+    /**
+     * New schedule name. Skipped when `None`. Must not be empty if provided.
+     */
+    name?: string | null;
+    /**
+     * Days to retain backups produced by this schedule. Must be >= 1.
+     */
+    retention_period?: number | null;
+    /**
+     * New cron expression. When changed, `next_run` is recomputed.
+     */
+    schedule_expression?: string | null;
+    /**
+     * Replace the full tag list. Skipped when `None`.
+     */
+    tags?: Array<string> | null;
+};
+
+/**
  * Request to update Blob service configuration
  */
 export type UpdateBlobRequest = {
@@ -12048,12 +13032,6 @@ export type UpdateDnsProviderRequest = {
     name?: string | null;
 };
 
-export type UpdateEmailProviderRequest = {
-    config: EmailConfig;
-    enabled?: boolean | null;
-    name?: string | null;
-};
-
 export type UpdateEnvironmentSettingsRequest = {
     /**
      * Anti-affinity: spread replicas across different nodes.
@@ -12125,6 +13103,42 @@ export type UpdateEnvironmentSettingsRequest = {
      * Max seconds to wait for containers to start on wake (5-120). Default: 30.
      */
     wake_timeout_seconds?: number | null;
+};
+
+/**
+ * Request to rename an environment's auto-managed subdomain.
+ *
+ * The subdomain is the host label inserted in front of the platform's
+ * preview domain (e.g. `myapp` in `myapp.preview.temps.sh`). Renaming
+ * replaces the previous subdomain entirely — the old hostname stops
+ * resolving immediately after this request succeeds.
+ */
+export type UpdateEnvironmentSubdomainRequest = {
+    /**
+     * New subdomain label. Must be a DNS-safe slug (lowercase letters,
+     * digits, and hyphens, 1-63 characters). The value is slugified
+     * server-side, so casing and disallowed characters are normalized.
+     */
+    subdomain: string;
+};
+
+export type UpdateEnvironmentVariableRequest = {
+    environment_ids: Array<number>;
+    include_in_preview?: boolean;
+    /**
+     * Optional secret-flag transition.
+     * - `Some(true)` promotes a regular var to a secret.
+     * - `Some(false)` is rejected if the row is already secret (one-way flag).
+     * - `None` (omitted) leaves the flag unchanged.
+     */
+    is_secret?: boolean | null;
+    key: string;
+    /**
+     * New plaintext value. `None` (omitted) keeps the existing ciphertext,
+     * which is the only way to edit a secret env var without re-typing its
+     * value (e.g. changing which environments it applies to).
+     */
+    value?: string | null;
 };
 
 export type UpdateErrorGroupRequest = {
@@ -12217,6 +13231,12 @@ export type UpdateMcpRequest = {
         [key: string]: unknown;
     };
     description?: string | null;
+    name?: string | null;
+};
+
+export type UpdateNotificationEmailProviderRequest = {
+    config: EmailConfig;
+    enabled?: boolean | null;
     name?: string | null;
 };
 
@@ -12368,35 +13388,6 @@ export type UpdateSecretBody = {
 export type UpdateSelfRequest = {
     email?: string | null;
     name?: string | null;
-};
-
-/**
- * Body for `PATCH /projects/{project_id}/workspace/sessions/{session_id}`.
- * All fields are optional — only provided fields are updated.
- */
-export type UpdateSessionBody = {
-    /**
-     * CPU limit in vCPU cores (e.g. 2.0). `null` clears the override.
-     */
-    cpu_limit?: number | null;
-    /**
-     * Per-session idle timeout in minutes. Send `null` to clear the
-     * override (fall back to server default). Omit to leave unchanged.
-     */
-    idle_timeout_minutes?: number | null;
-    /**
-     * Memory limit in MB. `null` clears the override.
-     */
-    memory_limit_mb?: number | null;
-    /**
-     * PID limit. `null` clears the override.
-     */
-    pids_limit?: number | null;
-    /**
-     * User-provided title. Send `null` to clear (fall back to "Session #{id}").
-     * Omit to leave unchanged.
-     */
-    title?: string | null;
 };
 
 export type UpdateSessionDurationRequest = {
@@ -12863,6 +13854,62 @@ export type VisitorDetails = {
     visitor_id: string;
 };
 
+/**
+ * A single facet value with its visitor count. Used to populate filter
+ * dropdowns on the visitors page (e.g. "Germany — 1,234 visitors").
+ */
+export type VisitorFacetValue = {
+    /**
+     * Optional secondary code for the value. Currently only populated for
+     * the `country` facet, where it carries the 2-letter ISO country code
+     * so the UI can render a flag without re-mapping.
+     */
+    code?: string | null;
+    /**
+     * Distinct visitor count matching this value in the current segment.
+     */
+    count: number;
+    /**
+     * The dimension value (e.g. "United States", "Chrome", "google.com").
+     * `None` is encoded as the literal string "Direct" for referrer and as
+     * the empty string for the rest.
+     */
+    value: string;
+};
+
+/**
+ * All filter dropdown contents in one response. Each list is the top N
+ * values for that dimension within the current date range and segment
+ * (excluding the dimension being queried so the dropdown still shows
+ * alternatives when a value is already selected).
+ */
+export type VisitorFacets = {
+    channel: Array<VisitorFacetValue>;
+    city: Array<VisitorFacetValue>;
+    country: Array<VisitorFacetValue>;
+    referrer: Array<VisitorFacetValue>;
+    region: Array<VisitorFacetValue>;
+};
+
+/**
+ * Query parameters for the visitor-facets endpoint. Mirrors the shape of
+ * `VisitorsListQuery` so the same segment filters apply — facet counts are
+ * always computed against the *currently filtered* visitor pool, minus the
+ * dimension being aggregated.
+ */
+export type VisitorFacetsQuery = VisitorSegmentFilters & {
+    end_date: string;
+    environment_id?: number | null;
+    has_activity_only?: boolean | null;
+    include_crawlers?: boolean | null;
+    /**
+     * Maximum number of values returned per dimension (default: 50, max: 200).
+     */
+    per_facet_limit?: number | null;
+    project_id: number;
+    start_date: string;
+};
+
 export type VisitorInfo = {
     city?: string | null;
     country?: string | null;
@@ -12946,6 +13993,36 @@ export type VisitorRecord = {
     visitor_id: string;
 };
 
+/**
+ * Optional segment filters for [`VisitorsListQuery`]. Each filter narrows the
+ * result set to visitors who match the given dimension value within the date
+ * range. All filters resolve against `visitor` / `ip_geolocations` — by
+ * design we never touch the events hypertable here so filtering stays fast
+ * regardless of event volume.
+ */
+export type VisitorSegmentFilters = {
+    /**
+     * First-touch marketing channel (matches `visitor.first_channel`)
+     */
+    filter_channel?: string | null;
+    /**
+     * Geolocation city (matches `ip_geolocations.city`)
+     */
+    filter_city?: string | null;
+    /**
+     * Geolocation country (matches `ip_geolocations.country`)
+     */
+    filter_country?: string | null;
+    /**
+     * First-touch referrer hostname (matches `visitor.first_referrer_hostname`)
+     */
+    filter_referrer?: string | null;
+    /**
+     * Geolocation region (matches `ip_geolocations.region`)
+     */
+    filter_region?: string | null;
+};
+
 export type VisitorSessionsQuery = {
     environment_id?: number | null;
     limit?: number | null;
@@ -13008,7 +14085,7 @@ export type VisitorWithGeolocation = {
     visitor_id: string;
 };
 
-export type VisitorsListQuery = {
+export type VisitorsListQuery = VisitorSegmentFilters & {
     end_date: string;
     environment_id?: number | null;
     /**
@@ -13076,6 +14153,34 @@ export type VulnerabilityResponse = {
     type?: string | null;
     vulnerability_id: string;
 };
+
+/**
+ * One actionable warning surfaced to the UI.
+ *
+ * Each variant carries the data needed to render a remediation hint without
+ * the frontend re-querying anything.
+ */
+export type WalWarning = {
+    kind: 'wal_bloat';
+    max_wal_size_bytes: number;
+    pg_wal_bytes: number;
+    ratio: number;
+} | {
+    active: boolean;
+    kind: 'stale_slot';
+    retained_bytes: number;
+    slot_name: string;
+} | {
+    kind: 'archive_backlog';
+    ready_count: number;
+} | {
+    kind: 'archive_mode_without_command';
+} | {
+    kind: 'wal_not_recycled';
+    oldest_age_secs: number;
+};
+
+export type WalWarningSeverity = 'warning' | 'critical';
 
 /**
  * Configuration for a generic webhook notification provider
@@ -13222,182 +14327,6 @@ export type WorkloadStatus = 'running' | 'paused' | 'stopped' | 'exited' | 'fail
  */
 export type WorkloadType = 'container' | 'function' | 'static-site' | 'server-side-app' | 'worker' | 'database' | 'message-queue' | 'cache' | 'cron-job' | 'other';
 
-export type WorkspaceMessageResponse = {
-    content: string;
-    created_at: string;
-    id: number;
-    metadata?: unknown;
-    role: string;
-    session_id: number;
-};
-
-export type WorkspacePaginationParams = {
-    page?: number | null;
-    page_size?: number | null;
-};
-
-export type WorkspacePasteImageRequest = {
-    /**
-     * base64-encoded image bytes (no data: prefix)
-     */
-    data: string;
-    /**
-     * MIME type, used to pick the file extension. Defaults to "image/png".
-     */
-    mime?: string | null;
-};
-
-export type WorkspacePasteImageResponse = {
-    /**
-     * Path inside the sandbox where the image was written.
-     */
-    path: string;
-};
-
-/**
- * Live resource-usage snapshot for a session's sandbox container.
- *
- * All "used" fields are instantaneous readings from Docker's cgroup stats
- * (one-shot `stats` call, no streaming). Limits are what the sandbox was
- * created with. CPU limit is in vCPU cores; `cpu_used_cores` is the
- * fractional cores the container is currently consuming (e.g. 0.42 =
- * 42% of one core = 21% of a 2-core limit).
- */
-export type WorkspaceSandboxStatsResponse = {
-    container_id: string;
-    /**
-     * CPU limit the container was created with, in vCPU cores.
-     */
-    cpu_limit_cores: number;
-    /**
-     * Percent of the container's CPU budget currently in use (0–100).
-     */
-    cpu_percent: number;
-    /**
-     * CPU cores currently consumed (0.0 → cpu_limit_cores).
-     */
-    cpu_used_cores: number;
-    /**
-     * Hard memory limit the container was created with, in bytes.
-     */
-    memory_limit_bytes: number;
-    /**
-     * Percent of the container's RAM budget currently in use (0–100).
-     */
-    memory_percent: number;
-    /**
-     * RAM currently consumed, in bytes (RSS-equivalent — Docker's
-     * `usage - cache` when available, otherwise raw `usage`).
-     */
-    memory_used_bytes: number;
-};
-
-export type WorkspaceSessionListResponse = {
-    page: number;
-    page_size: number;
-    sessions: Array<WorkspaceSessionResponse>;
-    total: number;
-};
-
-export type WorkspaceSessionResponse = {
-    ai_model?: string | null;
-    ai_provider: string;
-    base_branch_name?: string | null;
-    branch_name?: string | null;
-    closed_at?: string | null;
-    /**
-     * CPU limit in vCPU cores. `None` → server default applies.
-     */
-    cpu_limit?: number | null;
-    estimated_cost_cents: number;
-    files_changed: number;
-    id: number;
-    /**
-     * Per-session idle timeout override in minutes. `None` means the
-     * server-wide default applies (currently 60).
-     */
-    idle_timeout_minutes?: number | null;
-    last_activity_at: string;
-    /**
-     * Slugs of MCP server definitions attached to this session (injected at start).
-     */
-    mcp_servers: Array<string>;
-    /**
-     * Memory limit in MB. `None` → server default applies.
-     */
-    memory_limit_mb?: number | null;
-    /**
-     * PID limit. `None` → server default applies.
-     */
-    pids_limit?: number | null;
-    /**
-     * Plaintext preview password — populated ONLY in the response to
-     * `POST /sessions` (creation) and `POST /sessions/:id/preview-password/regenerate`.
-     * Always `None` on list / get / update responses.
-     */
-    preview_password?: string | null;
-    /**
-     * Last 4 chars of the current preview password (for UI disambiguation).
-     * Never contains the full password.
-     */
-    preview_password_hint?: string | null;
-    /**
-     * URL template with `{port}` placeholder, so the UI can substitute
-     * arbitrary ports.
-     */
-    preview_url_template: string;
-    /**
-     * Pre-built URLs for common dev-server ports.
-     */
-    preview_urls: Array<PreviewPortUrl>;
-    project_id: number;
-    /**
-     * Opaque external identifier (`wss_<16hex>`). Used in preview URLs
-     * so sessions can't be enumerated by walking numeric ids.
-     */
-    public_id: string;
-    sandbox_container_id?: string | null;
-    /**
-     * Slugs of skill definitions attached to this session (injected at start).
-     */
-    skills: Array<string>;
-    started_at: string;
-    status: string;
-    /**
-     * User-provided session title. `None` → UI falls back to `Session #{id}`.
-     */
-    title?: string | null;
-    tokens_input: number;
-    tokens_output: number;
-    user_id: number;
-};
-
-export type WorkspaceSessionWithMessagesResponse = {
-    messages: Array<WorkspaceMessageResponse>;
-    session: WorkspaceSessionResponse;
-};
-
-export type WorkspaceTerminalTab = {
-    /**
-     * Number of tmux clients currently attached to this session. 0 means
-     * the tab is alive but no browser is viewing it.
-     */
-    attached_clients: number;
-    /**
-     * Stable id chosen by the client. Combined with `kind` to form the tmux
-     * session name.
-     */
-    id: string;
-    /**
-     * `claude` or `shell` — drives which command runs in a fresh tab.
-     */
-    kind: string;
-};
-
-export type WorkspaceTerminalTabsResponse = {
-    tabs: Array<WorkspaceTerminalTab>;
-};
-
 export type WriteFileBody = {
     /**
      * File contents, base64-encoded. Required — lets callers ship binary
@@ -13428,13 +14357,6 @@ export type WriteFilesResponse = {
      * (if any). On full success this equals `files.len()`.
      */
     written: number;
-};
-
-export type WriteMemoryBody = {
-    confidence?: number | null;
-    fact: string;
-    source_run_id?: number | null;
-    tags?: Array<string>;
 };
 
 /**
@@ -15343,6 +16265,82 @@ export type GetSessionLogsResponses = {
 
 export type GetSessionLogsResponse = GetSessionLogsResponses[keyof GetSessionLogsResponses];
 
+export type GetVisitorFacetsData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Start date in format YYYY-MM-DD HH:MM:SS
+         */
+        start_date: string;
+        /**
+         * End date in format YYYY-MM-DD HH:MM:SS
+         */
+        end_date: string;
+        /**
+         * Project ID or slug
+         */
+        project_id: number;
+        /**
+         * Environment ID (optional)
+         */
+        environment_id?: number;
+        /**
+         * Include crawlers (default: false)
+         */
+        include_crawlers?: boolean;
+        /**
+         * Hide ghost visitors (default: true)
+         */
+        has_activity_only?: boolean;
+        /**
+         * Top N values per dimension (default: 50, max: 200)
+         */
+        per_facet_limit?: number;
+        /**
+         * Geolocation country
+         */
+        filter_country?: string;
+        /**
+         * Geolocation region
+         */
+        filter_region?: string;
+        /**
+         * Geolocation city
+         */
+        filter_city?: string;
+        /**
+         * First-touch channel
+         */
+        filter_channel?: string;
+        /**
+         * First-touch referrer hostname (use 'Direct' for null)
+         */
+        filter_referrer?: string;
+    };
+    url: '/analytics/visitor-facets';
+};
+
+export type GetVisitorFacetsErrors = {
+    /**
+     * Invalid date format or project not found
+     */
+    400: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GetVisitorFacetsResponses = {
+    /**
+     * Top values per dimension
+     */
+    200: VisitorFacets;
+};
+
+export type GetVisitorFacetsResponse = GetVisitorFacetsResponses[keyof GetVisitorFacetsResponses];
+
 export type GetVisitorsData = {
     body?: never;
     path?: never;
@@ -15379,6 +16377,26 @@ export type GetVisitorsData = {
          * Filter to only include visitors with recorded activity (events/sessions). When true, excludes ghost visitors (default: true)
          */
         has_activity_only?: boolean;
+        /**
+         * Geolocation country
+         */
+        filter_country?: string;
+        /**
+         * Geolocation region
+         */
+        filter_region?: string;
+        /**
+         * Geolocation city
+         */
+        filter_city?: string;
+        /**
+         * First-touch channel
+         */
+        filter_channel?: string;
+        /**
+         * First-touch referrer hostname (use 'Direct' for null)
+         */
+        filter_referrer?: string;
     };
     url: '/analytics/visitors';
 };
@@ -16069,36 +17087,173 @@ export type DeactivateApiKeyResponses = {
 
 export type DeactivateApiKeyResponse = DeactivateApiKeyResponses[keyof DeactivateApiKeyResponses];
 
-export type CliLoginData = {
-    body: CliLoginPasswordRequest;
+export type CliDeviceApproveData = {
+    body: CliDeviceApproveRequest;
     path?: never;
     query?: never;
-    url: '/auth/cli/login';
+    url: '/auth/cli/device/approve';
 };
 
-export type CliLoginErrors = {
+export type CliDeviceApproveErrors = {
     /**
-     * Invalid credentials or MFA code
+     * Unauthorized
      */
     401: unknown;
     /**
-     * User has no role assigned
+     * Unknown user_code
      */
-    403: unknown;
+    404: unknown;
+    /**
+     * Already resolved
+     */
+    409: unknown;
+    /**
+     * Session expired
+     */
+    410: unknown;
     /**
      * Internal server error
      */
     500: unknown;
 };
 
-export type CliLoginResponses = {
+export type CliDeviceApproveResponses = {
     /**
-     * Login successful or MFA challenge issued
+     * Session approved; CLI can now claim the API key
      */
-    200: CliLoginResponse;
+    200: CliDeviceApproveResponse;
 };
 
-export type CliLoginResponse2 = CliLoginResponses[keyof CliLoginResponses];
+export type CliDeviceApproveResponse2 = CliDeviceApproveResponses[keyof CliDeviceApproveResponses];
+
+export type CliDeviceDenyData = {
+    body: CliDeviceApproveRequest;
+    path?: never;
+    query?: never;
+    url: '/auth/cli/device/deny';
+};
+
+export type CliDeviceDenyErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Unknown user_code
+     */
+    404: unknown;
+    /**
+     * Already resolved
+     */
+    409: unknown;
+    /**
+     * Session expired
+     */
+    410: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type CliDeviceDenyResponses = {
+    /**
+     * Session denied
+     */
+    200: CliDeviceApproveResponse;
+};
+
+export type CliDeviceDenyResponse = CliDeviceDenyResponses[keyof CliDeviceDenyResponses];
+
+export type CliDeviceLookupData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * `user_code` as displayed in the CLI / pasted into the URL.
+         */
+        user_code: string;
+    };
+    url: '/auth/cli/device/lookup';
+};
+
+export type CliDeviceLookupErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Unknown user_code
+     */
+    404: unknown;
+    /**
+     * Device session expired
+     */
+    410: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type CliDeviceLookupResponses = {
+    /**
+     * Device session metadata
+     */
+    200: CliDeviceLookupResponse;
+};
+
+export type CliDeviceLookupResponse2 = CliDeviceLookupResponses[keyof CliDeviceLookupResponses];
+
+export type CliDevicePollData = {
+    body: CliDevicePollRequest;
+    path?: never;
+    query?: never;
+    url: '/auth/cli/device/poll';
+};
+
+export type CliDevicePollErrors = {
+    /**
+     * Unknown device_code
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type CliDevicePollResponses = {
+    /**
+     * Poll result; check `status` field
+     */
+    200: CliDevicePollResponse;
+};
+
+export type CliDevicePollResponse2 = CliDevicePollResponses[keyof CliDevicePollResponses];
+
+export type CliDeviceStartData = {
+    body: CliDeviceStartRequest;
+    path?: never;
+    query?: never;
+    url: '/auth/cli/device/start';
+};
+
+export type CliDeviceStartErrors = {
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type CliDeviceStartResponses = {
+    /**
+     * Device session created
+     */
+    200: CliDeviceStartResponse;
+};
+
+export type CliDeviceStartResponse2 = CliDeviceStartResponses[keyof CliDeviceStartResponses];
 
 export type CliLogoutData = {
     body?: never;
@@ -16353,6 +17508,35 @@ export type VerifyMfaChallengeResponses = {
 
 export type VerifyMfaChallengeResponse = VerifyMfaChallengeResponses[keyof VerifyMfaChallengeResponses];
 
+export type ListBackupAlertsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/backups/alerts';
+};
+
+export type ListBackupAlertsErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type ListBackupAlertsError = ListBackupAlertsErrors[keyof ListBackupAlertsErrors];
+
+export type ListBackupAlertsResponses = {
+    /**
+     * List of open backup alerts
+     */
+    200: BackupAlertListResponse;
+};
+
+export type ListBackupAlertsResponse = ListBackupAlertsResponses[keyof ListBackupAlertsResponses];
+
 export type RunExternalServiceBackupData = {
     body: RunExternalServiceBackupRequest;
     path: {
@@ -16381,12 +17565,55 @@ export type RunExternalServiceBackupError = RunExternalServiceBackupErrors[keyof
 
 export type RunExternalServiceBackupResponses = {
     /**
-     * Backup started successfully
+     * Backup enqueued for async execution
      */
-    200: ExternalServiceBackupResponse;
+    202: ExternalServiceBackupResponse;
 };
 
 export type RunExternalServiceBackupResponse = RunExternalServiceBackupResponses[keyof RunExternalServiceBackupResponses];
+
+export type ListExternalServiceBackupsData = {
+    body?: never;
+    path: {
+        /**
+         * External service ID
+         */
+        service_id: number;
+    };
+    query?: {
+        /**
+         * Page number (1-based). Defaults to 1.
+         */
+        page?: number;
+        /**
+         * Items per page. Defaults to 20, max 100.
+         */
+        page_size?: number;
+    };
+    url: '/backups/external-services/{service_id}/backups';
+};
+
+export type ListExternalServiceBackupsErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type ListExternalServiceBackupsError = ListExternalServiceBackupsErrors[keyof ListExternalServiceBackupsErrors];
+
+export type ListExternalServiceBackupsResponses = {
+    /**
+     * Paginated list of backups for this service
+     */
+    200: ServiceBackupListResponse;
+};
+
+export type ListExternalServiceBackupsResponse = ListExternalServiceBackupsResponses[keyof ListExternalServiceBackupsResponses];
 
 export type ListS3SourcesData = {
     body?: never;
@@ -16581,7 +17808,14 @@ export type ListSourceBackupsData = {
     path: {
         id: number;
     };
-    query?: never;
+    query?: {
+        /**
+         * When `true`, scan the S3 bucket for backups not tracked in the
+         * local database (useful after disaster-recovery from another Temps
+         * instance).  Defaults to `false` — the fast DB-only path.
+         */
+        include_s3_scan?: boolean;
+    };
     url: '/backups/s3-sources/{id}/backups';
 };
 
@@ -16639,9 +17873,9 @@ export type RunBackupForSourceError = RunBackupForSourceErrors[keyof RunBackupFo
 
 export type RunBackupForSourceResponses = {
     /**
-     * Backup started successfully
+     * Backup enqueued for async execution
      */
-    200: BackupResponse;
+    202: BackupResponse;
 };
 
 export type RunBackupForSourceResponse = RunBackupForSourceResponses[keyof RunBackupForSourceResponses];
@@ -16715,6 +17949,80 @@ export type TestS3SourceConnectionResponses = {
 };
 
 export type TestS3SourceConnectionResponse = TestS3SourceConnectionResponses[keyof TestS3SourceConnectionResponses];
+
+export type CancelScheduleRunData = {
+    body?: never;
+    path: {
+        id: number;
+    };
+    query?: never;
+    url: '/backups/schedule-runs/{id}/cancel';
+};
+
+export type CancelScheduleRunErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Schedule run not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type CancelScheduleRunError = CancelScheduleRunErrors[keyof CancelScheduleRunErrors];
+
+export type CancelScheduleRunResponses = {
+    /**
+     * Cancel processed (idempotent)
+     */
+    200: CancelBackupResponse;
+};
+
+export type CancelScheduleRunResponse = CancelScheduleRunResponses[keyof CancelScheduleRunResponses];
+
+export type ListScheduleRunJobsData = {
+    body?: never;
+    path: {
+        id: number;
+    };
+    query?: never;
+    url: '/backups/schedule-runs/{id}/jobs';
+};
+
+export type ListScheduleRunJobsErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type ListScheduleRunJobsError = ListScheduleRunJobsErrors[keyof ListScheduleRunJobsErrors];
+
+export type ListScheduleRunJobsResponses = {
+    /**
+     * Jobs for this scheduler run
+     */
+    200: Array<ScheduleRunJobEntry>;
+};
+
+export type ListScheduleRunJobsResponse = ListScheduleRunJobsResponses[keyof ListScheduleRunJobsResponses];
 
 export type ListBackupSchedulesData = {
     body?: never;
@@ -16834,6 +18142,45 @@ export type GetBackupScheduleResponses = {
 
 export type GetBackupScheduleResponse = GetBackupScheduleResponses[keyof GetBackupScheduleResponses];
 
+export type UpdateBackupScheduleData = {
+    body: UpdateBackupScheduleRequest;
+    path: {
+        id: number;
+    };
+    query?: never;
+    url: '/backups/schedules/{id}';
+};
+
+export type UpdateBackupScheduleErrors = {
+    /**
+     * Validation error
+     */
+    400: ProblemDetails;
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Schedule not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type UpdateBackupScheduleError = UpdateBackupScheduleErrors[keyof UpdateBackupScheduleErrors];
+
+export type UpdateBackupScheduleResponses = {
+    /**
+     * Schedule updated
+     */
+    200: BackupScheduleResponse;
+};
+
+export type UpdateBackupScheduleResponse = UpdateBackupScheduleResponses[keyof UpdateBackupScheduleResponses];
+
 export type ListBackupsForScheduleData = {
     body?: never;
     path: {
@@ -16921,6 +18268,97 @@ export type EnableBackupScheduleResponses = {
 
 export type EnableBackupScheduleResponse = EnableBackupScheduleResponses[keyof EnableBackupScheduleResponses];
 
+export type RunScheduleNowData = {
+    body?: never;
+    path: {
+        id: number;
+    };
+    query?: never;
+    url: '/backups/schedules/{id}/run';
+};
+
+export type RunScheduleNowErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Schedule not found
+     */
+    404: ProblemDetails;
+    /**
+     * Run already in flight or schedule disabled
+     */
+    409: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type RunScheduleNowError = RunScheduleNowErrors[keyof RunScheduleNowErrors];
+
+export type RunScheduleNowResponses = {
+    /**
+     * Fan-out run enqueued for async execution
+     */
+    202: ScheduleRunResponse;
+};
+
+export type RunScheduleNowResponse = RunScheduleNowResponses[keyof RunScheduleNowResponses];
+
+export type ListScheduleRunsData = {
+    body?: never;
+    path: {
+        id: number;
+    };
+    query?: {
+        /**
+         * Page number (1-based, defaults to 1, clamped to 1 if < 1).
+         */
+        page?: number;
+        /**
+         * Items per page (defaults to 20, clamped to 100 if > 100).
+         */
+        page_size?: number;
+    };
+    url: '/backups/schedules/{id}/runs';
+};
+
+export type ListScheduleRunsErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Schedule not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type ListScheduleRunsError = ListScheduleRunsErrors[keyof ListScheduleRunsErrors];
+
+export type ListScheduleRunsResponses = {
+    /**
+     * Paginated run history for the schedule
+     */
+    200: ScheduleRunSummaryList;
+};
+
+export type ListScheduleRunsResponse = ListScheduleRunsResponses[keyof ListScheduleRunsResponses];
+
 export type GetBackupData = {
     body?: never;
     path: {
@@ -16955,6 +18393,87 @@ export type GetBackupResponses = {
 };
 
 export type GetBackupResponse = GetBackupResponses[keyof GetBackupResponses];
+
+export type CancelBackupData = {
+    body?: never;
+    path: {
+        id: number;
+    };
+    query?: never;
+    url: '/backups/{id}/cancel';
+};
+
+export type CancelBackupErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Backup not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type CancelBackupError = CancelBackupErrors[keyof CancelBackupErrors];
+
+export type CancelBackupResponses = {
+    /**
+     * Cancel processed (idempotent)
+     */
+    200: CancelBackupResponse;
+};
+
+export type CancelBackupResponse2 = CancelBackupResponses[keyof CancelBackupResponses];
+
+export type ListBackupChildrenData = {
+    body?: never;
+    path: {
+        /**
+         * Integer row id of the parent backup
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/backups/{id}/children';
+};
+
+export type ListBackupChildrenErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Parent backup not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type ListBackupChildrenError = ListBackupChildrenErrors[keyof ListBackupChildrenErrors];
+
+export type ListBackupChildrenResponses = {
+    /**
+     * Child backup list (may be empty)
+     */
+    200: ChildBackupListResponse;
+};
+
+export type ListBackupChildrenResponse = ListBackupChildrenResponses[keyof ListBackupChildrenResponses];
 
 export type BlobDeleteData = {
     body: DeleteBlobRequest;
@@ -20255,6 +21774,42 @@ export type GetServiceEnvironmentVariableResponses = {
 
 export type GetServiceEnvironmentVariableResponse = GetServiceEnvironmentVariableResponses[keyof GetServiceEnvironmentVariableResponses];
 
+export type UpdateServiceResourcesData = {
+    body: ServiceResourceLimits;
+    path: {
+        /**
+         * External service ID
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/external-services/{id}/resources';
+};
+
+export type UpdateServiceResourcesErrors = {
+    /**
+     * Invalid resource limits
+     */
+    400: unknown;
+    /**
+     * Service not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type UpdateServiceResourcesResponses = {
+    /**
+     * Updated resource limits
+     */
+    200: ResourceLimitsUpdateResponse;
+};
+
+export type UpdateServiceResourcesResponse = UpdateServiceResourcesResponses[keyof UpdateServiceResourcesResponses];
+
 export type StartRestoreData = {
     body: StartRestoreRequest;
     path: {
@@ -20407,6 +21962,38 @@ export type RetryClusterResponses = {
 
 export type RetryClusterResponse = RetryClusterResponses[keyof RetryClusterResponses];
 
+export type GetServiceRuntimeData = {
+    body?: never;
+    path: {
+        /**
+         * External service ID
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/external-services/{id}/runtime';
+};
+
+export type GetServiceRuntimeErrors = {
+    /**
+     * Service not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GetServiceRuntimeResponses = {
+    /**
+     * Container runtime snapshot
+     */
+    200: ServiceRuntimeReport;
+};
+
+export type GetServiceRuntimeResponse = GetServiceRuntimeResponses[keyof GetServiceRuntimeResponses];
+
 export type StartServiceData = {
     body?: never;
     path: {
@@ -20438,6 +22025,38 @@ export type StartServiceResponses = {
 };
 
 export type StartServiceResponse = StartServiceResponses[keyof StartServiceResponses];
+
+export type GetServiceStatsData = {
+    body?: never;
+    path: {
+        /**
+         * External service ID
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/external-services/{id}/stats';
+};
+
+export type GetServiceStatsErrors = {
+    /**
+     * Service not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GetServiceStatsResponses = {
+    /**
+     * Container stats snapshot
+     */
+    200: ServiceStatsReport;
+};
+
+export type GetServiceStatsResponse = GetServiceStatsResponses[keyof GetServiceStatsResponses];
 
 export type StopServiceData = {
     body?: never;
@@ -20506,6 +22125,38 @@ export type UpgradeServiceResponses = {
 };
 
 export type UpgradeServiceResponse = UpgradeServiceResponses[keyof UpgradeServiceResponses];
+
+export type GetPostgresWalHealthData = {
+    body?: never;
+    path: {
+        /**
+         * External service ID
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/external-services/{id}/wal-health';
+};
+
+export type GetPostgresWalHealthErrors = {
+    /**
+     * Service not found, or no WAL snapshot available
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GetPostgresWalHealthResponses = {
+    /**
+     * Latest WAL health snapshot
+     */
+    200: PostgresWalHealth;
+};
+
+export type GetPostgresWalHealthResponse = GetPostgresWalHealthResponses[keyof GetPostgresWalHealthResponses];
 
 export type ListRootContainersData = {
     body?: never;
@@ -24197,7 +25848,7 @@ export type CreateNotificationProviderResponses = {
 export type CreateNotificationProviderResponse = CreateNotificationProviderResponses[keyof CreateNotificationProviderResponses];
 
 export type CreateNotificationEmailProviderData = {
-    body: CreateEmailProviderRequest;
+    body: CreateNotificationEmailProviderRequest;
     path?: never;
     query?: never;
     url: '/notification-providers/email';
@@ -24224,7 +25875,7 @@ export type CreateNotificationEmailProviderResponses = {
 export type CreateNotificationEmailProviderResponse = CreateNotificationEmailProviderResponses[keyof CreateNotificationEmailProviderResponses];
 
 export type UpdateEmailProviderData = {
-    body: UpdateEmailProviderRequest;
+    body: UpdateNotificationEmailProviderRequest;
     path: {
         /**
          * Provider ID
@@ -28595,7 +30246,7 @@ export type DeleteEnvironmentVariableResponses = {
 export type DeleteEnvironmentVariableResponse = DeleteEnvironmentVariableResponses[keyof DeleteEnvironmentVariableResponses];
 
 export type UpdateEnvironmentVariableData = {
-    body: CreateEnvironmentVariableRequest;
+    body: UpdateEnvironmentVariableRequest;
     path: {
         /**
          * Project ID or slug
@@ -29106,6 +30757,46 @@ export type SleepEnvironmentResponses = {
 };
 
 export type SleepEnvironmentResponse = SleepEnvironmentResponses[keyof SleepEnvironmentResponses];
+
+export type UpdateEnvironmentSubdomainData = {
+    body: UpdateEnvironmentSubdomainRequest;
+    path: {
+        /**
+         * Project ID or slug
+         */
+        project_id: number;
+        /**
+         * Environment ID or slug
+         */
+        env_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/environments/{env_id}/subdomain';
+};
+
+export type UpdateEnvironmentSubdomainErrors = {
+    /**
+     * Invalid subdomain or conflict with another environment
+     */
+    400: unknown;
+    /**
+     * Project or environment not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type UpdateEnvironmentSubdomainResponses = {
+    /**
+     * Subdomain updated successfully
+     */
+    200: EnvironmentResponse;
+};
+
+export type UpdateEnvironmentSubdomainResponse = UpdateEnvironmentSubdomainResponses[keyof UpdateEnvironmentSubdomainResponses];
 
 export type TeardownEnvironmentData = {
     body?: never;
@@ -31725,6 +33416,129 @@ export type CreateMonitorResponses = {
 
 export type CreateMonitorResponse = CreateMonitorResponses[keyof CreateMonitorResponses];
 
+export type ObservabilityListEventsData = {
+    body?: never;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+    };
+    query?: {
+        /**
+         * Comma-separated kinds: `log,request,span,error,revenue`. Empty or
+         * missing returns every kind.
+         */
+        kinds?: string;
+        /**
+         * Inclusive lower bound on event timestamp (ISO 8601, `Z` suffix).
+         */
+        from?: string;
+        /**
+         * Inclusive upper bound on event timestamp.
+         */
+        to?: string;
+        deployment_id?: number;
+        environment_id?: number;
+        /**
+         * Free-text substring matched against per-kind summary fields
+         * (request path / error class / revenue event_type).
+         */
+        search?: string;
+        /**
+         * Page size (default 50, max 200).
+         */
+        limit?: number;
+        /**
+         * When `true`, exclude bot/crawler request rows. When `false`, only
+         * include bot rows. Omitted means "include everything" (default).
+         * Only affects the `Request` kind.
+         */
+        hide_bots?: boolean;
+    };
+    url: '/projects/{project_id}/observe/events';
+};
+
+export type ObservabilityListEventsErrors = {
+    /**
+     * Invalid filter (kinds, time range, …)
+     */
+    400: string;
+    /**
+     * Unauthorized
+     */
+    401: string;
+    /**
+     * Insufficient permissions
+     */
+    403: string;
+    /**
+     * Internal server error
+     */
+    500: string;
+};
+
+export type ObservabilityListEventsError = ObservabilityListEventsErrors[keyof ObservabilityListEventsErrors];
+
+export type ObservabilityListEventsResponses = {
+    /**
+     * Merged event page
+     */
+    200: EventsResponse;
+};
+
+export type ObservabilityListEventsResponse = ObservabilityListEventsResponses[keyof ObservabilityListEventsResponses];
+
+export type ObservabilityFullEventData = {
+    body?: never;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * Event kind discriminator
+         */
+        kind: EventKind;
+        /**
+         * Per-kind primary key
+         */
+        event_id: string;
+    };
+    query?: never;
+    url: '/projects/{project_id}/observe/events/{kind}/{event_id}/full';
+};
+
+export type ObservabilityFullEventErrors = {
+    /**
+     * Unauthorized
+     */
+    401: string;
+    /**
+     * Insufficient permissions
+     */
+    403: string;
+    /**
+     * Event not found in project
+     */
+    404: string;
+    /**
+     * Internal server error
+     */
+    500: string;
+};
+
+export type ObservabilityFullEventError = ObservabilityFullEventErrors[keyof ObservabilityFullEventErrors];
+
+export type ObservabilityFullEventResponses = {
+    /**
+     * Full row
+     */
+    200: FullEvent;
+};
+
+export type ObservabilityFullEventResponse = ObservabilityFullEventResponses[keyof ObservabilityFullEventResponses];
+
 export type DeleteReleaseSourceMapsData = {
     body?: never;
     path: {
@@ -33412,904 +35226,6 @@ export type WorkflowDryRunResponses = {
 };
 
 export type WorkflowDryRunResponse = WorkflowDryRunResponses[keyof WorkflowDryRunResponses];
-
-export type ListMemoryData = {
-    body?: never;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-        /**
-         * Workflow agent slug
-         */
-        slug: string;
-    };
-    query?: {
-        /**
-         * Maximum number of facts to return
-         */
-        limit?: number;
-    };
-    url: '/projects/{project_id}/workflows/{slug}/memory';
-};
-
-export type ListMemoryErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * Workflow not found
-     */
-    404: unknown;
-};
-
-export type ListMemoryResponses = {
-    200: MemoryListResponse;
-};
-
-export type ListMemoryResponse = ListMemoryResponses[keyof ListMemoryResponses];
-
-export type WriteMemoryData = {
-    body: WriteMemoryBody;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-        /**
-         * Workflow agent slug
-         */
-        slug: string;
-    };
-    query?: never;
-    url: '/projects/{project_id}/workflows/{slug}/memory';
-};
-
-export type WriteMemoryErrors = {
-    /**
-     * Validation error
-     */
-    400: unknown;
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * Workflow not found
-     */
-    404: unknown;
-};
-
-export type WriteMemoryResponses = {
-    201: MemoryFactResponse;
-};
-
-export type WriteMemoryResponse = WriteMemoryResponses[keyof WriteMemoryResponses];
-
-export type SearchMemoryData = {
-    body?: never;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-        /**
-         * Workflow agent slug
-         */
-        slug: string;
-    };
-    query: {
-        /**
-         * Search query
-         */
-        q: string;
-        /**
-         * Maximum number of facts to return
-         */
-        limit?: number;
-    };
-    url: '/projects/{project_id}/workflows/{slug}/memory/search';
-};
-
-export type SearchMemoryErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * Workflow not found
-     */
-    404: unknown;
-};
-
-export type SearchMemoryResponses = {
-    200: MemoryListResponse;
-};
-
-export type SearchMemoryResponse = SearchMemoryResponses[keyof SearchMemoryResponses];
-
-export type DropMemoryData = {
-    body?: never;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-        /**
-         * Workflow agent slug
-         */
-        slug: string;
-        /**
-         * Fact ID to delete
-         */
-        fact_id: number;
-    };
-    query?: never;
-    url: '/projects/{project_id}/workflows/{slug}/memory/{fact_id}';
-};
-
-export type DropMemoryErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * Fact or workflow not found
-     */
-    404: unknown;
-};
-
-export type DropMemoryResponses = {
-    /**
-     * Fact deleted
-     */
-    204: void;
-};
-
-export type DropMemoryResponse = DropMemoryResponses[keyof DropMemoryResponses];
-
-export type SupersedeMemoryData = {
-    body: SupersedeBody;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-        /**
-         * Workflow agent slug
-         */
-        slug: string;
-        /**
-         * Fact ID to supersede
-         */
-        fact_id: number;
-    };
-    query?: never;
-    url: '/projects/{project_id}/workflows/{slug}/memory/{fact_id}/supersede';
-};
-
-export type SupersedeMemoryErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * Fact or workflow not found
-     */
-    404: unknown;
-};
-
-export type SupersedeMemoryResponses = {
-    200: MemoryFactResponse;
-};
-
-export type SupersedeMemoryResponse = SupersedeMemoryResponses[keyof SupersedeMemoryResponses];
-
-export type WorkspaceListSessionsData = {
-    body?: never;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-    };
-    query?: {
-        /**
-         * Page number (default 1)
-         */
-        page?: number;
-        /**
-         * Page size (default 20)
-         */
-        page_size?: number;
-    };
-    url: '/projects/{project_id}/workspace/sessions';
-};
-
-export type WorkspaceListSessionsErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-};
-
-export type WorkspaceListSessionsResponses = {
-    200: WorkspaceSessionListResponse;
-};
-
-export type WorkspaceListSessionsResponse = WorkspaceListSessionsResponses[keyof WorkspaceListSessionsResponses];
-
-export type WorkspaceStartSessionData = {
-    body: StartSessionRequest;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-    };
-    query?: never;
-    url: '/projects/{project_id}/workspace/sessions';
-};
-
-export type WorkspaceStartSessionErrors = {
-    /**
-     * Validation error
-     */
-    400: unknown;
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * Project not found
-     */
-    404: unknown;
-};
-
-export type WorkspaceStartSessionResponses = {
-    201: WorkspaceSessionResponse;
-};
-
-export type WorkspaceStartSessionResponse = WorkspaceStartSessionResponses[keyof WorkspaceStartSessionResponses];
-
-export type WorkspaceDeleteSessionData = {
-    body?: never;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-        /**
-         * Session ID
-         */
-        session_id: number;
-    };
-    query?: never;
-    url: '/projects/{project_id}/workspace/sessions/{session_id}';
-};
-
-export type WorkspaceDeleteSessionErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * Session not found
-     */
-    404: unknown;
-};
-
-export type WorkspaceDeleteSessionResponses = {
-    /**
-     * Session deleted
-     */
-    204: void;
-};
-
-export type WorkspaceDeleteSessionResponse = WorkspaceDeleteSessionResponses[keyof WorkspaceDeleteSessionResponses];
-
-export type WorkspaceGetSessionData = {
-    body?: never;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-        /**
-         * Session ID
-         */
-        session_id: number;
-    };
-    query?: never;
-    url: '/projects/{project_id}/workspace/sessions/{session_id}';
-};
-
-export type WorkspaceGetSessionErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * Session not found
-     */
-    404: unknown;
-};
-
-export type WorkspaceGetSessionResponses = {
-    200: WorkspaceSessionWithMessagesResponse;
-};
-
-export type WorkspaceGetSessionResponse = WorkspaceGetSessionResponses[keyof WorkspaceGetSessionResponses];
-
-export type WorkspaceUpdateSessionData = {
-    body: UpdateSessionBody;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-        /**
-         * Session ID
-         */
-        session_id: number;
-    };
-    query?: never;
-    url: '/projects/{project_id}/workspace/sessions/{session_id}';
-};
-
-export type WorkspaceUpdateSessionErrors = {
-    /**
-     * Validation error
-     */
-    400: unknown;
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * Session not found
-     */
-    404: unknown;
-};
-
-export type WorkspaceUpdateSessionResponses = {
-    200: WorkspaceSessionResponse;
-};
-
-export type WorkspaceUpdateSessionResponse = WorkspaceUpdateSessionResponses[keyof WorkspaceUpdateSessionResponses];
-
-export type WorkspaceCancelRunData = {
-    body?: never;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-        /**
-         * Session ID
-         */
-        session_id: number;
-    };
-    query?: never;
-    url: '/projects/{project_id}/workspace/sessions/{session_id}/cancel';
-};
-
-export type WorkspaceCancelRunErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * Session not found
-     */
-    404: unknown;
-};
-
-export type WorkspaceCancelRunResponses = {
-    /**
-     * Run cancelled
-     */
-    204: void;
-};
-
-export type WorkspaceCancelRunResponse = WorkspaceCancelRunResponses[keyof WorkspaceCancelRunResponses];
-
-export type WorkspaceCloseSessionData = {
-    body?: never;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-        /**
-         * Session ID
-         */
-        session_id: number;
-    };
-    query?: never;
-    url: '/projects/{project_id}/workspace/sessions/{session_id}/close';
-};
-
-export type WorkspaceCloseSessionErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * Session not found
-     */
-    404: unknown;
-};
-
-export type WorkspaceCloseSessionResponses = {
-    /**
-     * Session closed
-     */
-    204: void;
-};
-
-export type WorkspaceCloseSessionResponse = WorkspaceCloseSessionResponses[keyof WorkspaceCloseSessionResponses];
-
-export type WorkspaceSendMessageData = {
-    body: SendMessageBody;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-        /**
-         * Session ID
-         */
-        session_id: number;
-    };
-    query?: never;
-    url: '/projects/{project_id}/workspace/sessions/{session_id}/messages';
-};
-
-export type WorkspaceSendMessageErrors = {
-    /**
-     * Validation error
-     */
-    400: unknown;
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * Session not found
-     */
-    404: unknown;
-};
-
-export type WorkspaceSendMessageResponses = {
-    201: WorkspaceMessageResponse;
-};
-
-export type WorkspaceSendMessageResponse = WorkspaceSendMessageResponses[keyof WorkspaceSendMessageResponses];
-
-export type WorkspaceRegeneratePreviewPasswordData = {
-    body?: never;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-        /**
-         * Session ID
-         */
-        session_id: number;
-    };
-    query?: never;
-    url: '/projects/{project_id}/workspace/sessions/{session_id}/preview-password/regenerate';
-};
-
-export type WorkspaceRegeneratePreviewPasswordErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * Session not found
-     */
-    404: unknown;
-};
-
-export type WorkspaceRegeneratePreviewPasswordResponses = {
-    200: WorkspaceSessionResponse;
-};
-
-export type WorkspaceRegeneratePreviewPasswordResponse = WorkspaceRegeneratePreviewPasswordResponses[keyof WorkspaceRegeneratePreviewPasswordResponses];
-
-export type WorkspaceReopenSessionData = {
-    body?: never;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-        /**
-         * Session ID
-         */
-        session_id: number;
-    };
-    query?: never;
-    url: '/projects/{project_id}/workspace/sessions/{session_id}/reopen';
-};
-
-export type WorkspaceReopenSessionErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * Session not found
-     */
-    404: unknown;
-};
-
-export type WorkspaceReopenSessionResponses = {
-    200: WorkspaceSessionResponse;
-};
-
-export type WorkspaceReopenSessionResponse = WorkspaceReopenSessionResponses[keyof WorkspaceReopenSessionResponses];
-
-export type WorkspaceRefreshSandboxData = {
-    body?: never;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-        /**
-         * Session ID
-         */
-        session_id: number;
-    };
-    query?: never;
-    url: '/projects/{project_id}/workspace/sessions/{session_id}/sandbox/refresh';
-};
-
-export type WorkspaceRefreshSandboxErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * Session not found
-     */
-    404: unknown;
-    /**
-     * No sandbox available
-     */
-    503: unknown;
-};
-
-export type WorkspaceRefreshSandboxResponses = {
-    /**
-     * Sandbox refresh triggered
-     */
-    204: void;
-};
-
-export type WorkspaceRefreshSandboxResponse = WorkspaceRefreshSandboxResponses[keyof WorkspaceRefreshSandboxResponses];
-
-export type WorkspaceRestartSandboxData = {
-    body?: never;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-        /**
-         * Session ID
-         */
-        session_id: number;
-    };
-    query?: never;
-    url: '/projects/{project_id}/workspace/sessions/{session_id}/sandbox/restart';
-};
-
-export type WorkspaceRestartSandboxErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * Session not found
-     */
-    404: unknown;
-};
-
-export type WorkspaceRestartSandboxResponses = {
-    /**
-     * Sandbox restarted
-     */
-    204: void;
-};
-
-export type WorkspaceRestartSandboxResponse = WorkspaceRestartSandboxResponses[keyof WorkspaceRestartSandboxResponses];
-
-export type WorkspaceStartSandboxData = {
-    body?: never;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-        /**
-         * Session ID
-         */
-        session_id: number;
-    };
-    query?: never;
-    url: '/projects/{project_id}/workspace/sessions/{session_id}/sandbox/start';
-};
-
-export type WorkspaceStartSandboxErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * Session not found
-     */
-    404: unknown;
-};
-
-export type WorkspaceStartSandboxResponses = {
-    /**
-     * Sandbox started
-     */
-    204: void;
-};
-
-export type WorkspaceStartSandboxResponse = WorkspaceStartSandboxResponses[keyof WorkspaceStartSandboxResponses];
-
-export type WorkspaceSandboxStatsData = {
-    body?: never;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-        /**
-         * Session ID
-         */
-        session_id: number;
-    };
-    query?: never;
-    url: '/projects/{project_id}/workspace/sessions/{session_id}/sandbox/stats';
-};
-
-export type WorkspaceSandboxStatsErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * Session not found
-     */
-    404: unknown;
-    /**
-     * No sandbox container
-     */
-    409: unknown;
-    /**
-     * Docker not available
-     */
-    503: unknown;
-};
-
-export type WorkspaceSandboxStatsResponses = {
-    200: WorkspaceSandboxStatsResponse;
-};
-
-export type WorkspaceSandboxStatsResponse2 = WorkspaceSandboxStatsResponses[keyof WorkspaceSandboxStatsResponses];
-
-export type WorkspaceStopSandboxData = {
-    body?: never;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-        /**
-         * Session ID
-         */
-        session_id: number;
-    };
-    query?: never;
-    url: '/projects/{project_id}/workspace/sessions/{session_id}/sandbox/stop';
-};
-
-export type WorkspaceStopSandboxErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * Session not found
-     */
-    404: unknown;
-};
-
-export type WorkspaceStopSandboxResponses = {
-    /**
-     * Sandbox stopped
-     */
-    204: void;
-};
-
-export type WorkspaceStopSandboxResponse = WorkspaceStopSandboxResponses[keyof WorkspaceStopSandboxResponses];
-
-export type WorkspaceStreamMessagesData = {
-    body?: never;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-        /**
-         * Session ID
-         */
-        session_id: number;
-    };
-    query?: {
-        /**
-         * Return messages with id > after_id
-         */
-        after_id?: number;
-    };
-    url: '/projects/{project_id}/workspace/sessions/{session_id}/stream';
-};
-
-export type WorkspaceStreamMessagesErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * Session not found
-     */
-    404: unknown;
-};
-
-export type WorkspaceStreamMessagesResponses = {
-    /**
-     * SSE stream of workspace messages
-     */
-    200: string;
-};
-
-export type WorkspaceStreamMessagesResponse = WorkspaceStreamMessagesResponses[keyof WorkspaceStreamMessagesResponses];
-
-export type WorkspaceTerminalPasteImageData = {
-    body: WorkspacePasteImageRequest;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-        /**
-         * Session ID
-         */
-        session_id: number;
-    };
-    query?: never;
-    url: '/projects/{project_id}/workspace/sessions/{session_id}/terminal/paste-image';
-};
-
-export type WorkspaceTerminalPasteImageErrors = {
-    /**
-     * Invalid image data
-     */
-    400: unknown;
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * Session not found
-     */
-    404: unknown;
-    /**
-     * No sandbox container
-     */
-    409: unknown;
-    /**
-     * Image too large
-     */
-    413: unknown;
-};
-
-export type WorkspaceTerminalPasteImageResponses = {
-    200: WorkspacePasteImageResponse;
-};
-
-export type WorkspaceTerminalPasteImageResponse = WorkspaceTerminalPasteImageResponses[keyof WorkspaceTerminalPasteImageResponses];
-
-export type WorkspaceListTerminalTabsData = {
-    body?: never;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-        /**
-         * Session ID
-         */
-        session_id: number;
-    };
-    query?: never;
-    url: '/projects/{project_id}/workspace/sessions/{session_id}/terminal/tabs';
-};
-
-export type WorkspaceListTerminalTabsErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * Session not found
-     */
-    404: unknown;
-    /**
-     * Docker not available
-     */
-    503: unknown;
-};
-
-export type WorkspaceListTerminalTabsResponses = {
-    200: WorkspaceTerminalTabsResponse;
-};
-
-export type WorkspaceListTerminalTabsResponse = WorkspaceListTerminalTabsResponses[keyof WorkspaceListTerminalTabsResponses];
-
-export type WorkspaceDeleteTerminalTabData = {
-    body?: never;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-        /**
-         * Session ID
-         */
-        session_id: number;
-        /**
-         * Tab id in {kind}-{id} format, e.g. shell-abc
-         */
-        tab_id: string;
-    };
-    query?: never;
-    url: '/projects/{project_id}/workspace/sessions/{session_id}/terminal/tabs/{tab_id}';
-};
-
-export type WorkspaceDeleteTerminalTabErrors = {
-    /**
-     * Invalid tab id
-     */
-    400: unknown;
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * Session not found
-     */
-    404: unknown;
-};
-
-export type WorkspaceDeleteTerminalTabResponses = {
-    /**
-     * Tab deleted
-     */
-    204: void;
-};
-
-export type WorkspaceDeleteTerminalTabResponse = WorkspaceDeleteTerminalTabResponses[keyof WorkspaceDeleteTerminalTabResponses];
 
 export type GetProxyLogsData = {
     body?: never;
@@ -36538,6 +37454,41 @@ export type VerifyAndEnableMfaResponses = {
 };
 
 export type VerifyAndEnableMfaResponse = VerifyAndEnableMfaResponses[keyof VerifyAndEnableMfaResponses];
+
+export type ChangePasswordSelfData = {
+    body: ChangePasswordRequest;
+    path?: never;
+    query?: never;
+    url: '/users/me/password';
+};
+
+export type ChangePasswordSelfErrors = {
+    /**
+     * Validation error (weak password, same as current, MFA missing)
+     */
+    400: unknown;
+    /**
+     * Current password incorrect or MFA code invalid
+     */
+    401: unknown;
+    /**
+     * Account has no password set (SSO/magic-link only)
+     */
+    403: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type ChangePasswordSelfResponses = {
+    /**
+     * Password updated
+     */
+    204: void;
+};
+
+export type ChangePasswordSelfResponse = ChangePasswordSelfResponses[keyof ChangePasswordSelfResponses];
 
 export type DeleteUserData = {
     body?: never;
