@@ -2744,6 +2744,11 @@ impl AgentExecutor {
             tag: None,
             commit: commit_ref,
             project_id: run.project_id,
+            // The agent just pushed real commits to open a PR. Treat
+            // identically to a git webhook so preview-env auto-deploy
+            // rules apply. The first-deploy exception covers a freshly
+            // created preview env.
+            manual_trigger: false,
         });
 
         if let Err(e) = self.queue.send(push_job).await {

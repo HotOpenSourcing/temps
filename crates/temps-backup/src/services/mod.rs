@@ -1,6 +1,5 @@
 mod alerts;
 mod backup;
-mod heartbeat;
 mod notifier;
 mod reconcile;
 mod restore;
@@ -11,9 +10,8 @@ pub use backup::{
     ScheduleRunResponse, ScheduleRunSummary, ScheduleRunSummaryList, ServiceBackupEntry,
     TriggerSource,
 };
-pub use heartbeat::HeartbeatGuard;
 pub use notifier::BackupNotificationAdapter;
-pub use reconcile::{reconcile_orphan_backups, sweep_stalled_backups, STALL_THRESHOLD};
+pub use reconcile::reconcile_orphan_backups;
 pub use restore::{
     BackupSelector, PlanSourceBackup, PlanTarget, RestoreError, RestorePlan, RestoreRequestMode,
     RestoreRunView, RestoreService,

@@ -12,15 +12,51 @@
 //! so the per-engine code only owns step 3 (its specific Docker command)
 //! and the param-validation in step 1.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
+use aws_sdk_s3::config::SharedHttpClient;
 use aws_sdk_s3::Client as S3Client;
+use aws_smithy_http_client::tls::{
+    rustls_provider::CryptoMode, Provider as TlsProvider, TlsContext, TrustStore,
+};
 use chrono::Utc;
 use serde_json::{json, Value};
 use tracing::warn;
 
 use temps_backup_core::engine_v2::BackupError;
 use temps_core::EncryptionService;
+
+/// Shared HTTPS client backed by the Mozilla CA bundle compiled in via
+/// `webpki-root-certs`. Built once on first use, then reused for every
+/// S3 client this crate constructs.
+///
+/// We bypass the SDK's default-https-client because it asks the OS for
+/// trusted roots via `rustls-native-certs`. On some macOS dev machines
+/// that returns zero parsed certs and `aws-smithy-http-client` then trips
+/// a `debug_assert!`, panicking every test that touches the S3 builder.
+/// Pinning a deterministic trust bundle makes the client constructable
+/// in any environment (dev macOS, CI sandbox, minimal Linux container)
+/// without depending on the OS trust store.
+pub(crate) fn bundled_roots_http_client() -> SharedHttpClient {
+    static CLIENT: OnceLock<SharedHttpClient> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            let mut trust_store = TrustStore::empty().with_native_roots(false);
+            for der in webpki_root_certs::TLS_SERVER_ROOT_CERTS {
+                let pem = pem::Pem::new("CERTIFICATE", der.to_vec());
+                trust_store = trust_store.with_pem_certificate(pem::encode(&pem).into_bytes());
+            }
+            let tls_context = TlsContext::builder()
+                .with_trust_store(trust_store)
+                .build()
+                .expect("static TLS context built from bundled roots");
+            aws_smithy_http_client::Builder::new()
+                .tls_provider(TlsProvider::Rustls(CryptoMode::AwsLc))
+                .tls_context(tls_context)
+                .build_https()
+        })
+        .clone()
+}
 
 /// Multipart upload threshold. Files larger than this use multipart
 /// upload instead of a single PUT.
@@ -78,7 +114,8 @@ pub fn build_s3_client(
         .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
         .region(aws_sdk_s3::config::Region::new(s3_source.region.clone()))
         .force_path_style(s3_source.force_path_style.unwrap_or(true))
-        .credentials_provider(creds);
+        .credentials_provider(creds)
+        .http_client(bundled_roots_http_client());
 
     if let Some(endpoint) = &s3_source.endpoint {
         let url = if endpoint.starts_with("http") {

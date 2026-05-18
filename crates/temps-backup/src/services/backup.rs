@@ -971,7 +971,6 @@ impl BackupService {
             error_message: sea_orm::Set(None),
             expires_at: sea_orm::Set(None),
             checksum: sea_orm::Set(None),
-            last_heartbeat_at: sea_orm::Set(None),
             metadata: sea_orm::Set(
                 serde_json::json!({
                     "size_bytes": size_bytes,
@@ -1971,7 +1970,8 @@ impl BackupService {
             .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
             .region(aws_sdk_s3::config::Region::new(s3_source.region.clone()))
             .force_path_style(s3_source.force_path_style.unwrap_or(true)) // Default to true for Minio
-            .credentials_provider(creds);
+            .credentials_provider(creds)
+            .http_client(crate::engines::v2_common::bundled_roots_http_client());
 
         // Only set endpoint URL if endpoint is specified (for Minio)
         if let Some(endpoint) = &s3_source.endpoint {
@@ -2005,7 +2005,8 @@ impl BackupService {
             .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
             .region(aws_sdk_s3::config::Region::new(request.region.clone()))
             .force_path_style(request.force_path_style.unwrap_or(true))
-            .credentials_provider(creds);
+            .credentials_provider(creds)
+            .http_client(crate::engines::v2_common::bundled_roots_http_client());
 
         // Only set endpoint URL if endpoint is specified (for MinIO)
         if let Some(endpoint) = &request.endpoint {
@@ -4691,7 +4692,6 @@ RETURNING id
             error_message: Set(None),
             expires_at: Set(None),
             checksum: Set(None),
-            last_heartbeat_at: Set(None),
             metadata: Set(serde_json::json!({
                 "engine": "control_plane",
                 "async_runner": true,
@@ -4867,7 +4867,6 @@ RETURNING id
             error_message: Set(None),
             expires_at: Set(None),
             checksum: Set(None),
-            last_heartbeat_at: Set(None),
             metadata: Set(serde_json::json!({
                 "engine": trigger.engine,
                 "async_runner": true,
@@ -5017,7 +5016,6 @@ RETURNING id
             error_message: Set(None),
             expires_at: Set(None),
             checksum: Set(None),
-            last_heartbeat_at: Set(None),
             metadata: Set(serde_json::Value::Object(backups_metadata).to_string()),
         }
         .insert(txn)
@@ -5964,17 +5962,9 @@ ORDER BY esb.id ASC
             ),
             checksum: sea_orm::Set(None),
             expires_at: sea_orm::Set(None),
-            last_heartbeat_at: sea_orm::Set(Some(now)),
         };
 
         let backup = backup.insert(self.db.as_ref()).await?;
-
-        // Spawn a heartbeat task. Dropped at function end (or any early
-        // return), which aborts the task. While alive it keeps
-        // `last_heartbeat_at` fresh; the UI uses staleness > 5min as a
-        // "stalled" signal, and startup reconciliation covers the case
-        // where the worker dies before drop runs.
-        let _heartbeat = crate::services::HeartbeatGuard::spawn(self.db.clone(), backup.id);
 
         // Generate backup path
         let subpath = format!(
@@ -7124,6 +7114,7 @@ mod tests {
             ))
             .endpoint_url(&minio_endpoint)
             .force_path_style(true)
+            .http_client(crate::engines::v2_common::bundled_roots_http_client())
             .build();
 
         let s3_client = aws_sdk_s3::Client::from_conf(s3_config);
@@ -7391,6 +7382,7 @@ mod tests {
             ))
             .endpoint_url(&minio_endpoint)
             .force_path_style(true)
+            .http_client(crate::engines::v2_common::bundled_roots_http_client())
             .build();
 
         let s3_client = aws_sdk_s3::Client::from_conf(s3_config);
@@ -7618,7 +7610,6 @@ mod tests {
             expires_at: Set(backup_result.expires_at),
             checksum: Set(backup_result.checksum.clone()),
             metadata: Set(backup_result.metadata.clone()),
-            last_heartbeat_at: Set(None),
         };
 
         target_backup
@@ -7935,7 +7926,6 @@ mod tests {
             created_by: 1,
             expires_at: None,
             tags: "[]".to_string(),
-            last_heartbeat_at: None,
         };
 
         // MockDatabase query sequence for `list_source_backups`:
@@ -8472,7 +8462,6 @@ mod tests {
             size_bytes: Some(1024),
             file_count: None,
             tags: "[]".to_string(),
-            last_heartbeat_at: None,
         }
     }
 
