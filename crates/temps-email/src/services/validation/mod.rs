@@ -264,8 +264,10 @@ impl ValidationService {
     ) -> Result<Vec<ValidateEmailResponse>, EmailError> {
         let mut results = Vec::with_capacity(emails.len());
         for email in emails {
-            results
-                .push(self.validate(ValidateEmailRequest { email, proxy: None }).await?);
+            results.push(
+                self.validate(ValidateEmailRequest { email, proxy: None })
+                    .await?,
+            );
         }
         Ok(results)
     }
@@ -371,7 +373,10 @@ mod tests {
     fn test_reachability_risky_catch_all() {
         let mut s = smtp(true, false);
         s.is_catch_all = true;
-        assert_eq!(reachability(&misc(false, false), &s), ReachabilityStatus::Risky);
+        assert_eq!(
+            reachability(&misc(false, false), &s),
+            ReachabilityStatus::Risky
+        );
     }
 
     #[test]

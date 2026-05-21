@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use hickory_proto::op::{Header, HeaderCounts, Metadata, MessageType, OpCode, ResponseCode};
+use hickory_proto::op::{Header, HeaderCounts, MessageType, Metadata, OpCode, ResponseCode};
 use hickory_proto::rr::rdata::{A as RDataA, AAAA as RDataAAAA, CNAME as RDataCNAME};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
 use hickory_server::net::runtime::Time;
@@ -336,8 +336,8 @@ mod tests {
     fn build_answer_emits_a_record() {
         let qname = Name::from_str("x.temps.local.").unwrap();
         let answer = build_answer(&qname, &rec("A", "172.20.5.10")).unwrap();
-        assert_eq!(answer.ttl(), 30);
-        match answer.data() {
+        assert_eq!(answer.ttl, 30);
+        match &answer.data {
             RData::A(RDataA(v4)) => assert_eq!(v4.to_string(), "172.20.5.10"),
             other => panic!("expected A, got {other:?}"),
         }
@@ -353,7 +353,7 @@ mod tests {
     fn build_answer_emits_aaaa_record() {
         let qname = Name::from_str("x.temps.local.").unwrap();
         let answer = build_answer(&qname, &rec("AAAA", "fd00::1")).unwrap();
-        match answer.data() {
+        match &answer.data {
             RData::AAAA(RDataAAAA(v6)) => assert!(v6.to_string().contains("fd00")),
             other => panic!("expected AAAA, got {other:?}"),
         }

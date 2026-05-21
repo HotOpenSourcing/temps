@@ -101,10 +101,7 @@ pub async fn probe_mailbox(config: SmtpProbeConfig<'_>) -> SmtpProbe {
 /// Run the full SMTP conversation against one MX host. Returns `Err` only
 /// when the host could not be reached at all (so the caller can try the next
 /// MX); a reachable host that rejects the mailbox is still `Ok`.
-async fn probe_single_host(
-    host: &str,
-    config: &SmtpProbeConfig<'_>,
-) -> Result<SmtpProbe, String> {
+async fn probe_single_host(host: &str, config: &SmtpProbeConfig<'_>) -> Result<SmtpProbe, String> {
     let addr = format!("{host}:25");
     let mut stream = connect(&addr, config).await?;
 
@@ -115,7 +112,12 @@ async fn probe_single_host(
     }
 
     // EHLO.
-    send(&mut stream, &format!("EHLO {}\r\n", config.hello_name), config.timeout).await?;
+    send(
+        &mut stream,
+        &format!("EHLO {}\r\n", config.hello_name),
+        config.timeout,
+    )
+    .await?;
     let _ = read_reply(&mut stream, config.timeout).await?;
 
     // MAIL FROM — envelope sender.
@@ -174,7 +176,7 @@ async fn rcpt_outcome(
     address: &str,
     op_timeout: Duration,
 ) -> Result<RcptOutcome, String> {
-    send(stream, &format!("RCPT TO:<{address}>\r\n", ), op_timeout).await?;
+    send(stream, &format!("RCPT TO:<{address}>\r\n",), op_timeout).await?;
     let reply = read_reply(stream, op_timeout).await?;
     Ok(classify_rcpt_reply(&reply))
 }
@@ -226,9 +228,7 @@ async fn connect(addr: &str, config: &SmtpProbeConfig<'_>) -> Result<SmtpStream,
                         )
                         .await
                     }
-                    _ => {
-                        tokio_socks::tcp::Socks5Stream::connect(proxy_addr.as_str(), addr).await
-                    }
+                    _ => tokio_socks::tcp::Socks5Stream::connect(proxy_addr.as_str(), addr).await,
                 }
             };
             timeout(config.timeout, connect)
@@ -290,10 +290,7 @@ fn last_complete_line(buf: &[u8]) -> Option<String> {
     if !text.ends_with('\n') {
         return None;
     }
-    trimmed
-        .rsplit("\r\n")
-        .next()
-        .map(|s| s.to_string())
+    trimmed.rsplit("\r\n").next().map(|s| s.to_string())
 }
 
 /// A final SMTP reply line has a space (not `-`) as its 4th character.

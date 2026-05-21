@@ -727,24 +727,22 @@ impl DnsPropagationChecker {
         resolver_opts.cache_size = 0; // Disable caching to get fresh results
 
         // Build resolver using the 0.26 builder API.
-        let resolver = match Resolver::builder_with_config(
-            resolver_config,
-            TokioRuntimeProvider::default(),
-        )
-        .with_options(resolver_opts)
-        .build()
-        {
-            Ok(r) => r,
-            Err(e) => {
-                return DnsServerResult {
-                    server_name: server.name.to_string(),
-                    server_ip: server.ip.to_string(),
-                    found: false,
-                    values_found: Vec::new(),
-                    error: Some(format!("failed to build DNS resolver: {e}")),
+        let resolver =
+            match Resolver::builder_with_config(resolver_config, TokioRuntimeProvider::default())
+                .with_options(resolver_opts)
+                .build()
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    return DnsServerResult {
+                        server_name: server.name.to_string(),
+                        server_ip: server.ip.to_string(),
+                        found: false,
+                        values_found: Vec::new(),
+                        error: Some(format!("failed to build DNS resolver: {e}")),
+                    }
                 }
-            }
-        };
+            };
 
         // Query TXT records
         match resolver.txt_lookup(record_name).await {
