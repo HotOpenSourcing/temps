@@ -56,7 +56,6 @@ temps-import = { path = "../temps-import" }
 temps-infra = { path = "../temps-infra" }
 temps-log-aggregator = { path = "../temps-log-aggregator" }
 temps-logs = { path = "../temps-logs" }
-# temps-mcp = { path = "../temps-mcp" }
 temps-migrations = { path = "../temps-migrations" }
 temps-monitoring = { path = "../temps-monitoring" }
 temps-notifications = { path = "../temps-notifications" }

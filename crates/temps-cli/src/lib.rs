@@ -111,7 +111,6 @@ pub fn install_tracing(log_level: &str, log_format: &str) {
              temps_notifications={level},\
              temps_infra={level},\
              temps_geo={level},\
-             temps_mcp={level},\
              temps_entities={level},\
              temps_database={level},\
              temps_migrations={level},\
