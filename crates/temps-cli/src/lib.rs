@@ -211,11 +211,22 @@ pub fn dispatch(
     }
 }
 
+/// Install the process-wide rustls crypto provider exactly once.
+///
+/// Several dependencies (e.g. `temps-domains`) construct rustls clients and
+/// expect a default `CryptoProvider` to be present. `install_default`
+/// returns `Err` if one is already installed, which is the normal outcome on
+/// the second and later calls — so the error is intentionally ignored,
+/// giving the same idempotent behaviour the old library helper provided.
+pub fn install_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 /// Convenience entrypoint that parses, installs tracing, and dispatches.
 /// Used by both the OSS `temps` binary (`extra_plugins = vec![]`) and any
 /// EE-bundled binary that wraps the same CLI surface.
 pub fn run(extra_plugins: Vec<Box<dyn temps_core::plugin::TempsPlugin>>) -> anyhow::Result<()> {
-    check_if_email_exists::initialize_crypto_provider();
+    install_crypto_provider();
     let cli = Cli::parse();
     install_tracing(&cli.log_level, &cli.log_format);
     dispatch(cli, extra_plugins)
