@@ -218,6 +218,37 @@ export type AddManagedDomainApiRequest = {
     domain: string;
 };
 
+export type AdminGateResponse = {
+    /**
+     * `Host` header values allowed. Empty = any host.
+     */
+    allowed_hosts: Array<string>;
+    /**
+     * IPs / CIDRs allowed to reach the admin listener. Empty = any source.
+     */
+    allowed_ips: Array<string>;
+    /**
+     * True when the config is writable through this API. False when env
+     * vars are dictating the active config.
+     */
+    editable: boolean;
+    /**
+     * Where the active config came from.
+     */
+    source: AdminGateSource;
+    /**
+     * When true, the gate trusts `X-Forwarded-For` from loopback peers.
+     */
+    trust_forwarded_for: boolean;
+};
+
+/**
+ * Where the active gate configuration came from. Env-supplied configs are
+ * frozen at the process level — the UI shows them read-only and refuses to
+ * persist DB writes. DB-supplied configs are editable at runtime.
+ */
+export type AdminGateSource = 'default' | 'db' | 'env';
+
 /**
  * Response DTO for a single agent — masks the encrypted API key.
  */
@@ -2407,6 +2438,26 @@ export type CreateNotificationEmailProviderRequest = {
     name: string;
 };
 
+export type CreateOidcProviderRequest = {
+    client_id: string;
+    client_secret: string;
+    default_role?: string;
+    enabled?: boolean;
+    group_claim?: string;
+    issuer_url: string;
+    jit_provisioning?: boolean;
+    name: string;
+    role_claim?: string;
+    scopes?: string;
+    template?: string;
+};
+
+export type CreateOidcRoleMappingRequest = {
+    idp_group: string;
+    priority: number;
+    role: string;
+};
+
 /**
  * Request to create an import plan
  */
@@ -4091,6 +4142,7 @@ export type EmailStatsResponse = {
 export type EmailStatusResponse = {
     email_configured: boolean;
     magic_link_available: boolean;
+    oidc_providers: Array<OidcProviderSummary>;
     password_reset_available: boolean;
 };
 
@@ -7799,6 +7851,72 @@ export type ObservabilityEvent = (RequestRow & {
     type: 'revenue';
 });
 
+export type OidcProviderResponse = {
+    client_id: string;
+    /**
+     * Always masked — the secret is never returned after creation.
+     */
+    client_secret: string;
+    default_role: string;
+    enabled: boolean;
+    group_claim: string;
+    id: number;
+    issuer_url: string;
+    jit_provisioning: boolean;
+    name: string;
+    role_claim: string;
+    scopes: string;
+    template: string;
+};
+
+export type OidcProviderSummary = {
+    id: number;
+    name: string;
+    /**
+     * The template the provider was created from — e.g. `keycloak`,
+     * `okta`, `auth0`, `google`, `azure-ad`, or `generic`. Surfaced on
+     * the public login endpoint so the unauthenticated login page can
+     * render the right brand logo on the "Sign in with X" button.
+     * Never sensitive — the template name is part of the provider's
+     * public identity, not configuration.
+     */
+    template: string;
+};
+
+/**
+ * A user that has logged in via a given OIDC provider. Used by the
+ * admin "Users for provider" panel — the `oidc_subject` is the
+ * IdP-side identifier we matched on, useful when diagnosing why a
+ * user can or can't log in.
+ */
+export type OidcProviderUserResponse = {
+    created_at: string;
+    email: string;
+    email_verified: boolean;
+    id: number;
+    mfa_enabled: boolean;
+    name: string;
+    oidc_subject?: string | null;
+    updated_at: string;
+};
+
+export type OidcProvidersListResponse = {
+    providers: Array<OidcProviderSummary>;
+};
+
+export type OidcRoleMappingResponse = {
+    id: number;
+    idp_group: string;
+    priority: number;
+    provider_id: number;
+    role: string;
+};
+
+export type OidcTestConnectionResponse = {
+    message: string;
+    success: boolean;
+};
+
 export type OpenAiError = {
     code?: string | null;
     message: string;
@@ -9749,7 +9867,23 @@ export type RecentQueryParams = {
      */
     conversation_id?: string | null;
     /**
-     * Max results (defaults to 50, max 100)
+     * Cost strictly greater-than, in microcents
+     */
+    cost_gt?: number | null;
+    /**
+     * Cost greater-than-or-equal, in microcents
+     */
+    cost_gte?: number | null;
+    /**
+     * Cost strictly less-than, in microcents
+     */
+    cost_lt?: number | null;
+    /**
+     * Cost less-than-or-equal, in microcents
+     */
+    cost_lte?: number | null;
+    /**
+     * Page size (defaults to 20, max 50)
      */
     limit?: number | null;
     /**
@@ -9757,13 +9891,37 @@ export type RecentQueryParams = {
      */
     model?: string | null;
     /**
+     * Number of results to skip for pagination (defaults to 0)
+     */
+    offset?: number | null;
+    /**
      * Filter by provider name
      */
     provider?: string | null;
     /**
+     * Filter by HTTP status code (exact match)
+     */
+    status?: number | null;
+    /**
      * Filter by tags (comma-separated, AND logic)
      */
     tags?: string | null;
+    /**
+     * Total tokens (input + output) strictly greater-than
+     */
+    tokens_gt?: number | null;
+    /**
+     * Total tokens (input + output) greater-than-or-equal
+     */
+    tokens_gte?: number | null;
+    /**
+     * Total tokens (input + output) strictly less-than
+     */
+    tokens_lt?: number | null;
+    /**
+     * Total tokens (input + output) less-than-or-equal
+     */
+    tokens_lte?: number | null;
     /**
      * Filter by user ID
      */
@@ -12915,6 +13073,12 @@ export type UnsupportedFeature = {
     reason: string;
 };
 
+export type UpdateAdminGateRequest = {
+    allowed_hosts: Array<string>;
+    allowed_ips: Array<string>;
+    trust_forwarded_for: boolean;
+};
+
 /**
  * Body for `PATCH /settings/ai-providers/{provider_id}` — updates
  * provider-scoped settings (just the default model for now) without
@@ -13297,6 +13461,20 @@ export type UpdateNotificationEmailProviderRequest = {
     name?: string | null;
 };
 
+export type UpdateOidcProviderRequest = {
+    client_id?: string | null;
+    client_secret?: string | null;
+    default_role?: string | null;
+    enabled?: boolean | null;
+    group_claim?: string | null;
+    issuer_url?: string | null;
+    jit_provisioning?: boolean | null;
+    name?: string | null;
+    role_claim?: string | null;
+    scopes?: string | null;
+    template?: string | null;
+};
+
 export type UpdatePreferencesRequest = {
     preferences: NotificationPreferencesResponse;
 };
@@ -13615,15 +13793,56 @@ export type UptimeHistoryResponse = {
 
 /**
  * Filters for querying AI usage data.
+ *
+ * Cost bounds are expressed in microcents (the unit stored in
+ * `estimated_cost_microcents`). At most one of `gte`/`gt` and one of
+ * `lte`/`lt` is meaningful per query; if both are set the stricter wins
+ * naturally because they are ANDead together.
  */
 export type UsageFilter = {
     conversation_id?: string | null;
+    /**
+     * Cost strictly greater-than, in microcents.
+     */
+    cost_gt?: number | null;
+    /**
+     * Cost greater-than-or-equal, in microcents.
+     */
+    cost_gte?: number | null;
+    /**
+     * Cost strictly less-than, in microcents.
+     */
+    cost_lt?: number | null;
+    /**
+     * Cost less-than-or-equal, in microcents.
+     */
+    cost_lte?: number | null;
     model?: string | null;
     provider?: string | null;
+    /**
+     * Filter by HTTP status code (exact match).
+     */
+    status?: number | null;
     /**
      * Comma-separated tags to filter by (AND logic).
      */
     tags?: string | null;
+    /**
+     * Total tokens (input + output) strictly greater-than.
+     */
+    tokens_gt?: number | null;
+    /**
+     * Total tokens (input + output) greater-than-or-equal.
+     */
+    tokens_gte?: number | null;
+    /**
+     * Total tokens (input + output) strictly less-than.
+     */
+    tokens_lt?: number | null;
+    /**
+     * Total tokens (input + output) less-than-or-equal.
+     */
+    tokens_lte?: number | null;
     user_id?: number | null;
 };
 
@@ -13649,6 +13868,20 @@ export type UsageLogEntry = {
     tags: Array<string>;
     timestamp: string;
     trace_id?: string | null;
+};
+
+/**
+ * A page of recent usage log entries plus the total count for pagination.
+ */
+export type UsageLogPage = {
+    /**
+     * The usage log entries for the requested page.
+     */
+    entries: Array<UsageLogEntry>;
+    /**
+     * Total number of entries matching the filter (across all pages).
+     */
+    total: number;
 };
 
 export type UsageQueryParams = {
@@ -14832,6 +15065,243 @@ export type UpdateSpeedMetricsResponses = {
 
 export type UpdateSpeedMetricsResponse = UpdateSpeedMetricsResponses[keyof UpdateSpeedMetricsResponses];
 
+export type GetAdminGateData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/admin/gate-settings';
+};
+
+export type GetAdminGateErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+};
+
+export type GetAdminGateResponses = {
+    /**
+     * Current admin gate config
+     */
+    200: AdminGateResponse;
+};
+
+export type GetAdminGateResponse = GetAdminGateResponses[keyof GetAdminGateResponses];
+
+export type PatchAdminGateData = {
+    body: UpdateAdminGateRequest;
+    path?: never;
+    query?: never;
+    url: '/admin/gate-settings';
+};
+
+export type PatchAdminGateErrors = {
+    /**
+     * Invalid IP/CIDR/host
+     */
+    400: unknown;
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
+     * Env-overridden or would lock out caller
+     */
+    409: unknown;
+};
+
+export type PatchAdminGateResponses = {
+    /**
+     * Updated admin gate config
+     */
+    200: AdminGateResponse;
+};
+
+export type PatchAdminGateResponse = PatchAdminGateResponses[keyof PatchAdminGateResponses];
+
+export type ListOidcProvidersData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/admin/oidc/providers';
+};
+
+export type ListOidcProvidersResponses = {
+    /**
+     * OIDC providers
+     */
+    200: Array<OidcProviderResponse>;
+};
+
+export type ListOidcProvidersResponse = ListOidcProvidersResponses[keyof ListOidcProvidersResponses];
+
+export type CreateOidcProviderData = {
+    body: CreateOidcProviderRequest;
+    path?: never;
+    query?: never;
+    url: '/admin/oidc/providers';
+};
+
+export type CreateOidcProviderErrors = {
+    /**
+     * Another OIDC provider already uses that name
+     */
+    409: unknown;
+};
+
+export type CreateOidcProviderResponses = {
+    /**
+     * OIDC provider created
+     */
+    201: OidcProviderResponse;
+};
+
+export type CreateOidcProviderResponse = CreateOidcProviderResponses[keyof CreateOidcProviderResponses];
+
+export type DeleteOidcProviderData = {
+    body?: never;
+    path: {
+        provider_id: number;
+    };
+    query?: never;
+    url: '/admin/oidc/providers/{provider_id}';
+};
+
+export type DeleteOidcProviderResponses = {
+    /**
+     * OIDC provider deleted
+     */
+    204: void;
+};
+
+export type DeleteOidcProviderResponse = DeleteOidcProviderResponses[keyof DeleteOidcProviderResponses];
+
+export type UpdateOidcProviderData = {
+    body: UpdateOidcProviderRequest;
+    path: {
+        provider_id: number;
+    };
+    query?: never;
+    url: '/admin/oidc/providers/{provider_id}';
+};
+
+export type UpdateOidcProviderResponses = {
+    /**
+     * OIDC provider updated
+     */
+    200: OidcProviderResponse;
+};
+
+export type UpdateOidcProviderResponse = UpdateOidcProviderResponses[keyof UpdateOidcProviderResponses];
+
+export type ListOidcRoleMappingsData = {
+    body?: never;
+    path: {
+        provider_id: number;
+    };
+    query?: never;
+    url: '/admin/oidc/providers/{provider_id}/role-mappings';
+};
+
+export type ListOidcRoleMappingsResponses = {
+    /**
+     * OIDC role mappings
+     */
+    200: Array<OidcRoleMappingResponse>;
+};
+
+export type ListOidcRoleMappingsResponse = ListOidcRoleMappingsResponses[keyof ListOidcRoleMappingsResponses];
+
+export type CreateOidcRoleMappingData = {
+    body: CreateOidcRoleMappingRequest;
+    path: {
+        provider_id: number;
+    };
+    query?: never;
+    url: '/admin/oidc/providers/{provider_id}/role-mappings';
+};
+
+export type CreateOidcRoleMappingResponses = {
+    /**
+     * Role mapping created
+     */
+    201: OidcRoleMappingResponse;
+};
+
+export type CreateOidcRoleMappingResponse = CreateOidcRoleMappingResponses[keyof CreateOidcRoleMappingResponses];
+
+export type TestOidcProviderData = {
+    body?: never;
+    path: {
+        provider_id: number;
+    };
+    query?: never;
+    url: '/admin/oidc/providers/{provider_id}/test';
+};
+
+export type TestOidcProviderResponses = {
+    /**
+     * Connection test result
+     */
+    200: OidcTestConnectionResponse;
+};
+
+export type TestOidcProviderResponse = TestOidcProviderResponses[keyof TestOidcProviderResponses];
+
+export type ListOidcProviderUsersData = {
+    body?: never;
+    path: {
+        /**
+         * OIDC provider ID
+         */
+        provider_id: number;
+    };
+    query?: never;
+    url: '/admin/oidc/providers/{provider_id}/users';
+};
+
+export type ListOidcProviderUsersErrors = {
+    /**
+     * Provider not found
+     */
+    404: unknown;
+};
+
+export type ListOidcProviderUsersResponses = {
+    /**
+     * Users authenticated via this OIDC provider
+     */
+    200: Array<OidcProviderUserResponse>;
+};
+
+export type ListOidcProviderUsersResponse = ListOidcProviderUsersResponses[keyof ListOidcProviderUsersResponses];
+
+export type DeleteOidcRoleMappingData = {
+    body?: never;
+    path: {
+        mapping_id: number;
+    };
+    query?: never;
+    url: '/admin/oidc/role-mappings/{mapping_id}';
+};
+
+export type DeleteOidcRoleMappingResponses = {
+    /**
+     * Role mapping deleted
+     */
+    204: void;
+};
+
+export type DeleteOidcRoleMappingResponse = DeleteOidcRoleMappingResponses[keyof DeleteOidcRoleMappingResponses];
+
 export type WebhookTriggerData = {
     body: WebhookTriggerRequest;
     path: {
@@ -15245,9 +15715,57 @@ export type GetUsageRecentData = {
     path?: never;
     query?: {
         /**
-         * Max results (defaults to 50, max 100)
+         * Page size (defaults to 20, max 50)
          */
         limit?: number;
+        /**
+         * Number of results to skip for pagination (defaults to 0)
+         */
+        offset?: number;
+        /**
+         * Filter by provider name
+         */
+        provider?: string;
+        /**
+         * Filter by model name
+         */
+        model?: string;
+        /**
+         * Filter by HTTP status code (exact match)
+         */
+        status?: number;
+        /**
+         * Cost greater-than-or-equal, in microcents
+         */
+        cost_gte?: number;
+        /**
+         * Cost strictly greater-than, in microcents
+         */
+        cost_gt?: number;
+        /**
+         * Cost less-than-or-equal, in microcents
+         */
+        cost_lte?: number;
+        /**
+         * Cost strictly less-than, in microcents
+         */
+        cost_lt?: number;
+        /**
+         * Total tokens greater-than-or-equal
+         */
+        tokens_gte?: number;
+        /**
+         * Total tokens strictly greater-than
+         */
+        tokens_gt?: number;
+        /**
+         * Total tokens less-than-or-equal
+         */
+        tokens_lte?: number;
+        /**
+         * Total tokens strictly less-than
+         */
+        tokens_lt?: number;
     };
     url: '/ai/usage/recent';
 };
@@ -15267,9 +15785,9 @@ export type GetUsageRecentError = GetUsageRecentErrors[keyof GetUsageRecentError
 
 export type GetUsageRecentResponses = {
     /**
-     * Recent usage log entries
+     * Page of recent usage log entries
      */
-    200: Array<UsageLogEntry>;
+    200: UsageLogPage;
 };
 
 export type GetUsageRecentResponse = GetUsageRecentResponses[keyof GetUsageRecentResponses];
@@ -17451,6 +17969,59 @@ export type VerifyMagicLinkResponses = {
 };
 
 export type VerifyMagicLinkResponse = VerifyMagicLinkResponses[keyof VerifyMagicLinkResponses];
+
+export type OidcCallbackData = {
+    body?: never;
+    path?: never;
+    query?: {
+        code?: string | null;
+        state?: string | null;
+        error?: string | null;
+        error_description?: string | null;
+    };
+    url: '/auth/oidc/callback';
+};
+
+export type StartOidcLoginData = {
+    body?: never;
+    path: {
+        /**
+         * OIDC provider ID
+         */
+        provider_id: number;
+    };
+    query?: {
+        return_to?: string | null;
+    };
+    url: '/auth/oidc/login/{provider_id}';
+};
+
+export type StartOidcLoginErrors = {
+    /**
+     * Provider not found
+     */
+    404: unknown;
+    /**
+     * OIDC provider unreachable
+     */
+    503: unknown;
+};
+
+export type ListPublicProvidersData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/auth/oidc/providers';
+};
+
+export type ListPublicProvidersResponses = {
+    /**
+     * Enabled OIDC providers for login page
+     */
+    200: OidcProvidersListResponse;
+};
+
+export type ListPublicProvidersResponse = ListPublicProvidersResponses[keyof ListPublicProvidersResponses];
 
 export type RequestPasswordResetData = {
     body: MagicLinkRequest;
