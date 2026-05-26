@@ -7870,8 +7870,14 @@ export type OidcProviderResponse = {
 };
 
 export type OidcProviderSummary = {
-    id: number;
     name: string;
+    /**
+     * Stable opaque slug — use this as the path parameter when initiating
+     * OIDC login (`/auth/oidc/login/{slug}`). The integer database ID is
+     * intentionally omitted from this public endpoint to prevent provider
+     * enumeration.
+     */
+    slug: string;
     /**
      * The template the provider was created from — e.g. `keycloak`,
      * `okta`, `auth0`, `google`, `azure-ad`, or `generic`. Surfaced on
@@ -9213,6 +9219,19 @@ export type ProjectResponse = {
      * Preset-specific configuration (Dockerfile path, build context, etc.)
      */
     preset_config?: unknown;
+    /**
+     * Idle timeout (seconds) for on-demand preview environments.
+     */
+    preview_envs_idle_timeout_seconds: number;
+    /**
+     * When true, newly-created preview environments default to on-demand mode
+     * (containers stop after the configured idle timeout to save resources).
+     */
+    preview_envs_on_demand: boolean;
+    /**
+     * Wake timeout (seconds) for on-demand preview environments.
+     */
+    preview_envs_wake_timeout_seconds: number;
     repo_name?: string | null;
     repo_owner?: string | null;
     slug: string;
@@ -13507,6 +13526,18 @@ export type UpdateProjectSettingsRequest = {
     main_branch?: string | null;
     preset?: string | null;
     preset_config?: null | PresetConfigSchema;
+    /**
+     * Idle timeout (seconds, 60..=86400) for on-demand preview environments.
+     */
+    preview_envs_idle_timeout_seconds?: number | null;
+    /**
+     * When true, newly-created preview environments default to on-demand mode.
+     */
+    preview_envs_on_demand?: boolean | null;
+    /**
+     * Wake timeout (seconds, 5..=120) for on-demand preview environments.
+     */
+    preview_envs_wake_timeout_seconds?: number | null;
     repo_name?: string | null;
     repo_owner?: string | null;
     slug?: string | null;
@@ -14899,6 +14930,10 @@ export type UploadReleaseFileErrors = {
      * Project not found
      */
     404: unknown;
+    /**
+     * Source map file exceeds the 50 MiB per-field limit
+     */
+    413: unknown;
 };
 
 export type UploadReleaseFileResponses = {
@@ -17982,21 +18017,21 @@ export type OidcCallbackData = {
     url: '/auth/oidc/callback';
 };
 
-export type StartOidcLoginData = {
+export type StartOidcLoginBySlugData = {
     body?: never;
     path: {
         /**
-         * OIDC provider ID
+         * OIDC provider slug (from /email-status or /auth/oidc/providers)
          */
-        provider_id: number;
+        slug: string;
     };
     query?: {
         return_to?: string | null;
     };
-    url: '/auth/oidc/login/{provider_id}';
+    url: '/auth/oidc/login/{slug}';
 };
 
-export type StartOidcLoginErrors = {
+export type StartOidcLoginBySlugErrors = {
     /**
      * Provider not found
      */
@@ -39747,6 +39782,10 @@ export type IngestSentryEnvelopeErrors = {
      * Unauthorized
      */
     401: unknown;
+    /**
+     * Request body too large (exceeds 2 MiB)
+     */
+    413: unknown;
 };
 
 export type IngestSentryEnvelopeResponses = {
@@ -39777,6 +39816,10 @@ export type IngestSentryEventErrors = {
      * Unauthorized
      */
     401: unknown;
+    /**
+     * Request body too large (exceeds 2 MiB)
+     */
+    413: unknown;
 };
 
 export type IngestSentryEventResponses = {
