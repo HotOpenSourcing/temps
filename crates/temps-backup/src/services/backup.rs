@@ -5,7 +5,6 @@ use anyhow::Result;
 use aws_sdk_s3::error::ProvideErrorMetadata;
 use aws_sdk_s3::{Client as S3Client, Config};
 use chrono::{DateTime, Duration, Timelike, Utc};
-
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseBackend, DatabaseConnection, EntityTrait,
     FromQueryResult, IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder, Statement,
@@ -2010,7 +2009,7 @@ impl BackupService {
             .credentials_provider(creds)
             .http_client(crate::engines::v2_common::bundled_roots_http_client());
 
-        // Only set endpoint URL if endpoint is specified (for Minio)
+        // Only set endpoint URL if endpoint is specified (for Minio/custom S3)
         if let Some(endpoint) = &s3_source.endpoint {
             let endpoint_url = if endpoint.starts_with("http") {
                 endpoint.clone()
@@ -7379,6 +7378,7 @@ mod tests {
             println!("Docker not available, skipping test");
             return;
         }
+
         use temps_database::test_utils::TestDatabase;
         use testcontainers::{runners::AsyncRunner, GenericImage, ImageExt};
 
@@ -7644,6 +7644,7 @@ mod tests {
             println!("Docker not available, skipping test");
             return;
         }
+
         use temps_database::test_utils::TestDatabase;
         use testcontainers::{runners::AsyncRunner, GenericImage, ImageExt};
 
