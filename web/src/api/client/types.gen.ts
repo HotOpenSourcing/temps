@@ -2490,6 +2490,14 @@ export type CreateOidcProviderRequest = {
     role_claim?: string;
     scopes?: string;
     template?: string;
+    /**
+     * Defaults false. Set to true only for IdPs where an admin
+     * controls user provisioning (corporate Okta, Azure AD) and
+     * self-signup of arbitrary emails is not possible — see the
+     * `trust_idp_email` field on `oidc_providers::Model` for the
+     * security tradeoff this enables.
+     */
+    trust_idp_email?: boolean;
 };
 
 export type CreateOidcRoleMappingRequest = {
@@ -7907,6 +7915,12 @@ export type OidcProviderResponse = {
     role_claim: string;
     scopes: string;
     template: string;
+    /**
+     * When true, the resolver skips the `email_verified` claim gate
+     * during SSO login. Only safe for IdPs where an admin controls
+     * user provisioning — see `oidc_providers::Model::trust_idp_email`.
+     */
+    trust_idp_email: boolean;
 };
 
 export type OidcProviderSummary = {
@@ -13532,6 +13546,7 @@ export type UpdateOidcProviderRequest = {
     role_claim?: string | null;
     scopes?: string | null;
     template?: string | null;
+    trust_idp_email?: boolean | null;
 };
 
 export type UpdatePreferencesRequest = {

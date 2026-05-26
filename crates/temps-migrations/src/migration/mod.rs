@@ -101,6 +101,7 @@ mod m20260519_000003_add_include_control_plane;
 mod m20260522_000001_oidc_sso;
 mod m20260522_000002_oidc_role_mappings;
 mod m20260526_000001_add_preview_envs_on_demand;
+mod m20260526_000002_add_trust_idp_email_to_oidc_providers;
 
 pub struct Migrator;
 
@@ -205,6 +206,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260522_000001_oidc_sso::Migration),
             Box::new(m20260522_000002_oidc_role_mappings::Migration),
             Box::new(m20260526_000001_add_preview_envs_on_demand::Migration),
+            Box::new(m20260526_000002_add_trust_idp_email_to_oidc_providers::Migration),
         ]
     }
 }
