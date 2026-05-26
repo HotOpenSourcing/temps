@@ -620,6 +620,13 @@ export type ApiKeyResponse = {
 export type AppSettings = {
     agent_sandbox?: AgentSandboxSettings;
     ai_config?: AiConfigSettings;
+    /**
+     * Build-time resource limits applied on the control plane to prevent
+     * `docker build` from saturating host CPU/RAM. Worker nodes are
+     * intentionally NOT subject to these limits (each worker is dedicated
+     * hardware that already has its own per-host headroom).
+     */
+    build_limits?: BuildLimitsSettings;
     container_logs?: ContainerLogSettings;
     disk_space_alert?: DiskSpaceAlertSettings;
     dns_provider?: DnsProviderSettings;
@@ -1129,6 +1136,39 @@ export type BuildConfiguration = {
      * Target stage (for multi-stage builds)
      */
     target?: string | null;
+};
+
+/**
+ * Control-plane build resource limits.
+ *
+ * Caps how many builds run concurrently AND how much CPU/memory each build
+ * is allowed to consume. A single global semaphore in the deployer crate
+ * gates every `DockerRuntime::build_image` call to `max_concurrent`. When
+ * the semaphore is full, additional builds queue and wait — they do not
+ * fail. Per-build CPU/memory caps are forwarded to Docker via
+ * `BuildImageOptions { memory, cpuquota, cpuperiod }`.
+ *
+ * `cpu_limit_cores = 0.0` or `memory_limit_mb = 0` means "no explicit cap"
+ * — fall back to the legacy 50%-of-host heuristic for backwards
+ * compatibility with operators who never visit the settings page.
+ */
+export type BuildLimitsSettings = {
+    /**
+     * CPU cores allowed per build (float, e.g. 2.0 = 2 cores, 0.5 = half
+     * a core). 0 means "use the legacy 50%-of-host default".
+     */
+    cpu_limit_cores?: number;
+    /**
+     * Maximum number of `docker build` operations allowed to run at the
+     * same time on the control plane. Additional builds queue. Min 1.
+     */
+    max_concurrent?: number;
+    /**
+     * Memory allowed per build, in megabytes. 0 means "use the legacy
+     * 50%-of-host default". Docker enforces this as a hard cap — builds
+     * that exceed it OOM-kill.
+     */
+    memory_limit_mb?: number;
 };
 
 /**
