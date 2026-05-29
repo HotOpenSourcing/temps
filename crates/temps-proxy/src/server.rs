@@ -22,7 +22,7 @@ use temps_config::ServerConfig;
 use temps_core::plugin::{ServiceRegistrationContext, TempsPlugin};
 use temps_database::DbConnection;
 use temps_routes::CachedPeerTable;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 use async_trait::async_trait;
 use std::future::Future;
@@ -285,52 +285,14 @@ pub fn setup_proxy_server(
         lb = lb.with_admin_gate(gate);
     }
 
-    // Wire up on-demand scale-to-zero if OnDemandManager was created
+    // Wire up on-demand scale-to-zero if OnDemandManager was created.
+    //
+    // The sleeping-domain callback is registered by the caller (serve)
+    // BEFORE the route listener's initial load runs, so the first load itself
+    // populates sleeping domains and on-demand configs — there is no longer a
+    // duplicate `load_routes()` here gating the proxy bind. The idle sweep is
+    // likewise started by the caller alongside callback registration.
     if let Some(ref on_demand_manager) = on_demand_manager {
-        // Register callback so sleeping domains and on-demand configs are populated on every route reload
-        let on_demand_for_callback = Arc::clone(on_demand_manager);
-        route_table.set_on_sleeping_callback(Arc::new(move |entries, on_demand_configs| {
-            on_demand_for_callback.clear_sleeping_domains();
-            for entry in entries {
-                on_demand_for_callback.register_sleeping_domain(
-                    entry.domain.clone(),
-                    crate::on_demand::SleepingEnvironmentInfo {
-                        environment_id: entry.environment_id,
-                        project_id: entry.project_id,
-                        deployment_id: entry.deployment_id,
-                        wake_timeout_seconds: entry.wake_timeout_seconds,
-                    },
-                );
-            }
-            // Register on-demand configs so the idle sweep can track awake environments
-            for config in on_demand_configs {
-                on_demand_for_callback.register_on_demand_environment(
-                    config.environment_id,
-                    config.idle_timeout_seconds,
-                    config.wake_timeout_seconds,
-                );
-            }
-            // Signal any requests waiting for routes after a wake
-            on_demand_for_callback.notify_route_reloaded();
-        }));
-
-        // Reload routes so the callback populates on-demand configs.
-        // The initial load_routes() in start_listening() runs before this callback
-        // is registered, so without this reload the configs DashMap stays empty
-        // until the next PG NOTIFY event, and the idle sweep has nothing to check.
-        {
-            let rt = tokio::runtime::Runtime::new()?;
-            if let Err(e) = rt.block_on(route_table.load_routes()) {
-                error!(
-                    "Failed to reload routes for on-demand config population: {}",
-                    e
-                );
-            }
-        }
-
-        // Start background idle sweep (checks every 60 seconds)
-        on_demand_manager.start_sweep_task(std::time::Duration::from_secs(60));
-
         lb = lb.with_on_demand_manager(Arc::clone(on_demand_manager));
         info!("On-demand scale-to-zero enabled");
     }
