@@ -133,7 +133,11 @@ export async function login(options: LoginOptions): Promise<void> {
 
   // Headless / CI path: caller supplied a pre-minted API key.
   if (options.apiKey) {
-    await loginWithApiKey(options.apiKey)
+    await loginWithApiKey(options.apiKey, {
+      url: options.url,
+      context: options.context,
+      debug,
+    })
     return
   }
 
@@ -409,7 +413,11 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-export async function loginWithApiKey(apiKey?: string): Promise<void> {
+export async function loginWithApiKey(
+  apiKey?: string,
+  opts: { url?: string; context?: string; debug?: boolean } = {},
+): Promise<void> {
+  const debug = debugEnabled(opts)
   const key = apiKey ?? (await promptPassword({
     message: 'API Key',
     validate: (value) => {
@@ -420,9 +428,27 @@ export async function loginWithApiKey(apiKey?: string): Promise<void> {
     },
   }))
 
-  // Temporarily set the API key to validate it
+  // Resolve the target server BEFORE validating the key. Without this, an
+  // API-key login ignores the URL the caller passed (positional arg or
+  // --url) and validates against whatever `config.get('apiUrl')` happens to
+  // return — the active context, TEMPS_API_URL, or the localhost default.
+  // On a machine with a stale/absent context that means we'd validate the
+  // key against the wrong server, get "Invalid API key", and wipe creds.
+  const baseUrl = opts.url
+    ? serverBaseUrl(opts.url)
+    : serverBaseUrl(config.get('apiUrl'))
+  if (opts.url) {
+    config.set('apiUrl', baseUrl)
+  }
+  if (debug) {
+    debugLog(`api-key login resolved apiUrl: ${baseUrl}`)
+    debugLog(`raw url arg: ${opts.url ?? '(none, using config apiUrl)'}`)
+  }
+
+  // Temporarily set the API key to validate it. Pass `baseUrl` explicitly so
+  // validation hits the named server even if another context is active.
   await credentials.set('apiKey', key)
-  await setupClient()
+  await setupClient(baseUrl)
 
   try {
     const result = await withSpinner(
@@ -449,8 +475,8 @@ export async function loginWithApiKey(apiKey?: string): Promise<void> {
     // Mirror the API-key login into the multi-context store so subsequent
     // commands resolve credentials uniformly. We don't know the key prefix
     // or expiry from a manually-pasted key, so those fields stay empty.
-    const baseUrl = serverBaseUrl(config.get('apiUrl'))
-    const ctxName = defaultContextName(baseUrl)
+    const ctxName = opts.context ?? defaultContextName(baseUrl)
+    config.set('apiUrl', baseUrl)
     await upsertContext({
       name: ctxName,
       url: baseUrl,

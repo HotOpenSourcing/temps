@@ -14,8 +14,11 @@ export function normalizeApiUrl(url: string): string {
   return normalized
 }
 
-export async function setupClient(): Promise<void> {
-  const apiUrl = normalizeApiUrl(config.get('apiUrl'))
+export async function setupClient(baseUrlOverride?: string): Promise<void> {
+  // An explicit override wins over config resolution. The api-key login path
+  // uses this so it validates against the server the caller named, not
+  // whatever context happens to be active.
+  const apiUrl = normalizeApiUrl(baseUrlOverride ?? config.get('apiUrl'))
 
   client.setConfig({
     baseUrl: apiUrl,
