@@ -2,6 +2,9 @@ import type { Command } from 'commander'
 import { overview } from './overview.js'
 import { breakdown } from './breakdown.js'
 import { funnelsOverview } from './funnels.js'
+import { aiAgents } from './ai-agents.js'
+import { aiPages } from './ai-pages.js'
+import { aiPage } from './ai-page.js'
 
 export function registerAnalyticsCommands(program: Command): void {
   const analytics = program
@@ -37,6 +40,51 @@ export function registerAnalyticsCommands(program: Command): void {
     .option('--json', 'Output in JSON format')
     .action(funnelsOverview)
 
+  analytics
+    .command('ai-agents')
+    .description('Show AI crawler / provider breakdown (web /analytics/ai-agents)')
+    .option('-p, --project <project>', 'Project slug or ID')
+    .option('--period <period>', 'Time period: today, <n>h, <n>d, <n>m (e.g. 24h, 7d, 30d)', '24h')
+    .option('--limit <n>', 'Number of rows to fetch (default: 20, max: 100)')
+    .option(
+      '--group-by <mode>',
+      'Group rows by "agent" (default) or "provider"',
+      'agent'
+    )
+    .option('--path <path>', 'Restrict to one URL path (e.g. /docs)')
+    .option('--json', 'Output in JSON format')
+    .action(aiAgents)
+
+  analytics
+    .command('ai-pages')
+    .description('Show pages crawled by AI agents, with distinct-agent counts')
+    .option('-p, --project <project>', 'Project slug or ID')
+    .option('--period <period>', 'Time period: today, <n>h, <n>d, <n>m (e.g. 24h, 7d, 30d)', '24h')
+    .option('--limit <n>', 'Number of pages to fetch (default: 20, max: 100)')
+    .option('--path <path>', 'Restrict to one URL path (returns just that row)')
+    .option(
+      '--with-agents',
+      'Also fetch and render the per-agent split for each page (slower)'
+    )
+    .option('--json', 'Output in JSON format')
+    .action(aiPages)
+
+  analytics
+    .command('ai-page <path>')
+    .description(
+      'Show which agents/providers crawled a single page (e.g. /docs)'
+    )
+    .option('-p, --project <project>', 'Project slug or ID')
+    .option('--period <period>', 'Time period: today, <n>h, <n>d, <n>m (e.g. 24h, 7d, 30d)', '24h')
+    .option('--limit <n>', 'Number of rows to fetch (default: 50, max: 100)')
+    .option(
+      '--group-by <mode>',
+      'Group rows by "agent" (default) or "provider"',
+      'agent'
+    )
+    .option('--json', 'Output in JSON format')
+    .action(aiPage)
+
   // Default: no subcommand shows help with available commands
   analytics.addHelpText(
     'after',
@@ -48,6 +96,16 @@ Examples:
   $ temps analytics top pages -p my-app --period 30d
   $ temps analytics top referrers --period 1h
   $ temps analytics top browsers --period 48h --json
-  $ temps analytics top countries --period 3m --limit 50`
+  $ temps analytics top countries --period 3m --limit 50
+
+  AI agents (mirrors /analytics/ai-agents):
+  $ temps analytics ai-agents -p my-app --period 24h
+  $ temps analytics ai-agents -p my-app --group-by provider --period 7d
+  $ temps analytics ai-agents -p my-app --path /docs --json
+  $ temps analytics ai-pages   -p my-app --period 24h
+  $ temps analytics ai-pages   -p my-app --period 7d --with-agents --limit 10
+  $ temps analytics ai-pages   -p my-app --path /pricing --json
+  $ temps analytics ai-page /docs -p my-app --period 24h
+  $ temps analytics ai-page /pricing -p my-app --group-by provider`
   )
 }

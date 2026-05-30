@@ -570,6 +570,39 @@ impl MarkDeploymentCompleteJob {
             "Environment {} current_deployment_id updated to {}",
             environment_id, self.deployment_id
         );
+
+        // ── Phase 1.5: Request an in-process route reload ────────────────
+        //
+        // Publish ForceRouteReload on the shared broadcast queue so the
+        // in-process RouteReloadSubscriber reloads the route table directly,
+        // without depending on PostgreSQL LISTEN/NOTIFY. The NOTIFY path is
+        // fire-and-forget: if the proxy's long-lived listener connection has
+        // silently died (idle-timeout on a pooler, dropped socket, failover),
+        // the trigger's notification is lost and the new route never goes live
+        // until a manual reload. The broadcast queue has no DB connection in
+        // its critical path, so this signal cannot be lost between deployments
+        // in a single-node process. The DB UPDATE above still fires the PG
+        // NOTIFY, which remains the propagation mechanism for remote worker
+        // nodes that do not share this queue. We subscribed to the queue at the
+        // top of `run` (before the UPDATE) so we cannot miss the resulting
+        // RouteTableUpdated confirmation.
+        if let Err(e) = self
+            .queue
+            .send(Job::ForceRouteReload(temps_core::ForceRouteReloadJob {
+                environment_id: Some(environment_id),
+                deployment_id: Some(self.deployment_id),
+            }))
+            .await
+        {
+            // Non-fatal: the PG NOTIFY path and the periodic fallback NOTIFY in
+            // wait_for_route_ready can still drive the reload. Log and continue.
+            warn!(
+                "Failed to publish in-process ForceRouteReload for environment {} deployment {}: {} \
+                 — falling back to PG NOTIFY",
+                environment_id, self.deployment_id, e
+            );
+        }
+
         self.log(format!(
             "Environment {} now points to deployment {} — waiting for route table confirmation...",
             environment_id, self.deployment_id
@@ -578,10 +611,11 @@ impl MarkDeploymentCompleteJob {
 
         // ── Phase 2: Wait for route table confirmation ───────────────────
         //
-        // The PG trigger on environments.current_deployment_id fires a NOTIFY,
-        // the route listener calls load_routes(), and on success publishes
-        // RouteTableUpdated to the queue with environment_id + deployment_id.
-        // We wait here until we see the matching event or timeout.
+        // The in-process ForceRouteReload (above) and/or the PG trigger on
+        // environments.current_deployment_id drive a load_routes() in the
+        // proxy, which on success publishes RouteTableUpdated to the queue with
+        // environment_id + deployment_id. We wait here until we see the
+        // matching event or timeout.
         const ROUTE_READY_TIMEOUT_SECS: u64 = 60;
         let route_ready = Self::wait_for_route_ready(
             &mut route_receiver,
@@ -950,13 +984,20 @@ impl MarkDeploymentCompleteJob {
                             ));
                         }
                         Err(e) => {
+                            // Do NOT optimistically confirm: a transient DB error
+                            // here, combined with a concurrent superseding deploy,
+                            // could mark this deployment complete (and tear down
+                            // the previous containers) while the proxy actually
+                            // serves a different deployment's routes. Keep waiting;
+                            // the loop will retry verification on the next event or
+                            // eventually time out and revert to the last good
+                            // deployment — the safe outcome.
                             warn!(
-                                "DB verification failed after route event: {} — \
-                                 treating event as confirmation",
-                                e
+                                "DB verification failed after route event for environment {} deployment {}: {} \
+                                 — not confirming, will retry until next event or timeout",
+                                environment_id, deployment_id, e
                             );
-                            // If we can't verify, trust the event (better than timing out)
-                            return Ok(());
+                            continue;
                         }
                     }
                 }

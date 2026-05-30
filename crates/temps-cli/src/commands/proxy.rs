@@ -258,6 +258,24 @@ impl ProxyCommand {
             }
         });
 
+        // Start the in-process route reload subscriber. Reloads the route table
+        // on Job::ForceRouteReload published over the shared queue.
+        //
+        // NOTE: In this standalone `temps proxy` command the deploy pipeline
+        // runs in a *separate* control-plane process with its own queue, so
+        // ForceRouteReload events never reach this subscriber — the PG
+        // LISTEN/NOTIFY path (ProjectChangeListener / RouteTableListener above)
+        // remains the route-reload mechanism here. The deterministic in-process
+        // path only applies to the single-binary `temps serve` mode where the
+        // control plane and proxy share one queue. We still wire the subscriber
+        // for consistency and so it works if this process ever also runs the
+        // deploy pipeline. Kept alive on the stack so its Drop doesn't abort the task.
+        info!("Starting route reload subscriber...");
+        let route_reload_subscriber =
+            temps_routes::RouteReloadSubscriber::new(route_table.clone(), queue.clone());
+        // start() calls tokio::spawn, so it must run inside the runtime context.
+        rt.block_on(async { route_reload_subscriber.start() });
+
         let shutdown_signal = Box::new(CtrlCShutdownSignal::new(
             Duration::from_secs(30),
             db.clone(),

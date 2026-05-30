@@ -86,11 +86,65 @@ export async function getContext(name: string): Promise<CliContext | null> {
   return contexts.find((c) => c.name === name) ?? null
 }
 
+/**
+ * Resolve which context name is "active", honoring the `TEMPS_CONTEXT`
+ * environment override. Returns the trimmed env value if set, else null
+ * (meaning: fall back to the on-disk `isActive` flag).
+ *
+ * `TEMPS_CONTEXT` lets CI / per-shell sessions pin a context without
+ * mutating the shared `.contexts.json` (the way `temps context use` does),
+ * mirroring how `TEMPS_API_URL` overrides the resolved URL.
+ */
+export function envContextName(): string | null {
+  const raw = process.env.TEMPS_CONTEXT
+  if (raw === undefined) return null
+  const trimmed = raw.trim()
+  return trimmed.length > 0 ? trimmed : null
+}
+
+/**
+ * One-time stderr warning when `TEMPS_CONTEXT` names a context that doesn't
+ * exist. We warn rather than silently falling back to a different context's
+ * credentials — picking the wrong server silently is how you push to prod by
+ * accident. Deduped so the resolver (called many times per command) only
+ * prints once.
+ */
+let warnedMissingContext = false
+/** Test-only: reset the one-time missing-context warning latch. */
+export function __resetMissingContextWarning(): void {
+  warnedMissingContext = false
+}
+function warnMissingContext(name: string, available: CliContext[]): void {
+  if (warnedMissingContext) return
+  warnedMissingContext = true
+  const names = available.map((c) => c.name).join(', ') || '(none)'
+  process.stderr.write(
+    `[temps] TEMPS_CONTEXT="${name}" does not match any configured context. ` +
+      `Available: ${names}. Not authenticated.\n`,
+  )
+}
+
+/**
+ * Pick the active context from an already-loaded list, applying the
+ * `TEMPS_CONTEXT` override. When the env var names a context that exists we
+ * return it; when it names a missing one we return null (and warn once);
+ * with no env var we fall back to the `isActive` flag, then the first entry.
+ */
+export function pickActiveContext(contexts: CliContext[]): CliContext | null {
+  if (contexts.length === 0) return null
+  const envName = envContextName()
+  if (envName) {
+    const match = contexts.find((c) => c.name === envName)
+    if (match) return match
+    warnMissingContext(envName, contexts)
+    return null
+  }
+  return contexts.find((c) => c.isActive) ?? contexts[0] ?? null
+}
+
 /** Get the active context (or the only one when nothing is marked active). */
 export async function getActiveContext(): Promise<CliContext | null> {
-  const contexts = await loadContexts()
-  if (contexts.length === 0) return null
-  return contexts.find((c) => c.isActive) ?? contexts[0] ?? null
+  return pickActiveContext(await loadContexts())
 }
 
 /**
@@ -185,12 +239,17 @@ export function contextsPath(): string {
 export function getActiveContextSync(): CliContext | null {
   try {
     const path = getContextsPath()
-    if (!existsSync(path)) return null
+    if (!existsSync(path)) {
+      // No file, but the env var may still have been set — warn so the user
+      // isn't confused why their TEMPS_CONTEXT had no effect.
+      const envName = envContextName()
+      if (envName) warnMissingContext(envName, [])
+      return null
+    }
     const content = readFileSync(path, 'utf-8')
     const parsed = JSON.parse(content) as unknown
     if (!Array.isArray(parsed) || parsed.length === 0) return null
-    const list = parsed as CliContext[]
-    return list.find((c) => c.isActive) ?? list[0] ?? null
+    return pickActiveContext(parsed as CliContext[])
   } catch {
     return null
   }

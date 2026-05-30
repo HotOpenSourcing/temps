@@ -358,6 +358,38 @@ impl CachedPeerTable {
         self.generation_changed.clone()
     }
 
+    /// Whether the route table has completed at least one successful load.
+    ///
+    /// `generation` only ever increments at the very end of a successful
+    /// `load_routes()`, so `generation == 0` reliably means "never loaded".
+    /// Used by the proxy to decide whether to wait for the first load before
+    /// falling back to the console for an unmatched host (the proxy now binds
+    /// its listeners before the initial route load completes).
+    pub fn has_loaded(&self) -> bool {
+        self.current_generation() > 0
+    }
+
+    /// Wait until the route table has loaded at least once, up to `timeout`.
+    ///
+    /// Returns `true` if the table is (or became) loaded, `false` on timeout.
+    /// Mirrors `OnDemandManager::wait_for_route_reload`: build the `Notified`
+    /// future *before* re-checking `has_loaded()` so a generation bump that
+    /// races this call can't be missed (lost-wakeup safe).
+    pub async fn wait_until_loaded(&self, timeout: std::time::Duration) -> bool {
+        if self.has_loaded() {
+            return true;
+        }
+        let notified = self.generation_changed.notified();
+        // Re-check after arming the notification to close the race window.
+        if self.has_loaded() {
+            return true;
+        }
+        match tokio::time::timeout(timeout, notified).await {
+            Ok(()) => self.has_loaded(),
+            Err(_) => self.has_loaded(),
+        }
+    }
+
     /// Set a callback that fires after each `load_routes()` with the sleeping environment entries.
     pub fn set_on_sleeping_callback(&self, callback: OnSleepingCallback) {
         *self.on_sleeping_callback.lock() = Some(callback);
@@ -1404,23 +1436,30 @@ impl CachedPeerTable {
             callback(sleeping_environments.clone(), on_demand_configs);
         }
 
-        // Fire the async on-reload hook used by the deployment-DNS
-        // publisher. We snapshot the Arc out of the mutex first so the
-        // mutex isn't held across the await.
-        let on_reload = self.on_reload_callback.lock().as_ref().cloned();
-        if let Some(callback) = on_reload {
-            callback().await;
-        }
-
         // Bump the in-memory generation and wake any long-poll waiters
-        // on the routes-sync endpoint. Order matters: bump first, then
-        // notify, so a wake-up that races with a subsequent fetch
-        // always sees the new value.
+        // on the routes-sync endpoint, plus anything waiting for the first
+        // load via `wait_until_loaded`. Order matters: bump first, then
+        // notify, so a wake-up that races with a subsequent fetch always
+        // sees the new value. Do this BEFORE the DNS reconcile so readiness
+        // waiters are released as soon as the in-memory maps are live —
+        // they must never be gated on DNS work.
         let new_gen = self
             .generation
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
             + 1;
         self.generation_changed.notify_waiters();
+
+        // Fire the async on-reload hook used by the deployment-DNS publisher
+        // as a detached task. It's whole-set idempotent and must not block the
+        // route load (or, by extension, the proxy's first-load readiness wait).
+        // We snapshot the Arc out of the mutex first so the mutex isn't held
+        // across the spawn.
+        let on_reload = self.on_reload_callback.lock().as_ref().cloned();
+        if let Some(callback) = on_reload {
+            tokio::spawn(async move {
+                callback().await;
+            });
+        }
 
         // Persist the new generation into the durable singleton so
         // `mark_deployment_complete` can wait until every active
@@ -1520,18 +1559,19 @@ impl RouteTableListener {
         }
     }
 
-    /// Start listening for route table changes
-    /// This performs an initial load and then listens for PostgreSQL notifications
+    /// Start listening for route table changes.
+    ///
+    /// Subscribes to PostgreSQL NOTIFYs first, then kicks off the initial route
+    /// load on a detached task. Returning as soon as the LISTEN socket is up
+    /// (rather than after the initial load) lets the proxy bind its listeners
+    /// without waiting for the full, DB-heavy route load — the table fills in
+    /// asynchronously and the proxy's first-load readiness wait covers the gap.
+    ///
+    /// Subscribing *before* the load (instead of after) closes a race: a NOTIFY
+    /// fired during the initial load is buffered by the already-subscribed
+    /// `PgListener` and drained by the recv loop, so no change is missed.
     pub async fn start_listening(self: Arc<Self>) -> anyhow::Result<()> {
-        // Initial load
-        debug!("Loading initial route table...");
-        self.peer_table.load_routes().await?;
-        debug!(
-            "Initial route table loaded with {} entries",
-            self.peer_table.len()
-        );
-
-        // Create PostgreSQL listener using sqlx
+        // Create PostgreSQL listener using sqlx and subscribe BEFORE the load.
         let pool = PgPool::connect(&self.database_url).await?;
         let mut listener = PgListener::connect_with(&pool).await?;
 
@@ -1539,6 +1579,19 @@ impl RouteTableListener {
         debug!(
             "Started listening for route table changes on PostgreSQL channel 'route_table_changes'"
         );
+
+        // Kick off the initial load in the background — do NOT await it here.
+        let initial_peer_table = self.peer_table.clone();
+        tokio::spawn(async move {
+            debug!("Loading initial route table (background)...");
+            match initial_peer_table.load_routes().await {
+                Ok(_) => debug!(
+                    "Initial route table loaded with {} entries",
+                    initial_peer_table.len()
+                ),
+                Err(e) => error!("Initial route table load failed: {}", e),
+            }
+        });
 
         // Spawn background task driven purely by PG NOTIFY events. Reloads
         // happen on demand: a NOTIFY arrives (insert/update/delete via DB
@@ -1999,5 +2052,67 @@ mod tests {
 
         assert_eq!(addr_docker, addr_baremetal);
         assert_eq!(addr_docker, "10.100.0.5:8080");
+    }
+
+    // ========================================================================
+    // First-load readiness (has_loaded / wait_until_loaded)
+    // ========================================================================
+
+    #[test]
+    fn test_has_loaded_is_false_before_first_load() {
+        let db = Arc::new(sea_orm::DatabaseConnection::Disconnected);
+        let table = CachedPeerTable::new(db);
+        assert!(
+            !table.has_loaded(),
+            "a freshly constructed table must report not-loaded (generation 0)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wait_until_loaded_times_out_when_never_loaded() {
+        let db = Arc::new(sea_orm::DatabaseConnection::Disconnected);
+        let table = CachedPeerTable::new(db);
+        // Never loaded → must return false within the (short) timeout.
+        let loaded = table
+            .wait_until_loaded(std::time::Duration::from_millis(50))
+            .await;
+        assert!(!loaded, "wait_until_loaded must report false on timeout");
+    }
+
+    #[tokio::test]
+    async fn test_wait_until_loaded_returns_immediately_when_already_loaded() {
+        let db = Arc::new(sea_orm::DatabaseConnection::Disconnected);
+        let table = CachedPeerTable::new(db);
+        // Simulate a completed load by bumping the generation directly.
+        table
+            .generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        assert!(table.has_loaded());
+        let loaded = table
+            .wait_until_loaded(std::time::Duration::from_secs(5))
+            .await;
+        assert!(loaded, "already-loaded table must report true immediately");
+    }
+
+    #[tokio::test]
+    async fn test_wait_until_loaded_wakes_on_generation_bump() {
+        let db = Arc::new(sea_orm::DatabaseConnection::Disconnected);
+        let table = Arc::new(CachedPeerTable::new(db));
+        let waiter = table.clone();
+        let handle = tokio::spawn(async move {
+            waiter
+                .wait_until_loaded(std::time::Duration::from_secs(5))
+                .await
+        });
+        // Give the waiter a moment to arm its Notified future, then simulate a
+        // load completing (bump generation + notify), mirroring load_routes().
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        table
+            .generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        table.generation_changed.notify_waiters();
+
+        let loaded = handle.await.expect("waiter task panicked");
+        assert!(loaded, "waiter must wake and report loaded after a bump");
     }
 }

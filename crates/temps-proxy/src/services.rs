@@ -17,6 +17,14 @@ const ROUTE_PREFIX_TEMPS: &str = "/api/_temps";
 const VISITOR_ID_COOKIE: &str = "_temps_visitor_id";
 const SESSION_ID_COOKIE: &str = "_temps_sid";
 
+/// How long a request will wait for the route table's first load to complete
+/// before falling back to the console. The proxy now binds its listeners before
+/// the initial (DB-heavy) route load finishes, so a request that arrives in that
+/// brief startup window would otherwise be sent to the console instead of its
+/// real backend. This only applies until the first successful load; afterwards an
+/// unmatched host falls through immediately, exactly as before.
+const FIRST_LOAD_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Generate project-scoped cookie name for visitor
 fn get_visitor_cookie_name(_project_id: Option<i32>) -> String {
     VISITOR_ID_COOKIE.to_string()
@@ -79,68 +87,89 @@ impl UpstreamResolver for UpstreamResolverImpl {
             });
         }
 
-        // 1. First try TLS/SNI-based routing
+        // Try the in-memory route table across all three lookup strategies
+        // (TLS/SNI, HTTP host, legacy). Returns the matched peer, if any.
         let sni_or_host = sni_hostname.unwrap_or(host);
-        if let Some(route_info) = self.route_table.get_route_by_sni(sni_or_host) {
-            let selection = route_info.select_backend();
-            debug!(
-                "Found TLS route via SNI/Host {} -> {}",
-                sni_or_host, selection.address
-            );
-            let peer = Box::new(HttpPeer::new(
-                selection.address.clone(),
-                false,
-                "".to_string(),
-            ));
-            return Ok(PeerSelection {
-                peer,
-                container_id: selection.container_id,
-                container_name: selection.container_name,
-            });
+        let lookup = |label: &str| -> Option<PeerSelection> {
+            // 1. TLS/SNI-based routing
+            if let Some(route_info) = self.route_table.get_route_by_sni(sni_or_host) {
+                let selection = route_info.select_backend();
+                debug!(
+                    "{}: found TLS route via SNI/Host {} -> {}",
+                    label, sni_or_host, selection.address
+                );
+                return Some(PeerSelection {
+                    peer: Box::new(HttpPeer::new(
+                        selection.address.clone(),
+                        false,
+                        "".to_string(),
+                    )),
+                    container_id: selection.container_id,
+                    container_name: selection.container_name,
+                });
+            }
+
+            // 2. HTTP Host-based routing (HTTP routes)
+            if let Some(route_info) = self.route_table.get_route_by_host(host) {
+                let project_id = route_info.project.as_ref().map(|p| p.id);
+                let env_id = route_info.environment.as_ref().map(|e| e.id);
+                let selection = route_info.select_backend();
+                debug!(
+                    "{}: found HTTP route for {} -> {} (project_id: {:?}, env_id: {:?})",
+                    label, host, selection.address, project_id, env_id
+                );
+                return Some(PeerSelection {
+                    peer: Box::new(HttpPeer::new(
+                        selection.address.clone(),
+                        false,
+                        "".to_string(),
+                    )),
+                    container_id: selection.container_id,
+                    container_name: selection.container_name,
+                });
+            }
+
+            // 3. Legacy: the old get_route method for backwards compatibility
+            if let Some(route_info) = self.route_table.get_route(host) {
+                let project_id = route_info.project.as_ref().map(|p| p.id);
+                let env_id = route_info.environment.as_ref().map(|e| e.id);
+                let selection = route_info.select_backend();
+                debug!(
+                    "{}: found legacy route for {} -> {} (project_id: {:?}, env_id: {:?})",
+                    label, host, selection.address, project_id, env_id
+                );
+                return Some(PeerSelection {
+                    peer: Box::new(HttpPeer::new(
+                        selection.address.clone(),
+                        false,
+                        "".to_string(),
+                    )),
+                    container_id: selection.container_id,
+                    container_name: selection.container_name,
+                });
+            }
+
+            None
+        };
+
+        if let Some(selection) = lookup("route lookup") {
+            return Ok(selection);
         }
 
-        // 2. Try HTTP Host-based routing (HTTP routes)
-        if let Some(route_info) = self.route_table.get_route_by_host(host) {
-            let project_id = route_info.project.as_ref().map(|p| p.id);
-            let env_id = route_info.environment.as_ref().map(|e| e.id);
-            let selection = route_info.select_backend();
+        // No route matched. If the table has never loaded — i.e. the proxy just
+        // bound its listeners and the initial load is still running in the
+        // background — hold this request briefly for the first load, then retry
+        // the lookup before falling back to the console. After the first load
+        // this branch is skipped and an unmatched host falls through immediately.
+        if !self.route_table.has_loaded() {
             debug!(
-                "Found HTTP route for {} -> {} (project_id: {:?}, env_id: {:?})",
-                host, selection.address, project_id, env_id
+                "Route table not loaded yet; waiting up to {:?} for first load (host: {})",
+                FIRST_LOAD_WAIT, host
             );
-
-            let peer = Box::new(HttpPeer::new(
-                selection.address.clone(),
-                false,
-                "".to_string(),
-            ));
-            return Ok(PeerSelection {
-                peer,
-                container_id: selection.container_id,
-                container_name: selection.container_name,
-            });
-        }
-
-        // 3. Legacy: Check the old get_route method for backwards compatibility
-        if let Some(route_info) = self.route_table.get_route(host) {
-            let project_id = route_info.project.as_ref().map(|p| p.id);
-            let env_id = route_info.environment.as_ref().map(|e| e.id);
-            let selection = route_info.select_backend();
-            debug!(
-                "Found legacy route for {} -> {} (project_id: {:?}, env_id: {:?})",
-                host, selection.address, project_id, env_id
-            );
-
-            let peer = Box::new(HttpPeer::new(
-                selection.address.clone(),
-                false,
-                "".to_string(),
-            ));
-            return Ok(PeerSelection {
-                peer,
-                container_id: selection.container_id,
-                container_name: selection.container_name,
-            });
+            self.route_table.wait_until_loaded(FIRST_LOAD_WAIT).await;
+            if let Some(selection) = lookup("route lookup (after first load)") {
+                return Ok(selection);
+            }
         }
 
         // No route found - route to console address as default

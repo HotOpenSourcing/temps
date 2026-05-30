@@ -172,9 +172,12 @@ pub async fn establish_connection(database_url: &str) -> ServiceResult<Arc<DbCon
         }
     }
 
-    // Post-migration: backfill continuous aggregates that require CALL outside a transaction.
-    // This is idempotent — refreshing an already-populated aggregate just updates it.
-    run_post_migration_backfill(&db).await?;
+    // NOTE: continuous-aggregate backfill is intentionally NOT run here. It
+    // requires a `CALL refresh_continuous_aggregate()` (a TimescaleDB operation
+    // that can be slow) and is not needed to serve traffic. Callers that serve
+    // requests (notably `temps serve`) spawn `run_post_migration_backfill` on a
+    // long-lived runtime so it never delays startup / the proxy bind. The refresh
+    // policy catches up regardless. See `run_post_migration_backfill`.
 
     Ok(Arc::new(db))
 }
@@ -187,7 +190,10 @@ pub async fn establish_connection(database_url: &str) -> ServiceResult<Arc<DbCon
 ///
 /// This is idempotent — refreshing an already-populated aggregate is a no-op for
 /// unchanged data, so it's safe to call on every startup.
-async fn run_post_migration_backfill(db: &DatabaseConnection) -> ServiceResult<()> {
+///
+/// Run this on a long-lived runtime (e.g. via `tokio::spawn`) so it never blocks
+/// startup; it is decoupled from `establish_connection` for exactly that reason.
+pub async fn run_post_migration_backfill(db: &DatabaseConnection) -> ServiceResult<()> {
     // Check if the events_hourly continuous aggregate exists before attempting backfill
     let check_sql = r#"
         SELECT EXISTS (
