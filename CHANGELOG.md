@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+-
+
+### Changed
+-
+
+### Fixed
+-
+
+
+## [0.1.0-beta.24] - 2026-05-30
+
+### Added
 - CLI: `TEMPS_CONTEXT` environment variable pins the active context for a shell/CI session without mutating `.contexts.json`; surfaced in `context ls`, `context use`, and `whoami`, with a one-time warning when it names a context that doesn't exist.
 
 ### Changed
@@ -15,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - CLI: api-key login now validates against the server passed via the positional argument or `--url` before checking the key, so logging into a named server no longer validates against the active context / localhost default and wipes credentials on failure.
+- Proxy: AI crawlers (ClaudeBot, OAI-SearchBot, PerplexityBot, GPTBot, etc.) were stored with loose user-agent substrings (e.g. `"Bot/"`) instead of their canonical taxonomy names, causing the AI Agents analytics page to show no agents. The live proxy-log ingest path now runs `ai_agent_detector` first.
 
 
 ## [0.1.0-beta.23] - 2026-05-29
