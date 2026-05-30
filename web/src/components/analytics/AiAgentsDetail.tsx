@@ -6,13 +6,6 @@ import { ProjectResponse } from '@/api/client/types.gen'
 import { AiAgentLogo } from '@/components/ui/ai-agent-logo'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import {
   Table,
@@ -22,6 +15,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useQuery } from '@tanstack/react-query'
 import { format } from 'date-fns'
 import {
@@ -29,7 +23,6 @@ import {
   Bot,
   ChevronRight,
   ExternalLink,
-  FileText,
   Search,
 } from 'lucide-react'
 import * as React from 'react'
@@ -174,6 +167,10 @@ export function AiAgentsDetail({
     () => agentRows.reduce((sum, r) => sum + r.count, 0),
     [agentRows]
   )
+  // Distinct agents always reflects individual crawlers, regardless of the
+  // provider/agent grouping toggle, so the KPI doesn't change when toggling.
+  const distinctAgents = agentsQuery.data?.items?.length ?? 0
+  const distinctPages = pageRows.length
 
   const drillToLogs = (params: URLSearchParams) => {
     params.set('is_ai_agent', 'true')
@@ -204,187 +201,228 @@ export function AiAgentsDetail({
       : 'Select a date range'
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center gap-2">
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-7 w-7"
-          onClick={onBack}
-          aria-label="Back to analytics"
-        >
-          <ArrowLeft className="h-4 w-4" />
-        </Button>
-        <div>
-          <h2 className="text-xl font-semibold tracking-tight flex items-center gap-2">
-            <Bot className="h-5 w-5" />
-            AI Agents
-          </h2>
-          <p className="text-sm text-muted-foreground">
-            {totalAiRequests.toLocaleString()} AI crawler requests · {dateLabel}
-          </p>
+    <div className="space-y-4">
+      {/* Header — back arrow, title, date, and the summary metrics as inline
+          badges so they don't eat vertical space above the content. */}
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-center gap-2">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7"
+            onClick={onBack}
+            aria-label="Back to analytics"
+          >
+            <ArrowLeft className="h-4 w-4" />
+          </Button>
+          <div>
+            <h2 className="flex items-center gap-2 text-xl font-semibold tracking-tight">
+              <Bot className="h-5 w-5" />
+              AI Agents
+            </h2>
+            <p className="text-sm text-muted-foreground">{dateLabel}</p>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <StatBadge
+            label="requests"
+            value={totalAiRequests.toLocaleString()}
+            loading={agentsQuery.isLoading}
+          />
+          <StatBadge
+            label="agents"
+            value={distinctAgents.toLocaleString()}
+            loading={agentsQuery.isLoading}
+          />
+          <StatBadge
+            label="pages"
+            value={distinctPages.toLocaleString()}
+            loading={pagesQuery.isLoading}
+          />
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        {/* Agents list */}
-        <Card>
-          <CardHeader>
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <CardTitle>Agents</CardTitle>
-                <CardDescription>
-                  Every AI crawler that hit your site
-                </CardDescription>
+      {/* Two distinct datasets, each full width via its own tab */}
+      <Tabs defaultValue="agents">
+        <TabsList>
+          <TabsTrigger value="agents">Agents</TabsTrigger>
+          <TabsTrigger value="pages">Pages crawled</TabsTrigger>
+        </TabsList>
+
+        {/* ─── Agents ─────────────────────────────────────────────── */}
+        <TabsContent value="agents" className="mt-4 space-y-4">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-sm text-muted-foreground">
+              Every AI crawler that hit your site, ranked by requests.
+            </p>
+            <div className="flex items-center gap-2">
+              <div className="relative w-full sm:w-[220px]">
+                <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={agentSearch}
+                  onChange={(e) => setAgentSearch(e.target.value)}
+                  placeholder="Filter agents..."
+                  className="pl-8"
+                  aria-label="Filter agents"
+                />
               </div>
               <div className="flex items-center gap-1 rounded-md border p-0.5">
                 <Button
-                  size="sm"
-                  variant={groupBy === 'provider' ? 'default' : 'ghost'}
-                  className="h-6 px-2 text-xs"
-                  onClick={() => setGroupBy('provider')}
-                >
-                  By provider
-                </Button>
-                <Button
+                  type="button"
                   size="sm"
                   variant={groupBy === 'agent' ? 'default' : 'ghost'}
-                  className="h-6 px-2 text-xs"
+                  className="h-7 px-2 text-xs"
                   onClick={() => setGroupBy('agent')}
                 >
                   By agent
                 </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={groupBy === 'provider' ? 'default' : 'ghost'}
+                  className="h-7 px-2 text-xs"
+                  onClick={() => setGroupBy('provider')}
+                >
+                  By provider
+                </Button>
               </div>
             </div>
-            <div className="relative mt-2">
-              <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                value={agentSearch}
-                onChange={(e) => setAgentSearch(e.target.value)}
-                placeholder="Filter agents..."
-                className="pl-8"
-              />
-            </div>
-          </CardHeader>
-          <CardContent>
-            {agentsQuery.isLoading ? (
-              <ListSkeleton />
-            ) : agentsQuery.error ? (
-              <ErrorState label="AI agents" />
-            ) : !filteredAgents.length ? (
-              <EmptyState
-                primary={
-                  agentRows.length === 0
-                    ? 'No AI crawlers hit your site in this period'
-                    : `No agents match "${agentSearch}"`
-                }
-              />
-            ) : (
-              <div className="space-y-3">
-                {filteredAgents.map((row) => (
-                  <button
-                    type="button"
-                    key={`${row.provider}-${row.label}`}
-                    className="space-y-2 w-full text-left cursor-pointer hover:bg-muted/50 rounded-lg p-1 -mx-1"
-                    onClick={() => onAgentClick(row.provider, row.agent)}
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-3 min-w-0">
-                        <AiAgentLogo
-                          provider={row.provider}
-                          agent={row.agent}
-                          size={20}
-                        />
-                        <div className="flex items-center gap-2 min-w-0">
-                          <span className="text-sm font-medium truncate">
-                            {row.label}
-                          </span>
-                          {groupBy === 'agent' && (
-                            <Badge
-                              variant="outline"
-                              className="text-xs px-1 py-0 h-4 shrink-0"
-                            >
-                              {row.provider}
-                            </Badge>
-                          )}
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2 shrink-0">
-                        <span className="text-xs text-muted-foreground">
-                          {row.uniqueIps.toLocaleString()} IPs
-                        </span>
-                        <span className="text-sm font-mono text-muted-foreground">
-                          {row.count.toLocaleString()}
-                        </span>
-                      </div>
-                    </div>
-                    <div className="relative h-2 bg-muted rounded-full overflow-hidden">
-                      <div
-                        className="absolute inset-y-0 left-0 bg-primary rounded-full transition-all duration-500"
-                        style={{ width: `${row.percentage}%` }}
-                      />
-                    </div>
-                  </button>
-                ))}
-              </div>
-            )}
-          </CardContent>
-        </Card>
+          </div>
 
-        {/* Pages crawled */}
-        <Card>
-          <CardHeader>
-            <div>
-              <CardTitle className="flex items-center gap-2">
-                <FileText className="h-4 w-4" />
-                Pages crawled by AI
-              </CardTitle>
-              <CardDescription>
-                Which content AI agents request most. Expand a page to see the
-                per-agent counts.
-              </CardDescription>
+          {agentsQuery.isLoading ? (
+            <ListSkeleton />
+          ) : agentsQuery.error ? (
+            <ErrorState label="AI agents" />
+          ) : !filteredAgents.length ? (
+            <EmptyState
+              primary={
+                agentRows.length === 0
+                  ? 'No AI crawlers hit your site in this period'
+                  : `No agents match "${agentSearch}"`
+              }
+            />
+          ) : (
+            <div className="-mx-4 overflow-x-auto whitespace-nowrap sm:mx-0">
+              <div className="inline-block min-w-full px-4 align-middle sm:px-0">
+                <Table className="w-full">
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="whitespace-nowrap">
+                        {groupBy === 'agent' ? 'Agent' : 'Provider'}
+                      </TableHead>
+                      <TableHead className="hidden whitespace-nowrap sm:table-cell">
+                        Share
+                      </TableHead>
+                      <TableHead className="whitespace-nowrap text-right">
+                        Unique IPs
+                      </TableHead>
+                      <TableHead className="whitespace-nowrap text-right">
+                        Requests
+                      </TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {filteredAgents.map((row) => (
+                      <TableRow
+                        key={`${row.provider}-${row.label}`}
+                        className="cursor-pointer hover:bg-muted/50"
+                        onClick={() => onAgentClick(row.provider, row.agent)}
+                      >
+                        <TableCell>
+                          <div className="flex items-center gap-3">
+                            <AiAgentLogo
+                              provider={row.provider}
+                              agent={row.agent}
+                              size={20}
+                            />
+                            <span className="text-sm font-medium">
+                              {row.label}
+                            </span>
+                            {groupBy === 'agent' && (
+                              <Badge
+                                variant="outline"
+                                className="h-4 px-1 py-0 text-xs"
+                              >
+                                {row.provider}
+                              </Badge>
+                            )}
+                          </div>
+                        </TableCell>
+                        <TableCell className="hidden w-[40%] sm:table-cell">
+                          <div className="flex items-center gap-2">
+                            <div className="relative h-1.5 w-full max-w-[200px] overflow-hidden rounded-full bg-muted">
+                              <div
+                                className="absolute inset-y-0 left-0 rounded-full bg-primary"
+                                style={{ width: `${row.percentage}%` }}
+                              />
+                            </div>
+                            <span className="text-xs text-muted-foreground tabular-nums">
+                              {row.percentage.toFixed(0)}%
+                            </span>
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-right text-sm text-muted-foreground tabular-nums">
+                          {row.uniqueIps.toLocaleString()}
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-sm tabular-nums">
+                          {row.count.toLocaleString()}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
             </div>
-            <div className="relative mt-2">
-              <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+          )}
+        </TabsContent>
+
+        {/* ─── Pages crawled ──────────────────────────────────────── */}
+        <TabsContent value="pages" className="mt-4 space-y-4">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-sm text-muted-foreground">
+              Which content AI agents request most. Expand a page for the
+              per-agent counts.
+            </p>
+            <div className="relative w-full sm:w-[220px]">
+              <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
               <Input
                 value={pageSearch}
                 onChange={(e) => setPageSearch(e.target.value)}
                 placeholder="Filter pages..."
                 className="pl-8"
+                aria-label="Filter pages"
               />
             </div>
-          </CardHeader>
-          <CardContent className="p-0">
-            {pagesQuery.isLoading ? (
-              <div className="p-6">
-                <ListSkeleton />
-              </div>
-            ) : pagesQuery.error ? (
-              <div className="p-6">
-                <ErrorState label="crawled pages" />
-              </div>
-            ) : !filteredPages.length ? (
-              <div className="p-6">
-                <EmptyState
-                  primary={
-                    pageRows.length === 0
-                      ? 'No AI crawler page hits in this period'
-                      : `No pages match "${pageSearch}"`
-                  }
-                />
-              </div>
-            ) : (
-              <div className="overflow-x-auto">
-                <Table>
+          </div>
+
+          {pagesQuery.isLoading ? (
+            <ListSkeleton />
+          ) : pagesQuery.error ? (
+            <ErrorState label="crawled pages" />
+          ) : !filteredPages.length ? (
+            <EmptyState
+              primary={
+                pageRows.length === 0
+                  ? 'No AI crawler page hits in this period'
+                  : `No pages match "${pageSearch}"`
+              }
+            />
+          ) : (
+            <div className="-mx-4 overflow-x-auto sm:mx-0">
+              <div className="inline-block min-w-full px-4 align-middle sm:px-0">
+                <Table className="w-full">
                   <TableHeader>
                     <TableRow>
                       <TableHead className="w-8" />
-                      <TableHead>Path</TableHead>
-                      <TableHead className="text-right w-[80px]">
+                      <TableHead className="whitespace-nowrap">Path</TableHead>
+                      <TableHead className="hidden whitespace-nowrap sm:table-cell">
+                        Share
+                      </TableHead>
+                      <TableHead className="whitespace-nowrap text-right">
                         Agents
                       </TableHead>
-                      <TableHead className="text-right w-[110px]">
+                      <TableHead className="whitespace-nowrap text-right">
                         Requests
                       </TableHead>
                     </TableRow>
@@ -407,13 +445,13 @@ export function AiAgentsDetail({
                                 }`}
                               />
                             </TableCell>
-                            <TableCell className="font-mono text-xs max-w-[260px]">
-                              <div className="truncate" title={row.path}>
-                                {row.path}
-                              </div>
-                              <div className="relative mt-1 h-1.5 bg-muted rounded-full overflow-hidden">
+                            <TableCell className="max-w-[520px] truncate font-mono text-xs">
+                              <span title={row.path}>{row.path}</span>
+                            </TableCell>
+                            <TableCell className="hidden w-[30%] sm:table-cell">
+                              <div className="relative h-1.5 w-full max-w-[260px] overflow-hidden rounded-full bg-muted">
                                 <div
-                                  className="absolute inset-y-0 left-0 bg-primary/70 rounded-full"
+                                  className="absolute inset-y-0 left-0 rounded-full bg-primary/70"
                                   style={{ width: `${row.percentage}%` }}
                                 />
                               </div>
@@ -423,13 +461,13 @@ export function AiAgentsDetail({
                                 {row.agentCount}
                               </Badge>
                             </TableCell>
-                            <TableCell className="text-right font-mono tabular-nums text-muted-foreground">
+                            <TableCell className="text-right font-mono text-sm text-muted-foreground tabular-nums">
                               {row.requestCount.toLocaleString()}
                             </TableCell>
                           </TableRow>
                           {isExpanded && (
                             <TableRow className="bg-muted/20 hover:bg-muted/20">
-                              <TableCell colSpan={4} className="p-0">
+                              <TableCell colSpan={5} className="p-0">
                                 <PageAgentBreakdown
                                   project={project}
                                   path={row.path}
@@ -451,11 +489,30 @@ export function AiAgentsDetail({
                   </TableBody>
                 </Table>
               </div>
-            )}
-          </CardContent>
-        </Card>
-      </div>
+            </div>
+          )}
+        </TabsContent>
+      </Tabs>
     </div>
+  )
+}
+
+interface StatBadgeProps {
+  label: string
+  value: string
+  loading?: boolean
+}
+
+function StatBadge({ label, value, loading }: StatBadgeProps) {
+  return (
+    <span className="inline-flex items-baseline gap-1.5 rounded-full border bg-muted/40 px-3 py-1 text-sm">
+      {loading ? (
+        <span className="inline-block h-4 w-8 animate-pulse rounded bg-muted" />
+      ) : (
+        <span className="font-semibold tabular-nums">{value}</span>
+      )}
+      <span className="text-xs text-muted-foreground">{label}</span>
+    </span>
   )
 }
 

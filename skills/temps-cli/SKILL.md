@@ -1280,6 +1280,58 @@ bunx @temps-sdk/cli analytics top utm_campaign -p my-app  # UTM campaigns
 
 **Available dimensions**: `pages`, `referrers`, `browsers`, `os`, `devices`, `countries`, `channels`, `events`, `languages`, `utm_source`, `utm_medium`, `utm_campaign`
 
+### AI Agents (Crawler Analytics)
+
+CLI mirror of the web dashboard at `/projects/<slug>/analytics/ai-agents`. Reads the same proxy-log endpoints (`/proxy-logs/stats/ai-agents` and `/proxy-logs/stats/ai-pages`) the web view uses, so the numbers always match.
+
+```bash
+# Every AI crawler that hit the site, ranked by request count
+bunx @temps-sdk/cli analytics ai-agents -p my-app --period 24h
+bunx @temps-sdk/cli analytics ai-agents -p my-app --period 7d --limit 50
+
+# Roll up by vendor instead of individual agent (OpenAI vs GPTBot/ChatGPT-User/OAI-SearchBot)
+bunx @temps-sdk/cli analytics ai-agents -p my-app --group-by provider --period 7d
+
+# Restrict to a single URL path
+bunx @temps-sdk/cli analytics ai-agents -p my-app --path /docs --period 24h
+
+# JSON for piping into jq / scripts
+bunx @temps-sdk/cli analytics ai-agents -p my-app --period 24h --json | jq '.items[] | {provider, agent, requests: .requestCount}'
+```
+
+```bash
+# Top pages crawled by AI agents (path + distinct-agent count + request total)
+bunx @temps-sdk/cli analytics ai-pages -p my-app --period 24h
+bunx @temps-sdk/cli analytics ai-pages -p my-app --period 7d --limit 10
+
+# Each page expanded with its per-agent split (one extra request per page — slower)
+bunx @temps-sdk/cli analytics ai-pages -p my-app --period 7d --with-agents --limit 10
+
+# Just the row for one path
+bunx @temps-sdk/cli analytics ai-pages -p my-app --path /pricing --json
+```
+
+```bash
+# Drill into a single page: which agents (or providers) hit /docs?
+bunx @temps-sdk/cli analytics ai-page /docs -p my-app --period 24h
+bunx @temps-sdk/cli analytics ai-page /pricing -p my-app --group-by provider --period 7d
+bunx @temps-sdk/cli analytics ai-page /blog/self-hosted-paas -p my-app --json
+```
+
+**Flags**:
+- `-p, --project <slug>` — required unless the working directory is linked via `temps link`.
+- `--period <p>` — `today`, `<n>h`, `<n>d`, `<n>m` (default `24h`).
+- `--limit <n>` — rows to fetch (default `20` for `ai-agents` / `ai-pages`, `50` for `ai-page`, server cap `100`).
+- `--group-by agent|provider` (on `ai-agents` and `ai-page`) — `agent` shows individual crawlers; `provider` aggregates them by vendor.
+- `--path <path>` (on `ai-agents` / `ai-pages`) — restrict to one URL path.
+- `--with-agents` (on `ai-pages` only) — fetch the per-agent breakdown for each page and render it inline.
+- `--json` — machine-readable output (suppresses spinners).
+
+**When to use which**:
+- `ai-agents` — answer "who is crawling me?". Same data as the web "Agents" tab.
+- `ai-pages` — answer "what content is being crawled?". Same data as the web "Pages crawled" tab.
+- `ai-page <path>` — answer "for this one URL, which agents/providers hit it?". Equivalent to expanding a row in the web "Pages crawled" tab.
+
 ---
 
 ## Email
