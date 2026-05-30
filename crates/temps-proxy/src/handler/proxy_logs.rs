@@ -605,6 +605,7 @@ async fn get_ai_agent_breakdown(
         .get_ai_agent_breakdown(
             query.project_id,
             query.environment_id,
+            query.path.clone(),
             start_time,
             end_time,
             limit,

@@ -24,7 +24,14 @@ import {
 } from '@/components/ui/table'
 import { useQuery } from '@tanstack/react-query'
 import { format } from 'date-fns'
-import { ArrowLeft, Bot, FileText, Search } from 'lucide-react'
+import {
+  ArrowLeft,
+  Bot,
+  ChevronRight,
+  ExternalLink,
+  FileText,
+  Search,
+} from 'lucide-react'
 import * as React from 'react'
 import { useNavigate } from 'react-router-dom'
 
@@ -56,6 +63,8 @@ export function AiAgentsDetail({
   const [groupBy, setGroupBy] = React.useState<'provider' | 'agent'>('agent')
   const [agentSearch, setAgentSearch] = React.useState('')
   const [pageSearch, setPageSearch] = React.useState('')
+  // Which page row is expanded to show its per-agent breakdown.
+  const [expandedPath, setExpandedPath] = React.useState<string | null>(null)
 
   const agentsQuery = useQuery({
     ...getAiAgentBreakdownOptions({
@@ -181,9 +190,11 @@ export function AiAgentsDetail({
     drillToLogs(params)
   }
 
-  const onPageClick = (path: string) => {
+  // Open the request log for a page, optionally narrowed to one AI agent.
+  const onPageLogs = (path: string, agent?: string) => {
     const params = new URLSearchParams()
     params.set('path', path)
+    if (agent) params.set('ai_agent', agent)
     drillToLogs(params)
   }
 
@@ -330,8 +341,8 @@ export function AiAgentsDetail({
                 Pages crawled by AI
               </CardTitle>
               <CardDescription>
-                Which content AI agents request most, and how many distinct
-                agents touched each
+                Which content AI agents request most. Expand a page to see the
+                per-agent counts.
               </CardDescription>
             </div>
             <div className="relative mt-2">
@@ -368,6 +379,7 @@ export function AiAgentsDetail({
                 <Table>
                   <TableHeader>
                     <TableRow>
+                      <TableHead className="w-8" />
                       <TableHead>Path</TableHead>
                       <TableHead className="text-right w-[80px]">
                         Agents
@@ -378,33 +390,64 @@ export function AiAgentsDetail({
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {filteredPages.map((row) => (
-                      <TableRow
-                        key={row.path}
-                        className="cursor-pointer hover:bg-muted/50"
-                        onClick={() => onPageClick(row.path)}
-                      >
-                        <TableCell className="font-mono text-xs max-w-[280px]">
-                          <div className="truncate" title={row.path}>
-                            {row.path}
-                          </div>
-                          <div className="relative mt-1 h-1.5 bg-muted rounded-full overflow-hidden">
-                            <div
-                              className="absolute inset-y-0 left-0 bg-primary/70 rounded-full"
-                              style={{ width: `${row.percentage}%` }}
-                            />
-                          </div>
-                        </TableCell>
-                        <TableCell className="text-right">
-                          <Badge variant="secondary" className="font-mono">
-                            {row.agentCount}
-                          </Badge>
-                        </TableCell>
-                        <TableCell className="text-right font-mono tabular-nums text-muted-foreground">
-                          {row.requestCount.toLocaleString()}
-                        </TableCell>
-                      </TableRow>
-                    ))}
+                    {filteredPages.map((row) => {
+                      const isExpanded = expandedPath === row.path
+                      return (
+                        <React.Fragment key={row.path}>
+                          <TableRow
+                            className="cursor-pointer hover:bg-muted/50"
+                            onClick={() =>
+                              setExpandedPath(isExpanded ? null : row.path)
+                            }
+                          >
+                            <TableCell className="w-8 pr-0">
+                              <ChevronRight
+                                className={`size-4 text-muted-foreground transition-transform ${
+                                  isExpanded ? 'rotate-90' : ''
+                                }`}
+                              />
+                            </TableCell>
+                            <TableCell className="font-mono text-xs max-w-[260px]">
+                              <div className="truncate" title={row.path}>
+                                {row.path}
+                              </div>
+                              <div className="relative mt-1 h-1.5 bg-muted rounded-full overflow-hidden">
+                                <div
+                                  className="absolute inset-y-0 left-0 bg-primary/70 rounded-full"
+                                  style={{ width: `${row.percentage}%` }}
+                                />
+                              </div>
+                            </TableCell>
+                            <TableCell className="text-right">
+                              <Badge variant="secondary" className="font-mono">
+                                {row.agentCount}
+                              </Badge>
+                            </TableCell>
+                            <TableCell className="text-right font-mono tabular-nums text-muted-foreground">
+                              {row.requestCount.toLocaleString()}
+                            </TableCell>
+                          </TableRow>
+                          {isExpanded && (
+                            <TableRow className="bg-muted/20 hover:bg-muted/20">
+                              <TableCell colSpan={4} className="p-0">
+                                <PageAgentBreakdown
+                                  project={project}
+                                  path={row.path}
+                                  startDate={startDate}
+                                  endDate={endDate}
+                                  environment={environment}
+                                  totalRequests={row.requestCount}
+                                  onAgentClick={(agent) =>
+                                    onPageLogs(row.path, agent)
+                                  }
+                                  onViewAll={() => onPageLogs(row.path)}
+                                />
+                              </TableCell>
+                            </TableRow>
+                          )}
+                        </React.Fragment>
+                      )
+                    })}
                   </TableBody>
                 </Table>
               </div>
@@ -453,6 +496,124 @@ function EmptyState({ primary }: { primary: string }) {
   return (
     <div className="flex flex-col items-center justify-center py-10 text-center">
       <p className="text-sm text-muted-foreground">{primary}</p>
+    </div>
+  )
+}
+
+interface PageAgentBreakdownProps {
+  project: ProjectResponse
+  path: string
+  startDate: Date | undefined
+  endDate: Date | undefined
+  environment: number | undefined
+  /** Total AI requests for the page, used to compute each agent's share. */
+  totalRequests: number
+  onAgentClick: (agent: string) => void
+  onViewAll: () => void
+}
+
+/**
+ * Per-agent breakdown for a single crawled page. Fetched lazily (only when the
+ * row is expanded) via the path-scoped AI agent breakdown endpoint, so the
+ * detail page doesn't make N requests up front.
+ */
+function PageAgentBreakdown({
+  project,
+  path,
+  startDate,
+  endDate,
+  environment,
+  totalRequests,
+  onAgentClick,
+  onViewAll,
+}: PageAgentBreakdownProps) {
+  const { data, isLoading, error } = useQuery({
+    ...getAiAgentBreakdownOptions({
+      query: {
+        project_id: project.id,
+        environment_id: environment,
+        path,
+        start_time: startDate ? startDate.toISOString() : undefined,
+        end_time: endDate ? endDate.toISOString() : undefined,
+        limit: 100,
+      },
+    }),
+    enabled: !!startDate && !!endDate,
+  })
+
+  const rows = data?.items ?? []
+  const max = Math.max(...rows.map((r) => r.request_count), 1)
+
+  return (
+    <div className="px-3 py-3 sm:px-6">
+      {isLoading ? (
+        <div className="space-y-2">
+          {[...Array(3)].map((_, i) => (
+            <div
+              key={`pa-skel-${i}`}
+              className="flex items-center justify-between"
+            >
+              <div className="h-3.5 w-[160px] animate-pulse rounded bg-muted" />
+              <div className="h-3.5 w-[40px] animate-pulse rounded bg-muted" />
+            </div>
+          ))}
+        </div>
+      ) : error ? (
+        <p className="py-2 text-xs text-muted-foreground">
+          Failed to load agents for this page.
+        </p>
+      ) : rows.length === 0 ? (
+        <p className="py-2 text-xs text-muted-foreground">
+          No agent data for this page.
+        </p>
+      ) : (
+        <div className="space-y-1.5">
+          {rows.map((r) => {
+            const share =
+              totalRequests > 0
+                ? (r.request_count / totalRequests) * 100
+                : 0
+            return (
+              <button
+                type="button"
+                key={r.agent}
+                onClick={() => onAgentClick(r.agent)}
+                className="flex w-full items-center gap-3 rounded-md px-2 py-1 text-left hover:bg-muted/60"
+                title={`View ${r.agent} requests for this page`}
+              >
+                <AiAgentLogo provider={r.provider} agent={r.agent} size={16} />
+                <span className="w-[150px] shrink-0 truncate text-xs font-medium">
+                  {r.agent}
+                </span>
+                <div className="relative h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
+                  <div
+                    className="absolute inset-y-0 left-0 rounded-full bg-primary/70"
+                    style={{ width: `${(r.request_count / max) * 100}%` }}
+                  />
+                </div>
+                <span className="w-[36px] shrink-0 text-right text-xs text-muted-foreground tabular-nums">
+                  {share.toFixed(0)}%
+                </span>
+                <span className="w-[48px] shrink-0 text-right font-mono text-xs tabular-nums">
+                  {r.request_count.toLocaleString()}
+                </span>
+              </button>
+            )
+          })}
+          <div className="flex justify-end pt-1">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-7 gap-1.5 text-xs"
+              onClick={onViewAll}
+            >
+              View all in request log
+              <ExternalLink className="size-3.5" />
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

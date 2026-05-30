@@ -1039,6 +1039,7 @@ impl ProxyLogService {
         &self,
         project_id: Option<i32>,
         environment_id: Option<i32>,
+        path: Option<String>,
         start_time: UtcDateTime,
         end_time: UtcDateTime,
         limit: u64,
@@ -1072,6 +1073,13 @@ impl ProxyLogService {
         if let Some(eid) = environment_id {
             where_clauses.push(format!("environment_id = ${}", next_idx));
             values.push(eid.into());
+            next_idx += 1;
+        }
+        // Exact-path filter so the UI can drill a single page row down into the
+        // per-agent counts that crawled THAT page.
+        if let Some(ref p) = path {
+            where_clauses.push(format!("path = ${}", next_idx));
+            values.push(p.clone().into());
             next_idx += 1;
         }
 
