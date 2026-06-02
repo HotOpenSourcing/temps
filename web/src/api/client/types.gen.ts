@@ -7218,6 +7218,20 @@ export type LetsEncryptSettings = {
     environment?: string;
 };
 
+/**
+ * Raw surrounding lines for a single match (grep -C style).
+ */
+export type LineContext = {
+    /**
+     * Lines immediately after the match, oldest-first.
+     */
+    after: Array<ContextLine>;
+    /**
+     * Lines immediately before the match, oldest-first.
+     */
+    before: Array<ContextLine>;
+};
+
 export type LinkServiceRequest = {
     project_id: number;
 };
@@ -7531,6 +7545,7 @@ export type LogRecord = {
  */
 export type LogSearchLine = {
     chunk_id: string;
+    context?: null | LineContext;
     deploy_id?: string | null;
     fields?: unknown;
     level: LogLevel;
@@ -11401,6 +11416,13 @@ export type ScreenshotSettings = {
 };
 
 export type SearchLogsRequest = {
+    /**
+     * grep -C: number of raw context lines to include before and after each
+     * match (0 = none, default). Clamped to 50 server-side. The surrounding
+     * lines ignore the level/text filters — they are the actual adjacent log
+     * lines, merged across overlapping matches.
+     */
+    context_lines?: number | null;
     /**
      * Pagination cursor
      */
@@ -28652,6 +28674,14 @@ export type QueryTraceSummariesData = {
          * Filter by deployment ID
          */
         deployment_id?: number;
+        /**
+         * Sort field: 'start_time' (default) or 'duration'
+         */
+        sort_by?: string;
+        /**
+         * Sort direction: 'asc' or 'desc' (default)
+         */
+        sort_order?: string;
         /**
          * Max traces to return (default: 50, max: 100)
          */
