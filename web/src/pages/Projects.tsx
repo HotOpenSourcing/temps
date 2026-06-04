@@ -371,33 +371,18 @@ export function Projects() {
           </>
         ) : projectsData?.projects.length === 0 ? (
           !gitProviders || gitProviders.length === 0 ? (
+            // No git + no projects: let the Getting Started card above drive
+            // the user. Just show a minimal prompt so the grid isn't bare.
             <div className="col-span-full flex flex-col items-center justify-center rounded-lg border border-dashed p-8 text-center animate-in fade-in-50">
               <div className="flex h-20 w-20 items-center justify-center rounded-full bg-muted">
                 <GitBranch className="h-10 w-10 text-muted-foreground" />
               </div>
               <h2 className="mt-6 text-xl font-semibold">
-                No Git providers configured
+                Start by connecting a Git provider
               </h2>
               <p className="mt-2 text-center text-sm text-muted-foreground max-w-md">
-                Before creating projects, you need to set up a Git provider like
-                GitHub or GitLab to connect your repositories.
+                Link GitHub, GitLab, or Bitbucket above to deploy your first project.
               </p>
-              <div className="flex gap-3 mt-6">
-                <Button asChild>
-                  <Link
-                    to="/git-providers/add"
-                    className="flex items-center gap-2"
-                  >
-                    <GitBranch className="h-4 w-4" />
-                    Add Git Provider
-                  </Link>
-                </Button>
-                <Button asChild variant="outline">
-                  <Link to="/git-providers" className="flex items-center gap-2">
-                    View Providers
-                  </Link>
-                </Button>
-              </div>
             </div>
           ) : (
             <div className="col-span-full flex flex-col items-center justify-center rounded-lg border border-dashed p-8 text-center animate-in fade-in-50">
@@ -405,10 +390,10 @@ export function Projects() {
                 <FolderPlus className="h-10 w-10 text-muted-foreground" />
               </div>
               <h2 className="mt-6 text-xl font-semibold">
-                No projects created
+                Deploy your first project
               </h2>
               <p className="mt-2 text-center text-sm text-muted-foreground">
-                Get started by creating or importing your first project
+                Create a project from a Git repo or a Docker image.
               </p>
               <div className="flex gap-3 mt-6">
                 <CreateActionButton to="/projects/new" label="New Project" />
