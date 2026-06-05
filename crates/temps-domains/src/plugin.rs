@@ -61,6 +61,17 @@ impl TempsPlugin for DomainsPlugin {
             let notification_service =
                 context.get_service::<dyn temps_core::notifications::NotificationService>();
 
+            // Create domain service first so the TLS service can drive the order-based
+            // ACME flow during background HTTP-01 renewals (keeps auto-renewals
+            // recoverable from the UI). DomainService does not depend on TlsService, so
+            // there is no construction cycle.
+            let domain_service = Arc::new(crate::DomainService::new(
+                db.clone(),
+                cert_provider.clone(),
+                repository.clone(),
+                encryption_service.clone(),
+            ));
+
             // Create TLS service
             let mut tls_service = TlsServiceBuilder::new()
                 .with_repository(repository.clone())
@@ -69,7 +80,8 @@ impl TempsPlugin for DomainsPlugin {
                 .map_err(|e| PluginError::PluginRegistrationFailed {
                     plugin_name: "domains".to_string(),
                     error: format!("Failed to create TLS service: {}", e),
-                })?;
+                })?
+                .with_domain_service(domain_service.clone());
 
             // Add notification service if available
             if let Some(notif_service) = notification_service {
@@ -86,17 +98,6 @@ impl TempsPlugin for DomainsPlugin {
 
             // Note: Certificate renewal scheduler is started in console.rs
             // The scheduler handles both initial check and daily scheduled checks
-
-            // Get encryption service
-            let encryption_service = context.require_service::<temps_core::EncryptionService>();
-
-            // Create domain service
-            let domain_service = Arc::new(crate::DomainService::new(
-                db.clone(),
-                cert_provider,
-                repository.clone(),
-                encryption_service.clone(),
-            ));
 
             // Get DnsProviderService (requires dns plugin to be registered first)
             let dns_provider_service = context.require_service::<DnsProviderService>();

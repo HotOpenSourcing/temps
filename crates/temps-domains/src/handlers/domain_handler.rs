@@ -20,7 +20,7 @@ use axum::{
     Json, Router,
 };
 use std::sync::Arc;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use utoipa::OpenApi;
 
 // ========================================
@@ -1174,31 +1174,98 @@ async fn renew_domain(
         return Ok((StatusCode::ACCEPTED, Json(challenge_response)).into_response());
     }
 
-    // For HTTP-01 domains, use automatic renewal
+    // For HTTP-01 domains, renew via the order-based flow so the renewal is visible
+    // and recoverable in the certificate management UI.
+    //
+    // We deliberately do NOT use `tls_service.renew_certificate` here: that path stores
+    // challenge state in the standalone `http_challenges` table and never writes an
+    // `acme_orders` row, so a renewal that needs validation leaves the domain stuck in
+    // `challenge_requested` with no order for the UI to act on (no "Verify & finalize"
+    // action). Instead we mirror the DNS-01 flow:
+    //   1. `request_challenge` creates a fresh ACME order, persists its challenge data in
+    //      `acme_orders.authorizations`, and sets the domain to `challenge_requested`.
+    //   2. HTTP-01 needs no user action — the proxy already serves the token at
+    //      `/.well-known/acme-challenge/{token}` — so we immediately attempt
+    //      `complete_challenge` to accept the challenge and finalize.
+    // If that immediate finalize fails (e.g. DNS not yet pointed here, or Let's Encrypt
+    // validation is still propagating), the order is left in place so the user can retry
+    // via the "Verify & finalize" action instead of being stranded.
+    info!(
+        "HTTP-01 domain {} - creating new ACME order for renewal",
+        domain
+    );
+
+    let challenge_data = app_state
+        .domain_service
+        .request_challenge(&domain, user_email)
+        .await
+        .map_err(|e| {
+            error!(
+                "Failed to create renewal order for domain {}: {}",
+                domain, e
+            );
+            e
+        })?;
+
+    // If the certificate was issued immediately (cached/valid authorization), we're done.
+    if challenge_data.status == "completed" {
+        info!(
+            "Certificate renewed immediately for HTTP-01 domain: {}",
+            domain
+        );
+        if let Some(renewed) = app_state.domain_service.get_domain(&domain).await? {
+            return Ok((
+                StatusCode::OK,
+                Json(ProvisionResponse::Complete(DomainResponse::from(renewed))),
+            )
+                .into_response());
+        }
+    }
+
+    // Accept the challenge and finalize the order. HTTP-01 requires no manual step.
     match app_state
-        .tls_service
-        .renew_certificate(&domain, user_email)
+        .domain_service
+        .complete_challenge(&domain, user_email)
         .await
     {
-        Ok(certificate) => {
-            info!("Certificate successfully renewed for {}", domain);
+        Ok(renewed) => {
+            info!(
+                "Certificate successfully renewed for HTTP-01 domain: {}",
+                domain
+            );
             Ok((
                 StatusCode::OK,
-                Json(ProvisionResponse::Complete(DomainResponse::from(
-                    certificate,
-                ))),
+                Json(ProvisionResponse::Complete(DomainResponse::from(renewed))),
             )
                 .into_response())
         }
         Err(e) => {
-            error!("Failed to renew certificate for {}: {}", domain, e);
+            // Validation did not pass on the first attempt. The ACME order is still
+            // pending and persisted, so surface it as a recoverable pending state rather
+            // than a hard failure — the user can retry via "Verify & finalize".
+            warn!(
+                "Immediate HTTP-01 finalize failed for {}, leaving order pending for retry: {}",
+                domain, e
+            );
+
+            let txt_records = challenge_data
+                .txt_records
+                .into_iter()
+                .map(|record| TxtRecord {
+                    name: record.name,
+                    value: record.value,
+                })
+                .collect();
+
+            let challenge_response = DomainChallengeResponse {
+                domain: challenge_data.domain,
+                txt_records,
+                status: "challenge_requested".to_string(),
+            };
+
             Ok((
-                StatusCode::OK,
-                Json(ProvisionResponse::Error(DomainError {
-                    message: e.to_string(),
-                    code: "RENEWAL_FAILED".to_string(),
-                    details: Some("Certificate renewal failed".to_string()),
-                })),
+                StatusCode::ACCEPTED,
+                Json(ProvisionResponse::Pending(challenge_response)),
             )
                 .into_response())
         }
