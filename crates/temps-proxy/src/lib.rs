@@ -8,6 +8,8 @@
 //! - Static file serving
 //! - Request/response filtering
 
+pub mod ai_agent_detector;
+pub mod branded_404;
 pub mod config;
 pub mod crawler_detector;
 pub mod handler;
@@ -18,6 +20,7 @@ pub mod proxy;
 pub mod server;
 pub mod service;
 pub mod services;
+pub mod storage;
 pub mod tls_cert_loader;
 pub mod tls_fingerprint;
 pub mod traits;

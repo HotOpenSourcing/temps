@@ -1,5 +1,10 @@
 import chalk from 'chalk'
+import { isQuietMode } from './spinner.js'
 
+// In `--json` mode (quietMode === true) any stdout chrome corrupts the
+// machine-readable payload. Every stdout-writing helper below short-circuits
+// in that mode. `error()` / `warning()` still write to stderr — those don't
+// pollute the JSON stream consumers parse.
 export const colors = {
   primary: chalk.cyan,
   success: chalk.green,
@@ -33,6 +38,7 @@ export const icons = {
 }
 
 export function success(message: string): void {
+  if (isQuietMode()) return
   console.log(`${icons.success} ${colors.success(message)}`)
 }
 
@@ -45,33 +51,40 @@ export function warning(message: string): void {
 }
 
 export function info(message: string): void {
+  if (isQuietMode()) return
   console.log(`${icons.info} ${colors.info(message)}`)
 }
 
 export function log(message: string): void {
+  if (isQuietMode()) return
   console.log(message)
 }
 
 export function newline(): void {
+  if (isQuietMode()) return
   console.log()
 }
 
 export function header(title: string): void {
-  newline()
+  if (isQuietMode()) return
+  console.log()
   console.log(colors.bold(title))
   console.log(colors.muted('─'.repeat(Math.min(title.length + 4, 60))))
 }
 
 export function keyValue(key: string, value: string | number | boolean | null | undefined): void {
+  if (isQuietMode()) return
   const displayValue = value === null || value === undefined ? colors.muted('not set') : String(value)
   console.log(`  ${colors.muted(key + ':')} ${displayValue}`)
 }
 
 export function list(items: string[], prefix = icons.bullet): void {
+  if (isQuietMode()) return
   items.forEach((item) => console.log(`  ${prefix} ${item}`))
 }
 
 export function box(content: string, title?: string): void {
+  if (isQuietMode()) return
   const lines = content.split('\n')
   const maxLength = Math.max(...lines.map((l) => l.length), title?.length ?? 0)
   const width = maxLength + 4
@@ -88,6 +101,10 @@ export function box(content: string, title?: string): void {
   console.log(colors.muted(`╰${'─'.repeat(width)}╯`))
 }
 
+/**
+ * `json` is the one helper that DOES write in quiet mode — it's the entire
+ * point of `--json`. Everything else on stdout is suppressed.
+ */
 export function json(data: unknown): void {
   console.log(JSON.stringify(data, null, 2))
 }

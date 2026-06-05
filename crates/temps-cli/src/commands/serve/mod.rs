@@ -1,4 +1,6 @@
 mod admin_gate;
+mod admin_gate_handler;
+mod admin_gate_service;
 pub mod console;
 mod proxy;
 mod shutdown;
@@ -67,11 +69,24 @@ pub struct ServeCommand {
 }
 
 impl ServeCommand {
+    /// Run `temps serve` with the OSS-only plugin set.
     pub fn execute(self) -> anyhow::Result<()> {
-        // Install the rustls crypto provider once at startup. Both temps-domains
-        // and check-if-email-exists try to install it themselves — calling it here
-        // first satisfies the library's internal Once guard and prevents panics.
-        check_if_email_exists::initialize_crypto_provider();
+        self.execute_with_extra_plugins(Vec::new())
+    }
+
+    /// Run `temps serve` with additional plugins registered alongside the
+    /// OSS ones. This is the entrypoint used by EE-bundled binaries (per
+    /// ADR 0001 §"Extension points exposed by OSS"); pass a fresh
+    /// `vec![Box::new(TeamsPlugin::new()), ...]` and the extra plugins are
+    /// registered just before `initialize_plugins`, so they observe the
+    /// full OSS service registry.
+    pub fn execute_with_extra_plugins(
+        self,
+        extra_plugins: Vec<Box<dyn temps_core::plugin::TempsPlugin>>,
+    ) -> anyhow::Result<()> {
+        // Install the rustls crypto provider once at startup, before any
+        // dependency (e.g. temps-domains) constructs a rustls client.
+        crate::install_crypto_provider();
 
         // Set screenshot provider from CLI flag (takes precedence over env var)
         // This allows: temps serve --screenshot-provider=noop
@@ -165,33 +180,54 @@ impl ServeCommand {
             }));
         }
 
+        // Construct the route-reload machinery now, but DON'T start it yet.
+        // We must register the on-demand sleeping-domain callback on the shared
+        // route table BEFORE the listener's initial load runs, so the very first
+        // load populates sleeping domains and on-demand configs. That callback
+        // depends on `on_demand_manager`, which depends on the Docker handle
+        // resolved below — so the actual starts happen after that block.
         let route_table_listener = Arc::new(temps_routes::RouteTableListener::new(
             route_table.clone(),
             self.database_url.clone(),
             queue.clone(),
         ));
-
-        let rt = tokio::runtime::Runtime::new()?;
-        // Start the route table listener (block_on to ensure initial load completes)
-        let route_table_listener_clone = route_table_listener.clone();
-        rt.block_on(async move {
-            if let Err(e) = route_table_listener_clone.start_listening().await {
-                tracing::error!("Route table listener failed: {}", e);
-            }
-        });
-
-        // Start the project change listener
-        // Keep the listener alive on the stack so its Drop doesn't abort the background task
+        // Keep the project listener alive on the stack so its Drop doesn't abort
+        // the background task.
         let project_listener = temps_routes::ProjectChangeListener::new(
             self.database_url.clone(),
             route_table.clone(),
             queue.clone(),
         );
-        rt.block_on(async {
-            if let Err(e) = project_listener.start_listening().await {
-                tracing::error!("Project change listener failed: {}", e);
-            }
-        });
+        // The in-process route reload subscriber: the deterministic, single-node
+        // route-reload path. The deploy pipeline publishes Job::ForceRouteReload
+        // on this same shared queue after writing current_deployment_id, and this
+        // subscriber reloads the route table directly. Unlike the PG LISTEN/NOTIFY
+        // path, it has no database connection that can silently wedge between
+        // deployments, so a freshly deployed environment is guaranteed to become
+        // routable without a manual reload. (NOTIFY is still used to reach remote
+        // worker nodes that don't share this queue.) Keep it alive on the stack.
+        let route_reload_subscriber =
+            temps_routes::RouteReloadSubscriber::new(route_table.clone(), queue.clone());
+
+        let rt = tokio::runtime::Runtime::new()?;
+
+        // Backfill TimescaleDB continuous aggregates on this long-lived runtime,
+        // detached. `establish_connection` no longer runs this (it would block
+        // startup on a slow `CALL`); it's idempotent and the refresh policy
+        // catches up regardless, so it must not gate the proxy bind.
+        {
+            let backfill_db = db.clone();
+            rt.spawn(async move {
+                if let Err(e) =
+                    temps_database::run_post_migration_backfill(backfill_db.as_ref()).await
+                {
+                    tracing::warn!(
+                        "Post-migration backfill failed (refresh policy will catch up): {}",
+                        e
+                    );
+                }
+            });
+        }
 
         // Connect to Docker once and share the handle between:
         //   1. OnDemandManager (wake-on-request scale-to-zero)
@@ -238,6 +274,61 @@ impl ServeCommand {
                 ))
             });
 
+        // Register the on-demand sleeping-domain callback on the shared route
+        // table BEFORE starting the listener, so the listener's (background)
+        // initial load populates sleeping domains and on-demand configs on the
+        // first pass. This replaces the old duplicate `load_routes()` that used
+        // to run inside `setup_proxy_server` purely because the callback was
+        // registered too late.
+        if let Some(ref on_demand_manager) = on_demand_manager {
+            let on_demand_for_callback = Arc::clone(on_demand_manager);
+            route_table.set_on_sleeping_callback(Arc::new(move |entries, on_demand_configs| {
+                on_demand_for_callback.clear_sleeping_domains();
+                for entry in entries {
+                    on_demand_for_callback.register_sleeping_domain(
+                        entry.domain.clone(),
+                        temps_proxy::on_demand::SleepingEnvironmentInfo {
+                            environment_id: entry.environment_id,
+                            project_id: entry.project_id,
+                            deployment_id: entry.deployment_id,
+                            wake_timeout_seconds: entry.wake_timeout_seconds,
+                        },
+                    );
+                }
+                // Register on-demand configs so the idle sweep can track awake environments
+                for config in on_demand_configs {
+                    on_demand_for_callback.register_on_demand_environment(
+                        config.environment_id,
+                        config.idle_timeout_seconds,
+                        config.wake_timeout_seconds,
+                    );
+                }
+                // Signal any requests waiting for routes after a wake
+                on_demand_for_callback.notify_route_reloaded();
+            }));
+
+            // Start background idle sweep (checks every 60 seconds)
+            on_demand_manager.start_sweep_task(std::time::Duration::from_secs(60));
+        }
+
+        // NOW start the route-reload machinery. `start_listening` subscribes to
+        // PG NOTIFY synchronously and spawns the initial load in the background,
+        // so none of these block the proxy bind. The sleeping callback above is
+        // already registered, so the first load populates on-demand state.
+        let route_table_listener_clone = route_table_listener.clone();
+        rt.block_on(async move {
+            if let Err(e) = route_table_listener_clone.start_listening().await {
+                tracing::error!("Route table listener failed: {}", e);
+            }
+        });
+        rt.block_on(async {
+            if let Err(e) = project_listener.start_listening().await {
+                tracing::error!("Project change listener failed: {}", e);
+            }
+        });
+        // start() calls tokio::spawn, so it must run inside the runtime context.
+        rt.block_on(async { route_reload_subscriber.start() });
+
         // Kick off preview gateway reconciliation in the background. This pulls
         // the image (if needed), creates the shared sandbox network, and starts
         // the gateway container. It MUST NOT block proxy startup — workspace
@@ -253,6 +344,30 @@ impl ServeCommand {
                         .join(".temps")
                 });
             temps_agents::preview_gateway::spawn_reconcile(&rt, docker, db.clone(), data_dir);
+        }
+
+        // Build the admin-gate handle up-front so both the console listener
+        // and the Pingora proxy see the same source of truth. Env precedence
+        // is resolved here; the DB is consulted on first read inside the
+        // service (which the console code constructs separately).
+        let (admin_gate_service, admin_gate_handle) = rt
+            .block_on(admin_gate_service::AdminGateService::new(
+                db.clone(),
+                &serve_config.admin_allowed_ips,
+                &serve_config.admin_allowed_hosts,
+                serve_config.admin_trust_forwarded_for,
+            ))
+            .map_err(|e| anyhow::anyhow!("Failed to initialize admin gate: {}", e))?;
+        {
+            let snapshot = admin_gate_handle.current();
+            info!(
+                source = ?snapshot.source,
+                allowed_ips = ?snapshot.allowed_nets.iter().map(|n| n.to_string()).collect::<Vec<_>>(),
+                allowed_hosts = ?snapshot.allowed_hosts,
+                trust_forwarded_for = snapshot.trust_forwarded_for,
+                is_noop = snapshot.is_noop(),
+                "Admin gate initialized"
+            );
         }
 
         // Start console API server in background (non-blocking).
@@ -275,6 +390,9 @@ impl ServeCommand {
             on_demand_waker: on_demand_manager
                 .clone()
                 .map(|m| m as Arc<dyn temps_core::OnDemandWaker>),
+            extra_plugins,
+            admin_gate_service: Some(admin_gate_service),
+            admin_gate_handle: Some(admin_gate_handle.clone()),
         };
         rt.spawn(async move {
             match start_console_api(params).await {
@@ -328,6 +446,7 @@ impl ServeCommand {
             serve_config.clone(),
             self.disable_https_redirect,
             on_demand_manager,
+            Some(admin_gate_handle),
         )
     }
 }

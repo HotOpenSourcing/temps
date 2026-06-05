@@ -26,7 +26,9 @@ use temps_backup::BackupPlugin;
 use temps_blob::BlobPlugin;
 use temps_config::ConfigPlugin;
 use temps_config::ServerConfig;
-use temps_core::plugin::PluginManager;
+use temps_core::plugin::{PluginManager, TempsPlugin};
+// `TempsPlugin` is used both directly (extra_plugins field) and through
+// `dyn TempsPlugin` in `ConsoleApiParams`.
 use temps_core::templates::TemplateService;
 use temps_core::{CookieCrypto, EncryptionService};
 use temps_database::DbConnection;
@@ -101,6 +103,8 @@ async fn ensure_system_user(db: &sea_orm::DatabaseConnection) -> anyhow::Result<
             mfa_enabled: Set(false),
             mfa_secret: Set(None),
             mfa_recovery_codes: Set(None),
+            oidc_subject: Set(None),
+            oidc_provider_id: Set(None),
             created_at: Set(now),
             updated_at: Set(now),
         };
@@ -392,12 +396,52 @@ fn create_openapi(plugin_manager: &PluginManager) -> anyhow::Result<utoipa::open
     let nodes_doc = <temps_deployments::handlers::nodes::NodesApiDoc as utoipa::OpenApi>::openapi();
     api_doc.merge(nodes_doc);
 
+    // Merge admin-gate management endpoints (also not part of the plugin system)
+    let gate_doc = <super::admin_gate_handler::AdminGateApiDoc as utoipa::OpenApi>::openapi();
+    api_doc.merge(gate_doc);
+
     Ok(api_doc)
+}
+
+/// Axum middleware that rejects unauthenticated requests to the Swagger UI
+/// and OpenAPI JSON endpoint. The auth middleware stack must have already run
+/// (i.e. be an outer layer) so the `AuthContext` extension is present for
+/// authenticated callers. Anonymous callers — with no valid session cookie or
+/// Bearer token — receive a 401 with a WWW-Authenticate hint.
+async fn require_auth_for_docs(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::http::header::WWW_AUTHENTICATE;
+    if req.extensions().get::<temps_auth::AuthContext>().is_some() {
+        next.run(req).await
+    } else {
+        Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .header(WWW_AUTHENTICATE, "Bearer realm=\"temps\"")
+            .header(header::CONTENT_TYPE, "application/problem+json")
+            .body(Body::from(
+                r#"{"type":"about:blank","title":"Unauthorized","status":401,"detail":"Authentication required to access the API documentation."}"#,
+            ))
+            .unwrap_or_else(|_| Response::new(Body::empty()))
+    }
 }
 
 fn create_swagger_router(plugin_manager: &PluginManager) -> anyhow::Result<Router> {
     let api_doc = create_openapi(plugin_manager)?;
-    Ok(Router::new().merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", api_doc)))
+    // Build the raw Swagger router, then add the auth-guard as an inner layer
+    // (applied after the outer auth middleware has already run and injected the
+    // `AuthContext` extension). Axum applies `.layer()` calls in reverse order:
+    // the *last* `.layer()` wraps outermost (runs first).  Because
+    // `apply_middleware_to_router` is called after we add the guard here,
+    // the plugin auth middleware is the outermost shell → runs first →
+    // populates `AuthContext` → then the guard reads it.
+    let swagger =
+        Router::new().merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", api_doc));
+    // Add the auth-guard as the innermost layer (runs after auth middleware).
+    let swagger_guarded = swagger.layer(axum::middleware::from_fn(require_auth_for_docs));
+    // Wrap with the full plugin middleware stack (auth context injection, etc.).
+    Ok(plugin_manager.apply_middleware_to_router(swagger_guarded, plugin_manager.get_middleware()))
 }
 
 /// Static file handler for embedded website
@@ -631,6 +675,87 @@ pub struct ConsoleApiParams {
     pub ready_signal: Option<tokio::sync::oneshot::Sender<()>>,
     pub additional_templates: Vec<std::path::PathBuf>,
     pub on_demand_waker: Option<Arc<dyn temps_core::OnDemandWaker>>,
+    /// Additional plugins registered by an external entrypoint (e.g. the
+    /// EE binary). Registered immediately before `initialize_plugins`, so
+    /// they observe every OSS service in the registry and can wrap or
+    /// extend them. OSS callers pass an empty Vec.
+    pub extra_plugins: Vec<Box<dyn TempsPlugin>>,
+    /// Pre-built admin-gate service (when the caller wired the gate up
+    /// outside the console). When `None`, the console builds its own.
+    pub admin_gate_service: Option<super::admin_gate_service::AdminGateService>,
+    /// Pre-built admin-gate handle. When `None`, the console derives one
+    /// from the freshly-constructed service above.
+    pub admin_gate_handle: Option<temps_core::admin_gate::AdminGateHandle>,
+}
+
+/// Build a ClickHouse-backed metrics store from the server config, or `None`
+/// when ClickHouse is not configured.
+///
+/// Returns `Some(store)` only when all four `TEMPS_CLICKHOUSE_*` vars are set
+/// (`config.is_clickhouse_enabled()`). When the monitoring store is set to
+/// ClickHouse but the env vars are absent, this logs a warning and returns
+/// `None` so the caller falls back to TimescaleDB (fail-open to the default
+/// path, never silently losing metrics). Construction does no I/O; migrations
+/// are spawned separately by the caller.
+fn build_ch_metrics_store(config: &ServerConfig) -> Option<Arc<dyn temps_metrics::MetricsStore>> {
+    use temps_metrics::{ClickHouseMetricsConfig, ClickhouseMetricsStore, MetricsStore};
+
+    if !config.is_clickhouse_enabled() {
+        tracing::warn!(
+            "Monitoring store is set to ClickHouse but TEMPS_CLICKHOUSE_* env vars are not \
+             fully configured; falling back to TimescaleDB for resource metrics"
+        );
+        return None;
+    }
+
+    // is_clickhouse_enabled() guarantees all four are Some.
+    let cfg = ClickHouseMetricsConfig::new(
+        config.clickhouse_url.clone().unwrap_or_default(),
+        config.clickhouse_database.clone().unwrap_or_default(),
+        config.clickhouse_user.clone().unwrap_or_default(),
+        config.clickhouse_password.clone().unwrap_or_default(),
+    );
+    let store = Arc::new(ClickhouseMetricsStore::new(cfg));
+
+    // Run migrations in the background so startup is not blocked. If they fail,
+    // the first write/read surfaces the error per-call. Guard on the runtime
+    // handle: this is called from an async path today, but a bare tokio::spawn
+    // panics if ever invoked from a sync context (no reactor) — fall back to a
+    // short-lived current-thread runtime in that case.
+    let client = store.client().clone();
+    let database = config.clickhouse_database.clone().unwrap_or_default();
+    let run_migrations = async move {
+        match temps_metrics::clickhouse_migrations::apply_migrations(&client, &database).await {
+            Ok(report) => debug!(
+                applied = ?report.applied,
+                skipped = report.skipped.len(),
+                "ClickHouse resource-metrics migrations applied"
+            ),
+            Err(e) => tracing::warn!(
+                error = %e,
+                "ClickHouse resource-metrics migrations failed; \
+                 metric writes/queries will surface the error per-call"
+            ),
+        }
+    };
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn(run_migrations);
+        }
+        Err(_) => match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt.block_on(run_migrations),
+            Err(e) => tracing::warn!(
+                error = %e,
+                "Could not build a runtime to apply ClickHouse resource-metrics \
+                 migrations; they will be attempted on first read/write"
+            ),
+        },
+    }
+
+    Some(store as Arc<dyn MetricsStore>)
 }
 
 /// Initialize and start the console API server
@@ -645,6 +770,9 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
         ready_signal,
         additional_templates,
         on_demand_waker,
+        extra_plugins,
+        admin_gate_service: provided_admin_gate_service,
+        admin_gate_handle: provided_admin_gate_handle,
     } = params;
     // PRE-VALIDATE all plugin dependencies BEFORE initializing plugin manager
     // This ensures clear error messages if any critical resources are missing
@@ -1006,6 +1134,22 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
     ));
     plugin_manager.register_plugin(external_plugins_plugin);
 
+    // Extra plugins from the calling binary (EE, etc.). Registered last so
+    // they can resolve every OSS service via `require_service`. See ADR 0001
+    // §"Extension points exposed by OSS" — this is the
+    // single seam between an OSS build and an EE-bundled binary.
+    let extra_count = extra_plugins.len();
+    for plugin in extra_plugins {
+        debug!("Registering extra plugin: {}", plugin.name());
+        plugin_manager.register_plugin(plugin);
+    }
+    if extra_count > 0 {
+        info!(
+            "Registered {} extra plugin(s) from binary entrypoint",
+            extra_count
+        );
+    }
+
     // Initialize all plugins
     debug!("Initializing plugins");
     if let Err(e) = plugin_manager.initialize_plugins().await {
@@ -1126,11 +1270,9 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
         service_context.get_service::<temps_config::ConfigService>(),
         service_context.get_service::<dyn temps_core::notifications::NotificationService>(),
     ) {
-        let data_dir = config.data_dir.clone();
         let monitor = Arc::new(DiskSpaceMonitor::new(
             config_service.clone(),
             notification_service,
-            data_dir,
         ));
 
         tokio::spawn(async move {
@@ -1175,13 +1317,47 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
         if let Some(container_deployer) =
             service_context.get_service::<dyn temps_deployer::ContainerDeployer>()
         {
-            let health_monitor = Arc::new(ContainerHealthMonitor::new(
+            // Build the metrics store if monitoring is enabled, so container
+            // resource metrics are written alongside the alarm logic.
+            let container_metrics_store: Option<Arc<dyn temps_metrics::MetricsStore>> = {
+                use temps_core::MetricsStoreKind;
+                use temps_metrics::{MetricsStore, TimescaleMetricsStore};
+
+                // Provide a metrics store for container resource metrics. When
+                // the monitoring store is ClickHouse and CH is configured, use
+                // it; otherwise (TimescaleDb, or CH selected but unconfigured)
+                // fall back to TimescaleDB.
+                match service_context.get_service::<temps_config::ConfigService>() {
+                    Some(cfg_svc) => match cfg_svc.get_settings().await {
+                        Ok(settings) => match settings.monitoring.store {
+                            MetricsStoreKind::TimescaleDb => {
+                                Some(Arc::new(TimescaleMetricsStore::new(db.clone()))
+                                    as Arc<dyn MetricsStore>)
+                            }
+                            MetricsStoreKind::ClickHouse => build_ch_metrics_store(&config)
+                                .or_else(|| {
+                                    Some(Arc::new(TimescaleMetricsStore::new(db.clone()))
+                                        as Arc<dyn MetricsStore>)
+                                }),
+                        },
+                        _ => None,
+                    },
+                    None => None,
+                }
+            };
+
+            let mut health_monitor = ContainerHealthMonitor::new(
                 db.clone(),
                 container_deployer,
-                alarm_service,
+                alarm_service.clone(),
                 ContainerHealthConfig::default(),
-            ));
+            );
 
+            if let Some(ms) = container_metrics_store {
+                health_monitor = health_monitor.with_metrics_store(ms);
+            }
+
+            let health_monitor = Arc::new(health_monitor);
             tokio::spawn(async move {
                 health_monitor.start().await;
             });
@@ -1189,6 +1365,152 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
             debug!("Container health monitor started (poll interval: 30s)");
         } else {
             debug!("ContainerDeployer not available - container health monitoring disabled");
+        }
+
+        // Start MetricsScraper for external service DB-level metrics
+        // (postgres, redis, mongodb) when monitoring is enabled.
+        if let (Some(cfg_svc), Some(enc_svc)) = (
+            service_context.get_service::<temps_config::ConfigService>(),
+            service_context.get_service::<temps_core::EncryptionService>(),
+        ) {
+            use temps_core::MetricsStoreKind;
+            use temps_metrics::{MetricsScraper, MetricsStore, TimescaleMetricsStore};
+
+            // The metrics store and scraper are ALWAYS wired up — the per-service
+            // `metrics_enabled` flag is the single source of truth for what gets
+            // scraped. The scraper idles (near-zero cost) when no service has
+            // monitoring enabled, so a user clicking "Enable Monitoring" on a
+            // service just works without an operator first flipping a global flag.
+            //
+            // When the monitoring store is ClickHouse AND TEMPS_CLICKHOUSE_* is
+            // configured, this single binding becomes the ClickHouse store used
+            // by the HTTP query endpoints, the AlertEvaluator, AND the scraper's
+            // writes. Otherwise (TimescaleDb, or CH selected but unconfigured)
+            // it falls back to TimescaleDB unchanged.
+            match cfg_svc.get_settings().await {
+                Ok(settings) => {
+                    let metrics_store: Arc<dyn MetricsStore> = match settings.monitoring.store {
+                        MetricsStoreKind::ClickHouse => build_ch_metrics_store(&config)
+                            .unwrap_or_else(|| Arc::new(TimescaleMetricsStore::new(db.clone()))),
+                        MetricsStoreKind::TimescaleDb => {
+                            Arc::new(TimescaleMetricsStore::new(db.clone()))
+                        }
+                    };
+
+                    // Register the metrics store so plugins (e.g. providers)
+                    // can retrieve it for HTTP query endpoints.
+                    service_context.register_service(metrics_store.clone());
+
+                    let scraper = Arc::new(MetricsScraper::new(
+                        db.clone(),
+                        metrics_store.clone(),
+                        cfg_svc,
+                        enc_svc,
+                    ));
+
+                    tokio::spawn(async move {
+                        scraper.start().await;
+                    });
+
+                    debug!(
+                        "MetricsScraper started (scrapes only services with metrics_enabled=true)"
+                    );
+
+                    // Start AlertEvaluator alongside the scraper.
+                    // It reads monitoring_alert_rules from the DB and evaluates
+                    // each rule against the most-recent value from MetricsStore,
+                    // firing/resolving alarms via the shared AlarmService.
+                    let evaluator = Arc::new(temps_monitoring::AlertEvaluator::new(
+                        db.clone(),
+                        metrics_store,
+                        alarm_service.clone(),
+                    ));
+
+                    tokio::spawn(async move {
+                        evaluator.start().await;
+                    });
+
+                    debug!("AlertEvaluator started (metric threshold alerts, 30s interval)");
+
+                    // Start hourly pruning job for raw service_metrics rows.
+                    // Continuous aggregates (hourly/daily rollups) have their
+                    // own TimescaleDB retention policies; this only handles
+                    // the raw hypertable rows.
+                    {
+                        use chrono::{Duration, Utc};
+                        use temps_core::MetricsStoreKind;
+                        use temps_metrics::{MetricsStore, TimescaleMetricsStore};
+
+                        let prune_db = db.clone();
+                        let prune_cfg =
+                            service_context.get_service::<temps_config::ConfigService>();
+                        // Clone the server config so the ClickHouse arm can build
+                        // a store inside the spawned loop without re-spawning the
+                        // migration task each tick (CH prune is a TTL-backed no-op).
+                        let prune_config = config.clone();
+
+                        tokio::spawn(async move {
+                            let mut interval =
+                                tokio::time::interval(std::time::Duration::from_secs(3600));
+                            loop {
+                                interval.tick().await;
+                                let Some(ref cfg_svc) = prune_cfg else {
+                                    break;
+                                };
+                                let settings = match cfg_svc.get_settings().await {
+                                    Ok(s) => s,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "PruneMetrics: failed to read settings: {e}"
+                                        );
+                                        continue;
+                                    }
+                                };
+                                // When ClickHouse is the active metrics store, the
+                                // table's native TTL enforces retention — there is
+                                // nothing for prune() to do. Skip the tick entirely
+                                // rather than build a CH store just to call a no-op.
+                                if matches!(settings.monitoring.store, MetricsStoreKind::ClickHouse)
+                                    && prune_config.is_clickhouse_enabled()
+                                {
+                                    continue;
+                                }
+                                let store: Arc<dyn MetricsStore> = match settings.monitoring.store {
+                                    MetricsStoreKind::TimescaleDb => {
+                                        Arc::new(TimescaleMetricsStore::new(prune_db.clone()))
+                                    }
+                                    MetricsStoreKind::ClickHouse => {
+                                        // CH selected but unconfigured — match the
+                                        // read/write path's TimescaleDB fallback.
+                                        // (The CH-configured case is skipped above.)
+                                        Arc::new(TimescaleMetricsStore::new(prune_db.clone()))
+                                    }
+                                };
+                                let cutoff = Utc::now()
+                                    - Duration::days(settings.monitoring.retention_raw_days as i64);
+                                match store.prune(cutoff).await {
+                                    Ok(n) => {
+                                        debug!(
+                                            "PruneMetrics: pruned {} raw metric rows older than {}",
+                                            n, cutoff
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("PruneMetrics: prune failed: {e}");
+                                    }
+                                }
+                            }
+                        });
+
+                        debug!("Metrics pruning job scheduled (hourly)");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to read monitoring settings: {e} — MetricsScraper and AlertEvaluator not started");
+                }
+            }
+        } else {
+            debug!("ConfigService or EncryptionService not available — MetricsScraper and AlertEvaluator not started");
         }
     } else {
         tracing::warn!(
@@ -1306,8 +1628,37 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
     // the internet POST to them with bearer tokens).
     let public_router = split.public.merge(node_routes).merge(route_sync_routes);
 
-    // Swagger UI + the embedded SPA only live on the admin surface.
-    let admin_router = split.admin.merge(create_swagger_router(&plugin_manager)?);
+    // Use the caller-supplied admin-gate when present (so the proxy and the
+    // console share one source of truth) and otherwise build a fresh one.
+    let (admin_gate_service, admin_gate_handle) =
+        match (provided_admin_gate_service, provided_admin_gate_handle) {
+            (Some(svc), Some(handle)) => (svc, handle),
+            _ => super::admin_gate_service::AdminGateService::new(
+                db.clone(),
+                &config.admin_allowed_ips,
+                &config.admin_allowed_hosts,
+                config.admin_trust_forwarded_for,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to initialize admin gate: {}", e))?,
+        };
+    let admin_gate_state = Arc::new(super::admin_gate_handler::AdminGateAppState {
+        service: admin_gate_service,
+    });
+    // Re-apply the plugin middleware stack (auth, request metadata, audit)
+    // to our standalone admin-gate routes. Without this, RequireAuth finds
+    // no AuthContext injected and the route 401s for logged-in users —
+    // `Router::merge` does not propagate parent layers to merged routes.
+    let admin_gate_routes = super::admin_gate_handler::configure_routes(admin_gate_state);
+    let admin_gate_routes = plugin_manager
+        .apply_middleware_to_router(admin_gate_routes, plugin_manager.get_middleware());
+
+    // Swagger UI + the embedded SPA only live on the admin surface. So do
+    // the admin-gate management routes.
+    let admin_router = split
+        .admin
+        .merge(create_swagger_router(&plugin_manager)?)
+        .merge(admin_gate_routes);
 
     // Wrap each surface in /api like the original single-router did, except
     // for the SPA fallback which serves the dashboard at the document root.
@@ -1316,27 +1667,17 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
         .nest("/api", admin_router)
         .fallback(serve_static_file);
 
-    // Optional defense-in-depth gate for the admin listener.
-    let admin_gate = super::admin_gate::AdminGateConfig::from_env(
-        &config.admin_allowed_ips,
-        &config.admin_allowed_hosts,
-        config.admin_trust_forwarded_for,
-    )
-    .map_err(|e| anyhow::anyhow!("Invalid admin gate config: {}", e))?;
-    let admin_app = if admin_gate.is_noop() {
-        admin_app
-    } else {
-        info!(
-            allowed_ips = ?config.admin_allowed_ips,
-            allowed_hosts = ?config.admin_allowed_hosts,
-            trust_forwarded_for = config.admin_trust_forwarded_for,
-            "Admin gate enabled"
-        );
-        admin_app.layer(axum::middleware::from_fn_with_state(
-            admin_gate,
-            super::admin_gate::admin_gate,
-        ))
-    };
+    // Defense-in-depth: the Pingora proxy is now the primary enforcer (it
+    // 404s gated requests before they ever reach this listener). The axum
+    // middleware below only matters when something connects to the console
+    // listener directly — e.g. loopback debugging, or a deployment where
+    // the operator points an external reverse-proxy at console_address
+    // instead of going through Pingora. The middleware short-circuits when
+    // the active config is a noop, so the perf cost is negligible.
+    let admin_app = admin_app.layer(axum::middleware::from_fn_with_state(
+        admin_gate_handle.clone(),
+        super::admin_gate::admin_gate,
+    ));
 
     info!("Plugin system initialized successfully with static file serving");
 

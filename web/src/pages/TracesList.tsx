@@ -44,6 +44,9 @@ import { useQuery } from '@tanstack/react-query'
 import { format } from 'date-fns'
 import {
   AlertTriangle,
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -566,6 +569,41 @@ OTEL_SERVICE_NAME=${project.name}`
   )
 }
 
+// A right-aligned, clickable column header that drives server-side sort.
+// Shows a neutral up/down glyph when inactive, and the active direction arrow
+// when this column is the sort key.
+function SortHeader({
+  label,
+  active,
+  order,
+  onClick,
+}: {
+  label: string
+  active: boolean
+  order: 'asc' | 'desc'
+  onClick: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-sort={active ? (order === 'asc' ? 'ascending' : 'descending') : 'none'}
+      className="ml-auto inline-flex items-center gap-1 hover:text-foreground transition-colors"
+    >
+      {label}
+      {active ? (
+        order === 'asc' ? (
+          <ArrowUp className="h-3.5 w-3.5" />
+        ) : (
+          <ArrowDown className="h-3.5 w-3.5" />
+        )
+      ) : (
+        <ArrowUpDown className="h-3.5 w-3.5 opacity-40" />
+      )}
+    </button>
+  )
+}
+
 // ── Main Component ──────────────────────────────────────────────────
 
 export default function TracesList({ project }: TracesListProps) {
@@ -597,6 +635,13 @@ export default function TracesList({ project }: TracesListProps) {
     const p = searchParams.get('page')
     return p ? parseInt(p, 10) : 1
   })
+  // Server-side sort. Default mirrors the backend: newest traces first.
+  const [sortBy, setSortBy] = useState<'start_time' | 'duration'>(() =>
+    searchParams.get('sort') === 'duration' ? 'duration' : 'start_time',
+  )
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>(() =>
+    searchParams.get('dir') === 'asc' ? 'asc' : 'desc',
+  )
   const [showSetup, setShowSetup] = useState(false)
 
   // Compute time window
@@ -656,8 +701,26 @@ export default function TracesList({ project }: TracesListProps) {
     if (environmentId !== 'all') params.set('env', environmentId)
     if (deploymentId !== 'all') params.set('deploy', deploymentId)
     if (page > 1) params.set('page', page.toString())
+    if (sortBy !== 'start_time') params.set('sort', sortBy)
+    if (sortOrder !== 'desc') params.set('dir', sortOrder)
     setSearchParams(params, { replace: true })
-  }, [timeRange, serviceName, status, search, environmentId, deploymentId, page, setSearchParams])
+  }, [timeRange, serviceName, status, search, environmentId, deploymentId, page, sortBy, sortOrder, setSearchParams])
+
+  // Toggle sort on a column header. Clicking the active column flips direction;
+  // clicking a new column selects it (duration starts desc = slowest first,
+  // timestamp starts desc = newest first — the most useful default each way).
+  const handleSort = useCallback(
+    (field: 'start_time' | 'duration') => {
+      if (sortBy === field) {
+        setSortOrder((d) => (d === 'desc' ? 'asc' : 'desc'))
+      } else {
+        setSortBy(field)
+        setSortOrder('desc')
+      }
+      setPage(1)
+    },
+    [sortBy],
+  )
 
   // Breadcrumbs
   useEffect(() => {
@@ -682,6 +745,8 @@ export default function TracesList({ project }: TracesListProps) {
           environmentId !== 'all' ? Number(environmentId) : undefined,
         deployment_id:
           deploymentId !== 'all' ? Number(deploymentId) : undefined,
+        sort_by: sortBy,
+        sort_order: sortOrder,
         limit: PAGE_SIZE,
         offset: (page - 1) * PAGE_SIZE,
       },
@@ -691,6 +756,38 @@ export default function TracesList({ project }: TracesListProps) {
   const traces: TraceSummary[] = data?.data ?? []
   const totalCount = data?.total ?? 0
   const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE))
+
+  // "Has this project EVER received a trace?" — a window/filter-independent
+  // probe (project_id only, limit 1). The main query above is scoped to the
+  // selected time range and filters, so its `total` goes to 0 whenever the
+  // window happens to be empty. Gating the setup onboarding on that would show
+  // "set up OpenTelemetry" to a project with millions of historical traces just
+  // because nothing landed in the last 24h. This probe answers the real
+  // question the onboarding screen is for.
+  const { data: anyTraceData, isLoading: isProbeLoading } = useQuery({
+    ...queryTraceSummariesOptions({
+      query: { project_id: project.id, limit: 1 },
+    }),
+    enabled: !!project.id,
+  })
+  const hasEverReceivedTraces = (anyTraceData?.total ?? 0) > 0
+
+  const hasActiveFilters =
+    !!search ||
+    !!serviceName ||
+    status !== 'all' ||
+    environmentId !== 'all' ||
+    deploymentId !== 'all'
+
+  // Copy for the in-window empty state, in priority order:
+  //  1. filters/window active → suggest adjusting them
+  //  2. project has traces but none in this window → suggest widening the range
+  //  3. project has never sent a trace → the genuine "get started" message
+  const emptyStateDescription = hasActiveFilters
+    ? 'Try adjusting your filters or time range.'
+    : hasEverReceivedTraces
+      ? 'No traces in the selected time range. Try widening the range.'
+      : 'Traces will appear here once your application sends data via OpenTelemetry.'
 
   // Extract unique service names for the filter dropdown
   const serviceNames = useMemo(() => {
@@ -779,8 +876,12 @@ export default function TracesList({ project }: TracesListProps) {
         </div>
       </div>
 
-      {/* Setup section — shown when there are no traces yet, or when toggled on */}
-      {((!isLoading && totalCount === 0) || showSetup) && (
+      {/* Setup section — onboarding for a project that has NEVER received a
+          trace, or when the user explicitly toggles it. Deliberately NOT gated
+          on the windowed `totalCount`: an empty time range is "no results
+          here", not "never set up", and must not resurface the setup wizard for
+          a project with existing traces (see hasEverReceivedTraces probe). */}
+      {((!isProbeLoading && !hasEverReceivedTraces) || showSetup) && (
         <OtelSetupSection project={project} />
       )}
 
@@ -844,7 +945,8 @@ export default function TracesList({ project }: TracesListProps) {
                   <SelectItem value="all">All Deployments</SelectItem>
                   {deployments.map((d) => (
                     <SelectItem key={d.id} value={String(d.id)}>
-                      #{d.id}{d.slug ? ` (${d.slug})` : ''}
+                      #{d.id}
+                      {d.commit_hash ? ` (${d.commit_hash.slice(0, 7)})` : ''}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -897,13 +999,11 @@ export default function TracesList({ project }: TracesListProps) {
         <EmptyState
           icon={Workflow}
           title="No traces found"
-          description={
-            search || serviceName || status !== 'all' || environmentId !== 'all' || deploymentId !== 'all'
-              ? 'Try adjusting your filters or time range.'
-              : 'Traces will appear here once your application sends data via OpenTelemetry.'
-          }
+          description={emptyStateDescription}
           action={
-            !search && !serviceName && status === 'all' && environmentId === 'all' && deploymentId === 'all' ? (
+            // Only nudge toward setup for a project that has never sent a
+            // trace — never when it just has nothing in the current window.
+            !hasActiveFilters && !hasEverReceivedTraces ? (
               <Button
                 variant="outline"
                 size="sm"
@@ -931,9 +1031,23 @@ export default function TracesList({ project }: TracesListProps) {
                   {environmentId === 'all' && <TableHead className="hidden lg:table-cell">Environment</TableHead>}
                   <TableHead className="hidden md:table-cell">Kind</TableHead>
                   <TableHead>Status</TableHead>
-                  <TableHead className="text-right">Duration</TableHead>
+                  <TableHead className="text-right">
+                    <SortHeader
+                      label="Duration"
+                      active={sortBy === 'duration'}
+                      order={sortOrder}
+                      onClick={() => handleSort('duration')}
+                    />
+                  </TableHead>
                   <TableHead className="hidden md:table-cell text-right">Spans</TableHead>
-                  <TableHead className="hidden md:table-cell text-right">Timestamp</TableHead>
+                  <TableHead className="hidden md:table-cell text-right">
+                    <SortHeader
+                      label="Timestamp"
+                      active={sortBy === 'start_time'}
+                      order={sortOrder}
+                      onClick={() => handleSort('start_time')}
+                    />
+                  </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>

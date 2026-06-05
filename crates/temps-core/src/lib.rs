@@ -1,5 +1,6 @@
 //! Core utilities and types shared across all Temps crates
 
+pub mod admin_gate;
 pub mod audit;
 pub mod config;
 pub mod deployment;
@@ -53,8 +54,8 @@ pub use anyhow;
 pub use app_settings::{
     AgentSandboxSettings, AiConfigSettings, AppSettings, ContainerLogSettings,
     DiskSpaceAlertSettings, DnsProviderSettings, DockerRegistrySettings, LetsEncryptSettings,
-    MultiNodeSettings, PreviewGatewaySettings, ProviderConfig, RateLimitSettings,
-    ScreenshotSettings, SecurityHeadersSettings,
+    MetricsStoreKind, MonitoringSettings, MultiNodeSettings, PreviewGatewaySettings,
+    ProviderConfig, RateLimitSettings, ScreenshotSettings, SecurityHeadersSettings,
 };
 pub use async_trait;
 pub use chrono;

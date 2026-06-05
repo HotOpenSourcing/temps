@@ -482,6 +482,39 @@ impl MarkDeploymentCompleteJob {
             )));
         }
 
+        // ── Phase 0: Persist routing inputs before flipping the route table ──
+        //
+        // load_routes() reads `deployments.static_dir_location` (and
+        // `image_name`) to build the backend for an environment. Those fields
+        // are otherwise only written in Phase 3's `active_deployment.update()`,
+        // which runs AFTER current_deployment_id is flipped. For static
+        // deployments that means the PG NOTIFY fires while static_dir_location
+        // is still NULL, so the proxy builds a route with no static directory
+        // and the folder isn't served until a later, unrelated route reload.
+        //
+        // Write the routing-relevant fields to the deployment row FIRST so the
+        // route table sees a consistent record the moment the NOTIFY fires.
+        {
+            let mut routing_inputs = deployments::ActiveModel {
+                id: sea_orm::ActiveValue::Unchanged(self.deployment_id),
+                ..Default::default()
+            };
+            if let sea_orm::ActiveValue::Set(image) = &active_deployment.image_name {
+                routing_inputs.image_name = Set(image.clone());
+            }
+            if let sea_orm::ActiveValue::Set(static_dir) = &active_deployment.static_dir_location {
+                routing_inputs.static_dir_location = Set(static_dir.clone());
+            }
+            if routing_inputs.is_changed() {
+                routing_inputs.update(self.db.as_ref()).await.map_err(|e| {
+                    WorkflowError::JobExecutionFailed(format!(
+                        "Failed to persist deployment routing inputs: {}",
+                        e
+                    ))
+                })?;
+            }
+        }
+
         // ── Phase 1: Switch route table to the new deployment ────────────
         //
         // Subscribe to the queue BEFORE updating current_deployment_id so we
@@ -537,6 +570,39 @@ impl MarkDeploymentCompleteJob {
             "Environment {} current_deployment_id updated to {}",
             environment_id, self.deployment_id
         );
+
+        // ── Phase 1.5: Request an in-process route reload ────────────────
+        //
+        // Publish ForceRouteReload on the shared broadcast queue so the
+        // in-process RouteReloadSubscriber reloads the route table directly,
+        // without depending on PostgreSQL LISTEN/NOTIFY. The NOTIFY path is
+        // fire-and-forget: if the proxy's long-lived listener connection has
+        // silently died (idle-timeout on a pooler, dropped socket, failover),
+        // the trigger's notification is lost and the new route never goes live
+        // until a manual reload. The broadcast queue has no DB connection in
+        // its critical path, so this signal cannot be lost between deployments
+        // in a single-node process. The DB UPDATE above still fires the PG
+        // NOTIFY, which remains the propagation mechanism for remote worker
+        // nodes that do not share this queue. We subscribed to the queue at the
+        // top of `run` (before the UPDATE) so we cannot miss the resulting
+        // RouteTableUpdated confirmation.
+        if let Err(e) = self
+            .queue
+            .send(Job::ForceRouteReload(temps_core::ForceRouteReloadJob {
+                environment_id: Some(environment_id),
+                deployment_id: Some(self.deployment_id),
+            }))
+            .await
+        {
+            // Non-fatal: the PG NOTIFY path and the periodic fallback NOTIFY in
+            // wait_for_route_ready can still drive the reload. Log and continue.
+            warn!(
+                "Failed to publish in-process ForceRouteReload for environment {} deployment {}: {} \
+                 — falling back to PG NOTIFY",
+                environment_id, self.deployment_id, e
+            );
+        }
+
         self.log(format!(
             "Environment {} now points to deployment {} — waiting for route table confirmation...",
             environment_id, self.deployment_id
@@ -545,10 +611,11 @@ impl MarkDeploymentCompleteJob {
 
         // ── Phase 2: Wait for route table confirmation ───────────────────
         //
-        // The PG trigger on environments.current_deployment_id fires a NOTIFY,
-        // the route listener calls load_routes(), and on success publishes
-        // RouteTableUpdated to the queue with environment_id + deployment_id.
-        // We wait here until we see the matching event or timeout.
+        // The in-process ForceRouteReload (above) and/or the PG trigger on
+        // environments.current_deployment_id drive a load_routes() in the
+        // proxy, which on success publishes RouteTableUpdated to the queue with
+        // environment_id + deployment_id. We wait here until we see the
+        // matching event or timeout.
         const ROUTE_READY_TIMEOUT_SECS: u64 = 60;
         let route_ready = Self::wait_for_route_ready(
             &mut route_receiver,
@@ -867,14 +934,15 @@ impl MarkDeploymentCompleteJob {
                     "deployment_id": deployment_id,
                     "timestamp": chrono::Utc::now().to_rfc3339()
                 });
-                let notify_sql = format!(
-                    "SELECT pg_notify('project_route_change', '{}')",
-                    notify_payload.to_string().replace('\'', "''")
-                );
+                // Use a bound parameter for the payload to avoid any risk of SQL
+                // injection if a user-controlled field (e.g. project name, branch)
+                // is ever added to notify_payload upstream. The channel name is a
+                // hardcoded string literal and cannot be parameterised in libpq.
                 if let Err(e) = db
-                    .execute(sea_orm::Statement::from_string(
+                    .execute(sea_orm::Statement::from_sql_and_values(
                         sea_orm::DatabaseBackend::Postgres,
-                        notify_sql,
+                        "SELECT pg_notify('project_route_change', $1)",
+                        [notify_payload.to_string().into()],
                     ))
                     .await
                 {
@@ -916,13 +984,20 @@ impl MarkDeploymentCompleteJob {
                             ));
                         }
                         Err(e) => {
+                            // Do NOT optimistically confirm: a transient DB error
+                            // here, combined with a concurrent superseding deploy,
+                            // could mark this deployment complete (and tear down
+                            // the previous containers) while the proxy actually
+                            // serves a different deployment's routes. Keep waiting;
+                            // the loop will retry verification on the next event or
+                            // eventually time out and revert to the last good
+                            // deployment — the safe outcome.
                             warn!(
-                                "DB verification failed after route event: {} — \
-                                 treating event as confirmation",
-                                e
+                                "DB verification failed after route event for environment {} deployment {}: {} \
+                                 — not confirming, will retry until next event or timeout",
+                                environment_id, deployment_id, e
                             );
-                            // If we can't verify, trust the event (better than timing out)
-                            return Ok(());
+                            continue;
                         }
                     }
                 }
@@ -1004,6 +1079,10 @@ impl MarkDeploymentCompleteJob {
         struct Gen {
             current: Option<i64>,
         }
+        // `table` is always a &'static str supplied by the two call-sites below
+        // ("route_generation", "dns_generation") — never user-supplied input.
+        // Statement::from_string is therefore safe here; no bound parameter is
+        // needed because the identifier cannot be parameterised in PostgreSQL.
         let load_singleton = |table: &'static str| async move {
             Gen::find_by_statement(Statement::from_string(
                 sea_orm::DatabaseBackend::Postgres,

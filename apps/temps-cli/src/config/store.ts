@@ -120,8 +120,9 @@ async function saveSecrets(secrets: Record<string, string>): Promise<void> {
 export const config = {
   get<K extends keyof TempsConfig>(key: K): TempsConfig[K] {
     // For apiUrl, the resolution order is:
-    //   1. TEMPS_API_URL env var (CI / one-off override)
-    //   2. The active CLI context (set by `temps login` / `temps context use`)
+    //   1. TEMPS_API_URL env var (CI / one-off override, most specific)
+    //   2. The active CLI context — selected by TEMPS_CONTEXT if set,
+    //      otherwise the on-disk active flag (`temps login` / `context use`)
     //   3. The legacy single-instance `conf` store (back-compat for users
     //      who haven't run `temps login` since this feature shipped)
     if (key === 'apiUrl') {

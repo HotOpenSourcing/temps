@@ -215,9 +215,23 @@ impl ServerConfig {
             clickhouse_url: std::env::var("TEMPS_CLICKHOUSE_URL")
                 .ok()
                 .filter(|s| !s.is_empty()),
+            // The database name defaults to "temps" so ALL ClickHouse-backed
+            // telemetry (analytics events/sessions, OTel traces, resource
+            // metrics, proxy/request logs) lives in one consistent database.
+            // Operators only need to set URL/USER/PASSWORD; the name is
+            // overridable via TEMPS_CLICKHOUSE_DATABASE if they prefer another.
+            // Only default it when ClickHouse is actually being configured
+            // (URL present) — otherwise leave None so `is_clickhouse_enabled()`
+            // stays false for an unconfigured server.
             clickhouse_database: std::env::var("TEMPS_CLICKHOUSE_DATABASE")
                 .ok()
-                .filter(|s| !s.is_empty()),
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    std::env::var("TEMPS_CLICKHOUSE_URL")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                        .map(|_| "temps".to_string())
+                }),
             clickhouse_user: std::env::var("TEMPS_CLICKHOUSE_USER")
                 .ok()
                 .filter(|s| !s.is_empty()),
@@ -320,6 +334,33 @@ impl ConfigService {
     /// Get the base data directory path
     pub fn data_dir(&self) -> PathBuf {
         PathBuf::from(self.config.get_data_dir())
+    }
+
+    /// Parse the port from the main proxy listener address (`host:port`).
+    ///
+    /// Internal container traffic (OTLP metrics, agent callbacks) goes through
+    /// the Pingora proxy on this port — the proxy routes `/api/*` to the
+    /// console/API listener via a path rule. This is the conventional single
+    /// public port operators expose. Falls back to 8080 if unparsable.
+    pub fn proxy_port(&self) -> u16 {
+        self.config
+            .address
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(8080)
+    }
+
+    /// Resolve the internal URL service containers use to reach the Temps API
+    /// from inside the Docker network. Reads the `internal_url` setting from
+    /// the DB, falling back to `TEMPS_INTERNAL_API_URL` then
+    /// `http://host.docker.internal:{proxy_port}`. No trailing slash.
+    pub async fn resolve_internal_url(&self) -> String {
+        let port = self.proxy_port();
+        match self.get_settings().await {
+            Ok(settings) => settings.resolve_internal_url(port),
+            Err(_) => AppSettings::default().resolve_internal_url(port),
+        }
     }
 
     /// Get the static files directory path (always under data_dir/static)

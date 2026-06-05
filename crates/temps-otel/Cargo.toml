@@ -15,6 +15,7 @@ temps-database = { path = "../temps-database" }
 temps-entities = { path = "../temps-entities" }
 temps-deployer = { path = "../temps-deployer" }
 temps-auth = { path = "../temps-auth" }
+temps-metrics = { path = "../temps-metrics" }
 
 # Async runtime
 tokio = { workspace = true }
@@ -61,6 +62,10 @@ aws-config = { workspace = true }
 # Crypto for API key hashing
 sha2 = { workspace = true }
 hex = { workspace = true }
+
+# ClickHouse client — compiled unconditionally; activated at runtime by
+# ServerConfig::is_clickhouse_enabled() (TEMPS_CLICKHOUSE_* env vars).
+clickhouse = { version = "0.13", features = ["uuid", "chrono"] }
 
 # Rate limiting
 tokio-util = { workspace = true }

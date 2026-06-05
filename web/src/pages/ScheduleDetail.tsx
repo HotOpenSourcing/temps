@@ -1,13 +1,26 @@
 'use client'
 
 import {
+  attachScheduleServicesMutation,
   deleteBackupScheduleMutation,
+  detachScheduleServiceMutation,
   disableBackupScheduleMutation,
   enableBackupScheduleMutation,
   getBackupScheduleOptions,
   getS3SourceOptions,
+  listScheduleServicesOptions,
+  listScheduleServicesQueryKey,
 } from '@/api/client/@tanstack/react-query.gen'
 import { BackupScheduleResponse } from '@/api/client/types.gen'
+import { ScheduleServicesSelector } from '@/components/backups/ScheduleServicesSelector'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -58,12 +71,16 @@ import {
   CalendarDays,
   ChevronLeft,
   ChevronRight,
+  Database,
   DatabaseBackup,
+  HardDrive,
   Loader2,
   MoreHorizontal,
   Pencil,
   Play,
+  Plus,
   Trash2,
+  X,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
@@ -131,15 +148,27 @@ function RunRow({ run }: { run: ScheduleRunSummary }) {
     <TableRow className="hover:bg-muted/50">
       <TableCell className="font-mono text-xs">
         {isLegacy ? (
-          format(new Date(run.started_at), 'MMM d, yyyy HH:mm:ss')
+          <>
+            <span className="sm:hidden">
+              {format(new Date(run.started_at), 'MMM d HH:mm')}
+            </span>
+            <span className="hidden sm:inline">
+              {format(new Date(run.started_at), 'MMM d, yyyy HH:mm:ss')}
+            </span>
+          </>
         ) : (
           <Link to={detailUrl} className="flex hover:underline">
-            {format(new Date(run.started_at), 'MMM d, yyyy HH:mm:ss')}
+            <span className="sm:hidden">
+              {format(new Date(run.started_at), 'MMM d HH:mm')}
+            </span>
+            <span className="hidden sm:inline">
+              {format(new Date(run.started_at), 'MMM d, yyyy HH:mm:ss')}
+            </span>
           </Link>
         )}
       </TableCell>
 
-      <TableCell className="hidden text-sm text-muted-foreground sm:table-cell">
+      <TableCell className="hidden text-base text-muted-foreground sm:table-cell sm:text-sm">
         {durationMs !== null
           ? formatDuration(durationMs)
           : run.aggregate_state === 'running' ||
@@ -154,15 +183,21 @@ function RunRow({ run }: { run: ScheduleRunSummary }) {
         </Badge>
       </TableCell>
 
-      <TableCell className="hidden text-sm text-muted-foreground md:table-cell">
+      <TableCell className="hidden text-base text-muted-foreground md:table-cell md:text-sm">
         {run.triggered_by}
       </TableCell>
 
-      <TableCell className="text-sm">
+      <TableCell className="text-base sm:text-sm">
         {run.failed_jobs > 0 ? (
           <span className="text-destructive">
-            {run.completed_jobs} / {run.total_jobs} (
-            <span className="font-medium">{run.failed_jobs} failed</span>)
+            {run.completed_jobs} / {run.total_jobs}
+            <span className="hidden sm:inline">
+              {' '}
+              (<span className="font-medium">{run.failed_jobs} failed</span>)
+            </span>
+            <span className="ml-1 font-medium sm:hidden">
+              · {run.failed_jobs} failed
+            </span>
           </span>
         ) : (
           <span className="text-muted-foreground">
@@ -187,6 +222,8 @@ export function ScheduleDetail() {
   const pageSize = 20
 
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
+  const [showAttachDialog, setShowAttachDialog] = useState(false)
+  const [pendingAttachIds, setPendingAttachIds] = useState<number[]>([])
 
   // ── Data fetching ──────────────────────────────────────────────────────────
 
@@ -259,6 +296,41 @@ export function ScheduleDetail() {
     onSettled: () => setShowDeleteDialog(false),
   })
 
+  // ── Service attachment ────────────────────────────────────────────────────
+
+  const { data: attachedServices, isLoading: isLoadingServices } = useQuery({
+    ...listScheduleServicesOptions({ path: { id: scheduleId! } }),
+    enabled: !!scheduleId,
+  })
+
+  const attachMutation = useMutation({
+    ...attachScheduleServicesMutation(),
+    meta: { errorTitle: 'Failed to attach services' },
+    onSuccess: () => {
+      toast.success('Services attached')
+      void queryClient.invalidateQueries({
+        queryKey: listScheduleServicesQueryKey({
+          path: { id: scheduleId! },
+        }),
+      })
+      setShowAttachDialog(false)
+      setPendingAttachIds([])
+    },
+  })
+
+  const detachMutation = useMutation({
+    ...detachScheduleServiceMutation(),
+    meta: { errorTitle: 'Failed to detach service' },
+    onSuccess: () => {
+      toast.success('Service detached')
+      void queryClient.invalidateQueries({
+        queryKey: listScheduleServicesQueryKey({
+          path: { id: scheduleId! },
+        }),
+      })
+    },
+  })
+
   // ── Breadcrumbs ────────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -297,22 +369,34 @@ export function ScheduleDetail() {
         <CardContent>
           <dl className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div>
-              <dt className="text-sm font-medium text-muted-foreground">Cron expression</dt>
-              <dd className="font-mono text-sm">{s.schedule_expression}</dd>
+              <dt className="text-base font-medium text-muted-foreground sm:text-sm">
+                Cron expression
+              </dt>
+              <dd className="break-all font-mono text-base sm:text-sm">
+                {s.schedule_expression}
+              </dd>
             </div>
             <div>
-              <dt className="text-sm font-medium text-muted-foreground">Backup type</dt>
+              <dt className="text-base font-medium text-muted-foreground sm:text-sm">
+                Backup type
+              </dt>
               <dd>
                 <Badge variant="outline">{s.backup_type}</Badge>
               </dd>
             </div>
             <div>
-              <dt className="text-sm font-medium text-muted-foreground">Retention</dt>
-              <dd className="text-sm">{s.retention_period} days</dd>
+              <dt className="text-base font-medium text-muted-foreground sm:text-sm">
+                Retention
+              </dt>
+              <dd className="text-base sm:text-sm">
+                {s.retention_period} days
+              </dd>
             </div>
             <div>
-              <dt className="text-sm font-medium text-muted-foreground">Max runtime</dt>
-              <dd className="text-sm text-muted-foreground">
+              <dt className="text-base font-medium text-muted-foreground sm:text-sm">
+                Max runtime
+              </dt>
+              <dd className="text-base text-muted-foreground sm:text-sm">
                 {s.max_runtime_secs
                   ? formatTimeoutSecs(s.max_runtime_secs)
                   : 'engine default'}
@@ -320,21 +404,27 @@ export function ScheduleDetail() {
             </div>
             {s.description && (
               <div className="sm:col-span-2">
-                <dt className="text-sm font-medium text-muted-foreground">Description</dt>
-                <dd className="text-sm">{s.description}</dd>
+                <dt className="text-base font-medium text-muted-foreground sm:text-sm">
+                  Description
+                </dt>
+                <dd className="text-base sm:text-sm">{s.description}</dd>
               </div>
             )}
             <div>
-              <dt className="text-sm font-medium text-muted-foreground">Last run</dt>
-              <dd className="text-sm">
+              <dt className="text-base font-medium text-muted-foreground sm:text-sm">
+                Last run
+              </dt>
+              <dd className="text-base sm:text-sm">
                 {s.last_run
                   ? format(new Date(s.last_run), 'MMM d, yyyy HH:mm')
                   : '—'}
               </dd>
             </div>
             <div>
-              <dt className="text-sm font-medium text-muted-foreground">Next run</dt>
-              <dd className="text-sm">
+              <dt className="text-base font-medium text-muted-foreground sm:text-sm">
+                Next run
+              </dt>
+              <dd className="text-base sm:text-sm">
                 {s.next_run
                   ? format(new Date(s.next_run), 'MMM d, yyyy HH:mm')
                   : '—'}
@@ -342,17 +432,58 @@ export function ScheduleDetail() {
             </div>
             {s3Source && (
               <div>
-                <dt className="text-sm font-medium text-muted-foreground">S3 source</dt>
+                <dt className="text-base font-medium text-muted-foreground sm:text-sm">
+                  S3 source
+                </dt>
                 <dd>
                   <Link
                     to={`/backups/s3-sources/${s.s3_source_id}`}
-                    className="text-sm text-primary hover:underline"
+                    className="text-base text-primary hover:underline sm:text-sm"
                   >
                     {s3Source.name}
                   </Link>
                 </dd>
               </div>
             )}
+            <div>
+              <dt className="text-base font-medium text-muted-foreground sm:text-sm">
+                Backup targets
+              </dt>
+              <dd className="text-base sm:text-sm">
+                {s.target_all_services ? (
+                  <span>
+                    All databases{' '}
+                    <span className="text-muted-foreground">
+                      (includes future databases automatically)
+                    </span>
+                  </span>
+                ) : (
+                  <span>Specific databases (configured below)</span>
+                )}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-base font-medium text-muted-foreground sm:text-sm">
+                Control plane backup
+              </dt>
+              <dd className="text-base sm:text-sm">
+                {s.include_control_plane ? (
+                  <span>
+                    Included{' '}
+                    <span className="text-muted-foreground">
+                      (Temps's own database is backed up every run)
+                    </span>
+                  </span>
+                ) : (
+                  <span>
+                    Skipped{' '}
+                    <span className="text-muted-foreground">
+                      (only external services are backed up)
+                    </span>
+                  </span>
+                )}
+              </dd>
+            </div>
           </dl>
         </CardContent>
       </Card>
@@ -373,9 +504,9 @@ export function ScheduleDetail() {
 
   if (!schedule) {
     return (
-      <div className="flex flex-col items-center justify-center py-12">
+      <div className="flex flex-col items-center justify-center px-4 py-12 text-center">
         <h2 className="text-lg font-semibold">Schedule Not Found</h2>
-        <p className="text-sm text-muted-foreground mt-1">
+        <p className="mt-1 text-base text-muted-foreground sm:text-sm">
           The requested backup schedule could not be found.
         </p>
         <Button asChild className="mt-4">
@@ -394,18 +525,36 @@ export function ScheduleDetail() {
     <TooltipProvider>
       <div className="space-y-6">
         {/* ── Header ── */}
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-center gap-3">
-            <Button variant="ghost" size="sm" asChild>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="flex min-w-0 items-start gap-2 sm:items-center sm:gap-3">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="-ml-1 shrink-0 sm:hidden"
+              asChild
+              aria-label="Back"
+            >
+              <Link to={`/backups/s3-sources/${schedule.s3_source_id}`}>
+                <ArrowLeft className="h-4 w-4" />
+              </Link>
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="hidden shrink-0 sm:inline-flex"
+              asChild
+            >
               <Link to={`/backups/s3-sources/${schedule.s3_source_id}`}>
                 <ArrowLeft className="mr-2 h-4 w-4" />
                 Back
               </Link>
             </Button>
-            <div>
-              <div className="flex items-center gap-2">
-                <DatabaseBackup className="h-5 w-5 text-muted-foreground" />
-                <h1 className="text-xl font-semibold">{schedule.name}</h1>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                <DatabaseBackup className="h-5 w-5 shrink-0 text-muted-foreground" />
+                <h1 className="break-words text-xl font-semibold">
+                  {schedule.name}
+                </h1>
                 <Badge variant={schedule.enabled ? 'default' : 'secondary'}>
                   {schedule.enabled ? 'Enabled' : 'Disabled'}
                 </Badge>
@@ -414,12 +563,14 @@ export function ScheduleDetail() {
           </div>
 
           {/* ── Action row ── */}
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 sm:shrink-0">
             <Button
               variant="default"
               size="sm"
+              className="shrink-0"
               disabled={!schedule.enabled || runNowMutation.isPending}
               onClick={() => runNowMutation.mutate()}
+              aria-label="Run now"
               title={
                 !schedule.enabled
                   ? 'Enable the schedule before running'
@@ -427,25 +578,37 @@ export function ScheduleDetail() {
               }
             >
               {runNowMutation.isPending ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                <Loader2 className="h-4 w-4 animate-spin sm:mr-2" />
               ) : (
-                <Play className="mr-2 h-4 w-4" />
+                <Play className="h-4 w-4 sm:mr-2" />
               )}
-              Run now
+              <span className="hidden sm:inline">Run now</span>
             </Button>
 
-            <Button variant="outline" size="sm" asChild>
+            <Button
+              variant="outline"
+              size="sm"
+              className="shrink-0"
+              asChild
+              title="Edit schedule"
+            >
               <Link
                 to={`/backups/s3-sources/${schedule.s3_source_id}/schedules/${schedule.id}/edit`}
+                aria-label="Edit schedule"
               >
-                <Pencil className="mr-2 h-4 w-4" />
-                Edit
+                <Pencil className="h-4 w-4 sm:mr-2" />
+                <span className="hidden sm:inline">Edit</span>
               </Link>
             </Button>
 
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button variant="outline" size="sm">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="shrink-0"
+                  aria-label="More actions"
+                >
                   <MoreHorizontal className="h-4 w-4" />
                 </Button>
               </DropdownMenuTrigger>
@@ -458,7 +621,9 @@ export function ScheduleDetail() {
                       enableMutation.mutate({ path: { id: schedule.id } })
                     }
                   }}
-                  disabled={disableMutation.isPending || enableMutation.isPending}
+                  disabled={
+                    disableMutation.isPending || enableMutation.isPending
+                  }
                 >
                   {schedule.enabled ? 'Disable' : 'Enable'}
                 </DropdownMenuItem>
@@ -478,13 +643,122 @@ export function ScheduleDetail() {
         {/* ── Config card ── */}
         {renderScheduleConfigCard(schedule)}
 
+        {/* ── Backup targets card ── */}
+        {/*
+         * In 'all databases' mode the join table is irrelevant — the
+         * fan-out targets every external service at run time. Show a
+         * hint instead of the attach/detach UI to avoid implying that
+         * any of those buttons would change behaviour. In 'specific'
+         * mode we surface the editable list.
+         */}
+        {schedule.target_all_services ? (
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Database className="h-5 w-5" />
+                Backup targets
+              </CardTitle>
+              <CardDescription>
+                This schedule backs up every database on the host. New
+                databases are automatically included on the next run.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
+                To restrict this schedule to a specific list of databases,
+                edit the schedule and switch to <strong>Specific
+                databases</strong>.
+              </div>
+            </CardContent>
+          </Card>
+        ) : (
+        <Card>
+          <CardHeader className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <CardTitle className="flex items-center gap-2">
+                <Database className="h-5 w-5" />
+                Backup targets
+              </CardTitle>
+              <CardDescription>
+                External services this schedule backs up on every run.
+                Currently in <strong>specific</strong> mode — only the
+                listed services are included.
+              </CardDescription>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                setPendingAttachIds([])
+                setShowAttachDialog(true)
+              }}
+              className="shrink-0"
+            >
+              <Plus className="h-4 w-4 sm:mr-2" />
+              <span className="hidden sm:inline">Attach service</span>
+            </Button>
+          </CardHeader>
+          <CardContent>
+            {isLoadingServices ? (
+              <div className="space-y-2">
+                <Skeleton className="h-10 w-full" />
+                <Skeleton className="h-10 w-full" />
+              </div>
+            ) : !attachedServices || attachedServices.length === 0 ? (
+              <div className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">
+                No services attached yet. Click <strong>Attach service</strong>{' '}
+                to add Postgres, Redis, MongoDB, or RustFS targets.
+              </div>
+            ) : (
+              <ul className="divide-y rounded-md border">
+                {attachedServices.map((svc) => {
+                  const Icon = svc.service_type === 's3' ? HardDrive : Database
+                  return (
+                    <li
+                      key={svc.id}
+                      className="flex items-center gap-3 px-3 py-2 text-sm"
+                    >
+                      <Icon
+                        className="h-4 w-4 text-muted-foreground"
+                        aria-hidden
+                      />
+                      <span className="flex-1 truncate">{svc.name}</span>
+                      <Badge variant="outline" className="text-xs">
+                        {svc.service_type}
+                      </Badge>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                        disabled={detachMutation.isPending}
+                        onClick={() =>
+                          detachMutation.mutate({
+                            path: {
+                              id: scheduleId!,
+                              service_id: svc.id,
+                            },
+                          })
+                        }
+                        aria-label={`Detach ${svc.name}`}
+                      >
+                        <X className="h-4 w-4" />
+                      </Button>
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
+          </CardContent>
+        </Card>
+        )}
+
         {/* ── Run history table ── */}
         <Card>
           <CardHeader>
             <CardTitle>Run History</CardTitle>
             <CardDescription>
-              Backup runs for this schedule, newest first. Click a row to see
-              full details.
+              Backup runs for this schedule, newest first. Tap a row for full
+              details.
             </CardDescription>
           </CardHeader>
           <CardContent className="p-0">
@@ -495,19 +769,24 @@ export function ScheduleDetail() {
                 ))}
               </div>
             ) : !runsData || runsData.runs.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-12 text-sm text-muted-foreground">
+              <div className="flex flex-col items-center justify-center px-6 py-12 text-center text-base text-muted-foreground sm:text-sm">
                 <DatabaseBackup className="mb-3 h-8 w-8 opacity-40" />
-                No runs yet — click &ldquo;Run now&rdquo; to start the first backup.
+                No runs yet — tap &ldquo;Run now&rdquo; to start the first
+                backup.
               </div>
             ) : (
               <div className="overflow-x-auto">
-                <Table>
+                <Table className="min-w-[480px]">
                   <TableHeader>
                     <TableRow>
                       <TableHead>Started</TableHead>
-                      <TableHead className="hidden sm:table-cell">Duration</TableHead>
+                      <TableHead className="hidden sm:table-cell">
+                        Duration
+                      </TableHead>
                       <TableHead>State</TableHead>
-                      <TableHead className="hidden md:table-cell">Trigger</TableHead>
+                      <TableHead className="hidden md:table-cell">
+                        Trigger
+                      </TableHead>
                       <TableHead>Jobs</TableHead>
                     </TableRow>
                   </TableHeader>
@@ -522,11 +801,11 @@ export function ScheduleDetail() {
 
             {/* ── Pagination ── */}
             {runsData && runsData.total > 0 && (
-              <div className="flex items-center justify-between border-t px-6 py-4">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-t px-4 py-3 sm:px-6 sm:py-4">
                 <span className="hidden text-sm text-muted-foreground sm:inline">
                   Showing {rangeStart}–{rangeEnd} of {total}
                 </span>
-                <span className="text-sm text-muted-foreground sm:hidden">
+                <span className="text-base text-muted-foreground sm:hidden sm:text-sm">
                   {page} / {totalPages}
                 </span>
                 <div className="flex items-center gap-2">
@@ -535,11 +814,12 @@ export function ScheduleDetail() {
                     size="sm"
                     disabled={page <= 1}
                     onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    aria-label="Previous page"
                   >
                     <ChevronLeft className="h-4 w-4" />
-                    <span className="hidden sm:inline">Previous</span>
+                    <span className="hidden sm:ml-1 sm:inline">Previous</span>
                   </Button>
-                  <span className="text-sm">
+                  <span className="hidden text-sm sm:inline">
                     {page} / {totalPages}
                   </span>
                   <Button
@@ -547,8 +827,9 @@ export function ScheduleDetail() {
                     size="sm"
                     disabled={page >= totalPages}
                     onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                    aria-label="Next page"
                   >
-                    <span className="hidden sm:inline">Next</span>
+                    <span className="hidden sm:mr-1 sm:inline">Next</span>
                     <ChevronRight className="h-4 w-4" />
                   </Button>
                 </div>
@@ -557,6 +838,50 @@ export function ScheduleDetail() {
           </CardContent>
         </Card>
       </div>
+
+      {/* ── Attach services dialog ── */}
+      <Dialog open={showAttachDialog} onOpenChange={setShowAttachDialog}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Attach services</DialogTitle>
+            <DialogDescription>
+              Pick the external services to add to this schedule. Already-
+              attached services are hidden.
+            </DialogDescription>
+          </DialogHeader>
+          <ScheduleServicesSelector
+            value={pendingAttachIds}
+            onChange={setPendingAttachIds}
+            excludeIds={attachedServices?.map((s) => s.id) ?? []}
+            disabled={attachMutation.isPending}
+          />
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setShowAttachDialog(false)}
+              disabled={attachMutation.isPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() =>
+                attachMutation.mutate({
+                  path: { id: scheduleId! },
+                  body: { service_ids: pendingAttachIds },
+                })
+              }
+              disabled={
+                attachMutation.isPending || pendingAttachIds.length === 0
+              }
+            >
+              {attachMutation.isPending ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : null}
+              Attach
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* ── Delete confirmation dialog ── */}
       <AlertDialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>

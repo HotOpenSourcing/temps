@@ -69,12 +69,6 @@ const SERVICE_TYPES = [
   },
   { id: 's3' as ServiceTypeRoute, name: 'S3 / RustFS', description: 'S3-compatible Object Storage' },
   {
-    id: 'minio' as ServiceTypeRoute,
-    name: 'MinIO',
-    description: 'Object Storage (Deprecated)',
-    deprecated: true,
-  },
-  {
     id: 'libsql' as ServiceTypeRoute,
     name: 'LibSQL',
     description: 'SQLite-compatible Database',
@@ -118,7 +112,7 @@ const formSchema = z.object({
   imageUrl: z.string().optional(),
   // Static files specific (will be uploaded after project creation)
   // Common settings
-  port: z.coerce.number().min(1).max(65535).optional(),
+  port: z.number().int().min(1).max(65535).optional(),
   environmentVariables: z.array(
     z.object({
       key: z.string(),
@@ -459,12 +453,18 @@ export function ManualProjectConfigurator({
             </FormLabel>
             <FormControl>
               <Input
-                {...field}
                 type="number"
                 min="1"
                 max="65535"
                 placeholder="3000"
-                value={field.value || 3000}
+                name={field.name}
+                ref={field.ref}
+                onBlur={field.onBlur}
+                value={field.value ?? 3000}
+                onChange={(e) => {
+                  const v = e.target.valueAsNumber
+                  field.onChange(Number.isNaN(v) ? undefined : v)
+                }}
               />
             </FormControl>
             <p className="text-xs text-muted-foreground">

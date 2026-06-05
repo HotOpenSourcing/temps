@@ -34,6 +34,9 @@ reqwest = { workspace = true }
 aws-sdk-sesv2 = { version = "1", default-features = false, features = ["sigv4a", "default-https-client", "rt-tokio"] }
 aws-config = { workspace = true }
 
+# Generic SMTP transport
+lettre = { workspace = true }
+
 # Web framework
 axum = { workspace = true }
 axum-macros = { workspace = true }
@@ -52,10 +55,11 @@ uuid = { workspace = true }
 urlencoding = { workspace = true }
 
 # DNS resolution
-hickory-resolver = "0.24"
+hickory-resolver = "0.26"
 
-# Email validation
-check-if-email-exists = "0.11"
+# Email validation (native): SMTP probing over SOCKS5 + Gravatar hashing
+tokio-socks = "0.5"
+md5 = "0.7"
 
 [dev-dependencies]
 tokio-test = "0.4"

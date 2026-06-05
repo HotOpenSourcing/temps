@@ -5312,7 +5312,6 @@ mod tests {
             created_by: 1,
             expires_at: None,
             tags: "".into(),
-            last_heartbeat_at: None,
         };
         let source_service = temps_entities::external_services::Model {
             id: 1,
@@ -5332,6 +5331,7 @@ mod tests {
             last_health_error: None,
             consecutive_health_failures: 0,
             health_metadata: None,
+            metrics_enabled: false,
         };
         // Build a MockDatabase for the `pool` slot — restore_pitr for
         // Postgres doesn't touch it in the legacy-reject path.

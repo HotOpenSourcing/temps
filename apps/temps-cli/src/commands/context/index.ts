@@ -32,6 +32,17 @@ interface ContextRow {
 async function listAction(options: { json?: boolean }): Promise<void> {
   const contexts = await listContexts()
 
+  // `TEMPS_CONTEXT` overrides which context is active for the whole CLI, so
+  // the active marker (and JSON `isActive`) must reflect the env selection,
+  // not just the on-disk flag — otherwise `context ls` lies about what the
+  // next command will actually use.
+  const envContext = process.env.TEMPS_CONTEXT?.trim() || null
+  const envContextExists = envContext
+    ? contexts.some((c) => c.name === envContext)
+    : false
+  const isActiveRow = (c: ContextRow): boolean =>
+    envContext ? c.name === envContext : !!c.isActive
+
   if (contexts.length === 0) {
     if (options.json) {
       jsonOutput([])
@@ -53,7 +64,7 @@ async function listAction(options: { json?: boolean }): Promise<void> {
         email: c.email,
         keyPrefix: c.keyPrefix,
         expiresAt: c.expiresAt,
-        isActive: !!c.isActive,
+        isActive: isActiveRow(c),
       })),
     )
     return
@@ -62,10 +73,20 @@ async function listAction(options: { json?: boolean }): Promise<void> {
   newline()
   header(`${icons.globe} CLI Contexts (${contexts.length})`)
 
+  if (envContext) {
+    if (envContextExists) {
+      info(`Active context pinned by ${colors.bold('TEMPS_CONTEXT')}=${colors.primary(envContext)}`)
+    } else {
+      warning(
+        `${colors.bold('TEMPS_CONTEXT')}=${envContext} does not match any context below — the CLI will be unauthenticated.`,
+      )
+    }
+  }
+
   const columns: TableColumn<ContextRow>[] = [
     {
       header: '',
-      accessor: (c) => (c.isActive ? colors.success('●') : colors.muted('○')),
+      accessor: (c) => (isActiveRow(c) ? colors.success('●') : colors.muted('○')),
     },
     { header: 'Name', key: 'name', color: (v) => colors.bold(String(v)) },
     { header: 'URL', key: 'url', color: (v) => colors.primary(String(v)) },
@@ -99,6 +120,16 @@ async function useAction(name: string): Promise<void> {
       info(`Available: ${contexts.map((c) => c.name).join(', ')}`)
     }
     return
+  }
+  // `setActiveContext` updated the on-disk flag, but a live `TEMPS_CONTEXT`
+  // env var still wins at resolution time. Warn so the user isn't surprised
+  // that their switch appears to have no effect.
+  const envContext = process.env.TEMPS_CONTEXT?.trim() || null
+  if (envContext && envContext !== name) {
+    warning(
+      `${colors.bold('TEMPS_CONTEXT')}=${envContext} is set and overrides this switch. ` +
+        `Unset it for "${name}" to take effect.`,
+    )
   }
   // The active context now drives `config.get('apiUrl')` and
   // `credentials.getApiKey()` — no need to mirror into the legacy stores.

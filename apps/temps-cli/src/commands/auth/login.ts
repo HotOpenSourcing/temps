@@ -16,19 +16,108 @@ interface LoginOptions {
   context?: string
   /** Override the server URL for this login (otherwise uses config / active context). */
   url?: string
+  /** Emit verbose request/response logging for diagnosing connection issues. */
+  debug?: boolean
 }
 
 /**
- * Strip the "/api" suffix that `normalizeApiUrl` appends, since the
- * `/auth/cli/device/*` endpoints sit at the server root, not under `/api`.
- * Also tolerates the user passing the bare host with or without scheme.
+ * Whether verbose request/response logging is enabled for this invocation.
+ * Activated by `--debug` on the command or `TEMPS_DEBUG=1` in the environment.
+ */
+function debugEnabled(opts: { debug?: boolean } = {}): boolean {
+  if (opts.debug) return true
+  const env = process.env.TEMPS_DEBUG
+  return env === '1' || env === 'true' || env === 'yes'
+}
+
+function debugLog(message: string, payload?: unknown): void {
+  if (payload === undefined) {
+    process.stderr.write(`[temps-cli debug] ${message}\n`)
+    return
+  }
+  let rendered: string
+  try {
+    rendered = typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2)
+  } catch {
+    rendered = String(payload)
+  }
+  process.stderr.write(`[temps-cli debug] ${message} ${rendered}\n`)
+}
+
+/**
+ * Wraps `fetch` so debug mode can see exactly what was sent and what came back.
+ * We read the raw body as text first, log it, and then re-parse as JSON so the
+ * caller still gets a parsed object (or a typed error pointing at the raw body).
+ */
+async function debugFetch(
+  url: string,
+  init: RequestInit,
+  debug: boolean,
+): Promise<{ res: Response; rawBody: string; json: unknown }> {
+  if (debug) {
+    debugLog(`-> ${init.method ?? 'GET'} ${url}`)
+    if (init.body) debugLog('   request body:', init.body)
+  }
+  let res: Response
+  try {
+    res = await fetch(url, init)
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err)
+    if (debug) debugLog(`   fetch failed: ${reason}`)
+    throw new AuthenticationError(
+      `Unable to connect to ${url}: ${reason}. Is the server reachable from this machine?`,
+    )
+  }
+  const rawBody = await res.text()
+  if (debug) {
+    debugLog(`<- ${res.status} ${res.statusText} (${url})`)
+    const headers: Record<string, string> = {}
+    res.headers.forEach((value, key) => {
+      headers[key] = value
+    })
+    debugLog('   response headers:', headers)
+    const preview = rawBody.length > 2000 ? `${rawBody.slice(0, 2000)}…[truncated]` : rawBody
+    debugLog('   response body:', preview || '(empty)')
+  }
+  let json: unknown = null
+  if (rawBody.length > 0) {
+    try {
+      json = JSON.parse(rawBody)
+    } catch {
+      json = null
+    }
+  }
+  return { res, rawBody, json }
+}
+
+/**
+ * The device-auth endpoints are served by the auth plugin, which is mounted
+ * under `/api` by the core router (see `temps-core/src/plugin.rs:760`). So
+ * the real URLs are `/api/auth/cli/device/start` and `…/poll`.
+ *
+ * Users may pass:
+ *   - bare host: `https://app.temps.kfs.es`           -> add `/api`
+ *   - with prefix: `https://app.temps.kfs.es/api`     -> keep as-is
+ *   - with trailing slash: `https://app.temps.kfs.es/` -> normalize then add `/api`
+ *
+ * Returns the `/api`-suffixed base, with no trailing slash.
  */
 function serverBaseUrl(rawApiUrl: string): string {
-  return rawApiUrl.replace(/\/+$/, '').replace(/\/api$/, '')
+  const trimmed = rawApiUrl.replace(/\/+$/, '')
+  return /\/api$/.test(trimmed) ? trimmed : `${trimmed}/api`
 }
 
 export async function login(options: LoginOptions): Promise<void> {
   newline()
+
+  const debug = debugEnabled(options)
+  if (debug) {
+    debugLog('login invoked with options:', {
+      url: options.url,
+      context: options.context,
+      hasApiKey: !!options.apiKey,
+    })
+  }
 
   // If the user is already logged in AND isn't pointing at a new server /
   // context, refuse — they can `temps logout` to switch. When a new --url
@@ -44,13 +133,17 @@ export async function login(options: LoginOptions): Promise<void> {
 
   // Headless / CI path: caller supplied a pre-minted API key.
   if (options.apiKey) {
-    await loginWithApiKey(options.apiKey)
+    await loginWithApiKey(options.apiKey, {
+      url: options.url,
+      context: options.context,
+      debug,
+    })
     return
   }
 
   // Interactive path: browser-based device-authorization. Credentials are
   // always entered in the web app — the CLI never prompts for a password.
-  await loginWithDevice({ url: options.url, context: options.context })
+  await loginWithDevice({ url: options.url, context: options.context, debug })
 }
 
 /**
@@ -64,13 +157,23 @@ export async function login(options: LoginOptions): Promise<void> {
  *   - keeping the credential surface area in the browser, not the shell.
  */
 export async function loginWithDevice(
-  opts: { url?: string; context?: string } = {},
+  opts: { url?: string; context?: string; debug?: boolean } = {},
 ): Promise<void> {
-  const baseUrl = opts.url
+  const debug = debugEnabled(opts)
+  // `apiBaseUrl` is the `/api`-prefixed URL the auth plugin actually lives at
+  // (since `temps-core` nests plugin routes under `/api`). `webBaseUrl` is the
+  // frontend root, used to resolve `/cli-login` URLs the user opens in a browser.
+  const apiBaseUrl = opts.url
     ? serverBaseUrl(opts.url)
     : serverBaseUrl(config.get('apiUrl'))
+  const webBaseUrl = apiBaseUrl.replace(/\/api$/, '')
   if (opts.url) {
-    config.set('apiUrl', baseUrl)
+    config.set('apiUrl', apiBaseUrl)
+  }
+  if (debug) {
+    debugLog(`resolved apiBaseUrl: ${apiBaseUrl}`)
+    debugLog(`resolved webBaseUrl: ${webBaseUrl}`)
+    debugLog(`raw url arg: ${opts.url ?? '(none, using config apiUrl)'}`)
   }
 
   const deviceName = (() => {
@@ -82,28 +185,44 @@ export async function loginWithDevice(
   })()
 
   // 1. Start a device session.
+  const startUrl = `${apiBaseUrl}/auth/cli/device/start`
   const start = await withSpinner(
     'Requesting device authorization...',
     async () => {
-      const res = await fetch(`${baseUrl}/auth/cli/device/start`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ client_name: deviceName }),
-      })
+      const { res, rawBody, json } = await debugFetch(
+        startUrl,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ client_name: deviceName }),
+        },
+        debug,
+      )
       if (!res.ok) {
-        const problem = await safeJson<{ title?: string; detail?: string }>(res)
+        const problem = (json as { title?: string; detail?: string } | null) ?? null
         throw new AuthenticationError(
           problem?.detail ||
             problem?.title ||
-            `Device authorization start failed (status ${res.status})`,
+            `Device authorization start failed at ${startUrl} (status ${res.status}). ` +
+              `Response body: ${rawBody.slice(0, 200) || '(empty)'}`,
         )
       }
-      return (await res.json()) as DeviceStartResponse
+      if (json === null) {
+        throw new AuthenticationError(
+          `Server at ${startUrl} returned a non-JSON response (status ${res.status}, ` +
+            `content-type ${res.headers.get('content-type') ?? 'unknown'}). ` +
+            `First 200 chars: ${rawBody.slice(0, 200) || '(empty)'}. ` +
+            `Re-run with --debug for the full response.`,
+        )
+      }
+      return json as DeviceStartResponse
     },
     { successText: 'Device authorization ready' },
   )
 
-  const fullUrl = absoluteVerificationUri(baseUrl, start)
+  // `verification_uri{,_complete}` are frontend paths (e.g. `/cli-login/CODE`),
+  // so they must resolve against the web root, NOT the `/api` base.
+  const fullUrl = absoluteVerificationUri(webBaseUrl, start)
 
   // 2. Tell the user what to do.
   newline()
@@ -114,7 +233,7 @@ export async function loginWithDevice(
       ``,
       `If your browser doesn't open automatically, paste the code:`,
       `  ${colors.bold(start.user_code)}`,
-      `at ${colors.muted(`${baseUrl}/cli-login`)}`,
+      `at ${colors.muted(`${webBaseUrl}/cli-login`)}`,
     ].join('\n'),
     `${icons.sparkles} Authorize the Temps CLI`,
   )
@@ -132,23 +251,35 @@ export async function loginWithDevice(
     `Waiting for browser approval (code ${colors.bold(start.user_code)})...`,
     async () => {
       let pollDelay = intervalMs
+      const pollUrl = `${apiBaseUrl}/auth/cli/device/poll`
       // Loop until the server reaches a terminal state or we time out.
       while (Date.now() < deadline) {
         await sleep(pollDelay)
-        const res = await fetch(`${baseUrl}/auth/cli/device/poll`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ device_code: start.device_code }),
-        })
+        const { res, rawBody, json } = await debugFetch(
+          pollUrl,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ device_code: start.device_code }),
+          },
+          debug,
+        )
         if (!res.ok) {
-          const problem = await safeJson<{ title?: string; detail?: string }>(res)
+          const problem = (json as { title?: string; detail?: string } | null) ?? null
           throw new AuthenticationError(
             problem?.detail ||
               problem?.title ||
-              `Polling failed (status ${res.status})`,
+              `Polling failed at ${pollUrl} (status ${res.status}). ` +
+                `Response body: ${rawBody.slice(0, 200) || '(empty)'}`,
           )
         }
-        const body = (await res.json()) as DevicePollResponse
+        if (json === null) {
+          throw new AuthenticationError(
+            `Server at ${pollUrl} returned a non-JSON response (status ${res.status}). ` +
+              `First 200 chars: ${rawBody.slice(0, 200) || '(empty)'}`,
+          )
+        }
+        const body = json as DevicePollResponse
         switch (body.status) {
           case 'authorization_pending':
             pollDelay = intervalMs
@@ -176,24 +307,25 @@ export async function loginWithDevice(
     { successText: 'Browser approval received' },
   )
 
-  // 5. Persist credentials.
-  const contextName = opts.context ?? defaultContextName(baseUrl)
+  // 5. Persist credentials. We store the `/api`-prefixed URL since that's
+  // what the rest of the CLI (and `normalizeApiUrl`) expects as `apiUrl`.
+  const contextName = opts.context ?? defaultContextName(apiBaseUrl)
   await upsertContext({
     name: contextName,
-    url: baseUrl,
+    url: apiBaseUrl,
     apiKey: success.api_key,
     email: success.email,
     keyPrefix: success.key_prefix,
     expiresAt: success.expires_at ?? undefined,
   })
-  config.set('apiUrl', baseUrl)
+  config.set('apiUrl', apiBaseUrl)
   await credentials.setAll({
     apiKey: success.api_key,
     userId: success.user_id,
     email: success.email,
   })
 
-  displayWelcome(success.email, contextName, baseUrl, {
+  displayWelcome(success.email, contextName, apiBaseUrl, {
     role: success.role,
     key_prefix: success.key_prefix,
     expires_at: success.expires_at,
@@ -277,19 +409,15 @@ async function tryOpenBrowser(url: string): Promise<void> {
   }
 }
 
-async function safeJson<T>(res: Response): Promise<T | null> {
-  try {
-    return (await res.json()) as T
-  } catch {
-    return null
-  }
-}
-
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-export async function loginWithApiKey(apiKey?: string): Promise<void> {
+export async function loginWithApiKey(
+  apiKey?: string,
+  opts: { url?: string; context?: string; debug?: boolean } = {},
+): Promise<void> {
+  const debug = debugEnabled(opts)
   const key = apiKey ?? (await promptPassword({
     message: 'API Key',
     validate: (value) => {
@@ -300,9 +428,31 @@ export async function loginWithApiKey(apiKey?: string): Promise<void> {
     },
   }))
 
-  // Temporarily set the API key to validate it
-  await credentials.set('apiKey', key)
-  await setupClient()
+  // Resolve the target server BEFORE validating the key. Without this, an
+  // API-key login ignores the URL the caller passed (positional arg or
+  // --url) and validates against whatever `config.get('apiUrl')` happens to
+  // return — the active context, TEMPS_API_URL, or the localhost default.
+  // On a machine with a stale/absent context that means we'd validate the
+  // key against the wrong server, get "Invalid API key", and wipe creds.
+  const baseUrl = opts.url
+    ? serverBaseUrl(opts.url)
+    : serverBaseUrl(config.get('apiUrl'))
+  if (opts.url) {
+    config.set('apiUrl', baseUrl)
+  }
+  if (debug) {
+    debugLog(`api-key login resolved apiUrl: ${baseUrl}`)
+    debugLog(`raw url arg: ${opts.url ?? '(none, using config apiUrl)'}`)
+  }
+
+  // Validate the *supplied* key against the named server. We pass `key` as an
+  // explicit interceptor override (rather than writing it to the credential
+  // store first) so:
+  //   - `getApiKey()`'s priority order (env > active context > secrets) cannot
+  //     shadow it — otherwise an active context's key gets validated instead,
+  //     and we'd report "Invalid API key" for a key we never sent;
+  //   - a failed validation leaves no half-written credentials behind.
+  await setupClient(baseUrl, key)
 
   try {
     const result = await withSpinner(
@@ -329,8 +479,8 @@ export async function loginWithApiKey(apiKey?: string): Promise<void> {
     // Mirror the API-key login into the multi-context store so subsequent
     // commands resolve credentials uniformly. We don't know the key prefix
     // or expiry from a manually-pasted key, so those fields stay empty.
-    const baseUrl = serverBaseUrl(config.get('apiUrl'))
-    const ctxName = defaultContextName(baseUrl)
+    const ctxName = opts.context ?? defaultContextName(baseUrl)
+    config.set('apiUrl', baseUrl)
     await upsertContext({
       name: ctxName,
       url: baseUrl,
@@ -340,9 +490,23 @@ export async function loginWithApiKey(apiKey?: string): Promise<void> {
     })
 
     displayWelcome(result.email, ctxName, baseUrl)
-  } catch {
-    await credentials.clear()
-    throw new AuthenticationError('Invalid API key')
+  } catch (err) {
+    // Validation failed. We deliberately did NOT pre-write the key, so there's
+    // nothing of ours to roll back — and we must NOT `credentials.clear()`,
+    // which would wipe a perfectly good key from a previously-authenticated
+    // context. Surface the server's reason when we have one.
+    if (debug && err instanceof Error) {
+      debugLog(`api-key validation failed: ${err.message}`)
+    }
+    throw new AuthenticationError(
+      err instanceof AuthenticationError
+        ? err.message
+        : `Invalid API key (validated against ${baseUrl})`,
+    )
+  } finally {
+    // Drop the explicit pin so subsequent commands fall back to normal
+    // priority-ordered credential resolution.
+    await setupClient(baseUrl)
   }
 }
 

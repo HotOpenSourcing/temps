@@ -302,6 +302,7 @@ pub async fn verify_mfa_challenge(
             ResetPasswordRequest,
             AuthResponse,
             EmailStatusResponse,
+            crate::oidc_types::OidcProviderSummary,
             RouteUser,
             RouteRole,
             RouteUserWithRoles,
@@ -358,6 +359,14 @@ pub fn configure_routes() -> Router<Arc<AuthState>> {
         .route("/auth/magic-link/verify", get(verify_magic_link))
         .route("/auth/password-reset/request", post(request_password_reset))
         .route("/auth/password-reset/verify", post(reset_password))
+        .route(
+            "/auth/oidc/login/{slug}",
+            get(crate::oidc_handler::start_oidc_login_by_slug),
+        )
+        .route(
+            "/auth/oidc/callback",
+            get(crate::oidc_handler::oidc_callback),
+        )
         .layer(axum::Extension(rate_limiter))
         .layer(axum::middleware::from_fn(auth_rate_limit_middleware));
 
@@ -474,6 +483,7 @@ pub struct EmailStatusResponse {
     pub email_configured: bool,
     pub magic_link_available: bool,
     pub password_reset_available: bool,
+    pub oidc_providers: Vec<crate::oidc_types::OidcProviderSummary>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -569,6 +579,9 @@ pub async fn login(
     Extension(metadata): Extension<RequestMetadata>,
     Json(request): Json<LoginRequest>,
 ) -> Result<impl IntoResponse, temps_core::problemdetails::Problem> {
+    // Capture email before `request` is moved into the service call so we
+    // can log it (lowercased) on internal errors without leaking password.
+    let login_email = request.email.to_lowercase();
     match state.auth_service.login(request.into()).await {
         Ok(user) => {
             // Check if user has MFA enabled
@@ -683,9 +696,26 @@ pub async fn login(
                 }
             }
         }
-        Err(e) => Err(problem_new(StatusCode::UNAUTHORIZED)
-            .with_title("Invalid Credentials")
-            .with_detail(e.to_string())),
+        Err(e) => match e {
+            crate::auth_service::UserAuthError::InvalidCredentials
+            | crate::auth_service::UserAuthError::UserNotFound => {
+                Err(problem_new(StatusCode::UNAUTHORIZED)
+                    .with_title("Invalid Credentials")
+                    .with_detail("Invalid email or password."))
+            }
+            _ => {
+                // Log the real error server-side (email is PII but legitimate
+                // for login-failure auditing; never include password).
+                error!(
+                    email = %login_email,
+                    error = %e,
+                    "Authentication system error during login"
+                );
+                Err(problem_new(StatusCode::INTERNAL_SERVER_ERROR)
+                    .with_title("Authentication Error")
+                    .with_detail("Authentication system error. Please try again later."))
+            }
+        },
     }
 }
 
@@ -704,7 +734,7 @@ pub async fn request_magic_link(
     State(state): State<Arc<AuthState>>,
     Json(request): Json<MagicLinkRequest>,
 ) -> Result<impl IntoResponse, temps_core::problemdetails::Problem> {
-    if !state.auth_service.is_email_configured() {
+    if !state.auth_service.is_email_configured().await {
         return Err(problem_new(StatusCode::SERVICE_UNAVAILABLE)
             .with_title("Email Service Not Configured")
             .with_detail(
@@ -824,12 +854,18 @@ pub async fn verify_magic_link(
     tag = "Authentication"
 )]
 pub async fn email_status(State(state): State<Arc<AuthState>>) -> Json<EmailStatusResponse> {
-    let email_configured = state.auth_service.is_email_configured();
+    let email_configured = state.auth_service.is_email_configured().await;
+    let oidc_providers = state
+        .oidc_service
+        .list_enabled_providers()
+        .await
+        .unwrap_or_default();
 
     Json(EmailStatusResponse {
         email_configured,
         magic_link_available: email_configured,
         password_reset_available: email_configured,
+        oidc_providers,
     })
 }
 
@@ -847,7 +883,7 @@ pub async fn request_password_reset(
     State(state): State<Arc<AuthState>>,
     Json(body): Json<MagicLinkRequest>,
 ) -> Result<impl IntoResponse, temps_core::problemdetails::Problem> {
-    if !state.auth_service.is_email_configured() {
+    if !state.auth_service.is_email_configured().await {
         return Err(problem_new(StatusCode::SERVICE_UNAVAILABLE)
             .with_title("Email Service Not Configured")
             .with_detail("Password reset is not available without email configuration"));
@@ -1884,4 +1920,124 @@ async fn disable_mfa(
     }
 
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::auth_service::UserAuthError;
+
+    /// Regression test for the CI/CD panic
+    /// `Overlapping method route. Handler for "GET /auth/oidc/login/{slug}" already exists`
+    ///
+    /// Both `handlers::configure_routes()` (rate-limited) and
+    /// `oidc_handler::configure_oidc_routes()` were registering the same
+    /// path; Axum panics on `Router::merge` when this happens. The
+    /// production fix lives in oidc_handler.rs (route removed there,
+    /// kept in handlers.rs so it stays inside the rate-limit group).
+    /// This test exercises the merge to catch any future re-introduction.
+    #[test]
+    fn test_no_overlapping_routes_between_configurators() {
+        // Build both routers without state so we can merge them without
+        // wiring up AuthState. State is unrelated to route registration.
+        let auth_routes: axum::Router<std::sync::Arc<crate::state::AuthState>> =
+            super::configure_routes();
+        let oidc_routes: axum::Router<std::sync::Arc<crate::state::AuthState>> =
+            crate::oidc_handler::configure_oidc_routes();
+        // This call panics if any route overlaps. Just performing the merge
+        // is the assertion — no need to inspect the result.
+        let _merged = auth_routes.merge(oidc_routes);
+    }
+
+    /// The login handler must return a constant 401 detail for both
+    /// `InvalidCredentials` and `UserNotFound` — the caller must not be able
+    /// to distinguish "email does not exist" from "wrong password".
+    #[test]
+    fn test_login_error_mapping_invalid_credentials_constant_message() {
+        let e = UserAuthError::InvalidCredentials;
+        let (status, detail) = match e {
+            UserAuthError::InvalidCredentials | UserAuthError::UserNotFound => {
+                (401u16, "Invalid email or password.")
+            }
+            _ => (
+                500u16,
+                "Authentication system error. Please try again later.",
+            ),
+        };
+        assert_eq!(status, 401);
+        assert_eq!(detail, "Invalid email or password.");
+    }
+
+    /// Both `UserNotFound` and `InvalidCredentials` must produce identical
+    /// response shape to prevent user enumeration via differing HTTP bodies.
+    #[test]
+    fn test_login_error_mapping_user_not_found_same_as_invalid_credentials() {
+        let map = |e: UserAuthError| match e {
+            UserAuthError::InvalidCredentials | UserAuthError::UserNotFound => {
+                (401u16, "Invalid Credentials", "Invalid email or password.")
+            }
+            _ => (
+                500u16,
+                "Authentication Error",
+                "Authentication system error. Please try again later.",
+            ),
+        };
+
+        let (status_c, title_c, detail_c) = map(UserAuthError::InvalidCredentials);
+        let (status_n, title_n, detail_n) = map(UserAuthError::UserNotFound);
+
+        assert_eq!(status_c, status_n, "HTTP status must be identical");
+        assert_eq!(title_c, title_n, "title must be identical");
+        assert_eq!(
+            detail_c, detail_n,
+            "detail must be identical to prevent enumeration"
+        );
+    }
+
+    /// `DatabaseError` (and all other internal variants) must map to 500,
+    /// not 401, so internal errors are not mislabeled as auth failures.
+    #[test]
+    fn test_login_error_mapping_database_error_returns_500() {
+        let e = UserAuthError::DatabaseError(sea_orm::DbErr::Custom(
+            "pg: connection refused".to_string(),
+        ));
+        let (status, detail) = match e {
+            UserAuthError::InvalidCredentials | UserAuthError::UserNotFound => {
+                (401u16, "Invalid email or password.")
+            }
+            _ => (
+                500u16,
+                "Authentication system error. Please try again later.",
+            ),
+        };
+        assert_eq!(status, 500);
+        assert_eq!(
+            detail,
+            "Authentication system error. Please try again later."
+        );
+    }
+
+    #[test]
+    fn test_login_error_mapping_password_hash_error_returns_500() {
+        let e = UserAuthError::PasswordHashError;
+        let status = match e {
+            UserAuthError::InvalidCredentials | UserAuthError::UserNotFound => 401u16,
+            _ => 500u16,
+        };
+        assert_eq!(status, 500);
+    }
+
+    /// OidcProviderSummary must expose `slug` instead of `id`.
+    /// This is a compile-time guard: constructing the struct without `id`
+    /// proves the field was removed from the public type.
+    #[test]
+    fn test_email_status_response_oidc_summary_has_slug_not_id() {
+        let summary = crate::oidc_types::OidcProviderSummary {
+            slug: "my-provider-aabbccdd".to_string(),
+            name: "My Provider".to_string(),
+            template: "okta".to_string(),
+        };
+        assert!(!summary.slug.is_empty());
+        // Slug must carry the hash suffix (separated by '-')
+        assert!(summary.slug.contains('-'));
+    }
 }

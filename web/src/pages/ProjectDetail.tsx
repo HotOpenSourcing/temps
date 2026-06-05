@@ -41,11 +41,13 @@ import { ErrorEventDetail } from './ErrorEventDetail'
 import { ErrorGroupDetail } from './ErrorGroupDetail'
 import Observe from './Observe'
 import RequestLogs from './RequestLogs'
+import ProjectAiCrawlers from './ProjectAiCrawlers'
 import Traces from './Traces'
 import { ProjectAgentActivity } from './AiGateway'
 import { AutofixerPage } from '@/components/autofixer/AutofixerPage'
 import { AutofixRedirect } from '@/components/autofixer/AutofixRedirect'
 import { AgentDetailPage } from '@/components/agents/AgentDetailPage'
+import { AgentEditPage } from '@/components/agents/AgentEditPage'
 import { AutopilotPage } from '@/components/agents/AutopilotPage'
 import { AutopilotRunDetail } from '@/components/agents/AutopilotRunDetail'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -396,6 +398,10 @@ export function ProjectDetail() {
                 element={<RequestLogs project={project} />}
               />
               <Route
+                path="ai-crawlers"
+                element={<ProjectAiCrawlers project={project} />}
+              />
+              <Route
                 path="monitors"
                 element={<ProjectMonitors project={project} />}
               />
@@ -426,6 +432,10 @@ export function ProjectDetail() {
               <Route
                 path="agents/detail/:agentSlug"
                 element={<AgentDetailPage project={project} />}
+              />
+              <Route
+                path="agents/detail/:agentSlug/edit"
+                element={<AgentEditPage project={project} />}
               />
               <Route
                 path="agents/:runId"

@@ -57,8 +57,13 @@ export async function whoami(options?: WhoamiOptions): Promise<void> {
   keyValue('User ID', user.id)
   keyValue('MFA Enabled', user.mfa_enabled ? 'Yes' : 'No')
   keyValue('API URL', config.get('apiUrl'))
+  const envContext = process.env.TEMPS_CONTEXT?.trim() || null
   if (activeContext) {
-    keyValue('Context', activeContext.name)
+    const contextLabel =
+      envContext === activeContext.name
+        ? `${activeContext.name} ${colors.muted('(env: TEMPS_CONTEXT)')}`
+        : activeContext.name
+    keyValue('Context', contextLabel)
     if (activeContext.keyPrefix) {
       keyValue('Key', `${activeContext.keyPrefix}…`)
     }

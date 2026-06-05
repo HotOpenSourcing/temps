@@ -9,6 +9,17 @@ pub struct GitPushEventJob {
     pub tag: Option<String>,
     pub commit: String,
     pub project_id: i32,
+    /// True when this event came from an explicit user action (the
+    /// "Deploy" button or `trigger_pipeline` API call), false when it
+    /// came from a git provider webhook. Manual triggers bypass the
+    /// `environments.automatic_deploy` gate — the user already opted in
+    /// by clicking; webhook events still honour the opt-out.
+    ///
+    /// `#[serde(default)]` so in-flight jobs queued by older versions
+    /// (no field) deserialize as webhook-driven, which preserves the
+    /// pre-existing gate behaviour for them.
+    #[serde(default)]
+    pub manual_trigger: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -189,12 +200,15 @@ pub struct StatusCheckCompletedJob {
 }
 
 /// Job for when an alarm is fired (container restart, outage, high resource usage, etc.)
+///
+/// `environment_id` and `deployment_id` are `Option` because service-scoped
+/// (database) alarms have no environment or deployment context.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlarmFiredJob {
     pub alarm_id: i32,
     pub project_id: i32,
-    pub environment_id: i32,
-    pub deployment_id: i32,
+    pub environment_id: Option<i32>,
+    pub deployment_id: Option<i32>,
     pub alarm_type: String,
     pub severity: String,
     pub title: String,
@@ -211,12 +225,15 @@ pub struct AutopilotTriggerJob {
 }
 
 /// Job for when an alarm is resolved
+///
+/// `environment_id` and `deployment_id` are `Option` because service-scoped
+/// (database) alarms have no environment or deployment context.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlarmResolvedJob {
     pub alarm_id: i32,
     pub project_id: i32,
-    pub environment_id: i32,
-    pub deployment_id: i32,
+    pub environment_id: Option<i32>,
+    pub deployment_id: Option<i32>,
     pub alarm_type: String,
     pub title: String,
 }
@@ -233,6 +250,28 @@ pub struct RouteTableUpdatedJob {
     pub deployment_id: Option<i32>,
     /// Total number of routes loaded in this reload
     pub route_count: usize,
+}
+
+/// In-process request to reload the proxy's route table.
+///
+/// This is the *request* counterpart to [`RouteTableUpdatedJob`] (the
+/// confirmation). It is published on the shared broadcast queue by the
+/// deployment pipeline immediately after writing `environments.current_deployment_id`,
+/// and consumed in-process by the route-reload subscriber, which calls
+/// `load_routes()` and then publishes `RouteTableUpdated`.
+///
+/// Unlike the PostgreSQL `LISTEN/NOTIFY` path (which is the only route-reload
+/// trigger for *remote* worker nodes and can silently drop a notification if
+/// its long-lived listener connection dies), this in-process path cannot lose
+/// the signal between deployments: it rides the same tokio broadcast channel
+/// the deploy job already uses, with no database connection in the critical
+/// path. The NOTIFY path is retained for cross-node propagation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForceRouteReloadJob {
+    /// The environment whose route changed (used to match the confirmation).
+    pub environment_id: Option<i32>,
+    /// The deployment the environment now points to (used to match the confirmation).
+    pub deployment_id: Option<i32>,
 }
 
 /// Trigger event for a backup. Published by the HTTP handler or the cron
@@ -325,6 +364,8 @@ pub enum Job {
     StatusCheckCompleted(StatusCheckCompletedJob),
     // Route table events
     RouteTableUpdated(RouteTableUpdatedJob),
+    /// In-process request to reload the proxy route table (see [`ForceRouteReloadJob`]).
+    ForceRouteReload(ForceRouteReloadJob),
     // Alarm events
     AlarmFired(AlarmFiredJob),
     AlarmResolved(AlarmResolvedJob),
@@ -338,6 +379,11 @@ pub enum Job {
     BackupCompleted(BackupCompletedJob),
     BackupFailed(BackupFailedJob),
     BackupCancelRequested(BackupCancelRequestedJob),
+    /// Scheduled hourly to prune raw service_metrics rows older than the
+    /// configured `retention_raw_days` window. Continuous aggregates
+    /// (hourly/daily rollups) have their own TimescaleDB retention policies
+    /// and do not need to be pruned here.
+    PruneMetrics,
 }
 
 impl fmt::Display for Job {
@@ -378,6 +424,7 @@ impl fmt::Display for Job {
             Job::VulnerabilityScanCompleted(job) => write!(f, "VulnerabilityScanCompleted(id: {}, project: {}, env: {:?}, total: {}, critical: {}, high: {})", job.scan_id, job.project_id, job.environment_id, job.total_vulnerabilities, job.critical_count, job.high_count),
             Job::StatusCheckCompleted(job) => write!(f, "StatusCheckCompleted(monitor: {}, status: {})", job.monitor_id, job.status),
             Job::RouteTableUpdated(job) => write!(f, "RouteTableUpdated(env: {:?}, deployment: {:?}, routes: {})", job.environment_id, job.deployment_id, job.route_count),
+            Job::ForceRouteReload(job) => write!(f, "ForceRouteReload(env: {:?}, deployment: {:?})", job.environment_id, job.deployment_id),
             Job::AlarmFired(job) => write!(f, "AlarmFired(id: {}, project: {}, type: {}, severity: {})", job.alarm_id, job.project_id, job.alarm_type, job.severity),
             Job::AlarmResolved(job) => write!(f, "AlarmResolved(id: {}, project: {}, type: {})", job.alarm_id, job.project_id, job.alarm_type),
             Job::AutopilotTrigger(job) => write!(f, "AutopilotTrigger(project: {}, type: {}, source: {:?})", job.project_id, job.trigger_type, job.trigger_source_id),
@@ -385,6 +432,7 @@ impl fmt::Display for Job {
             Job::BackupCompleted(job) => write!(f, "BackupCompleted(backup: {}, engine: {}, size: {:?})", job.backup_id, job.engine, job.size_bytes),
             Job::BackupFailed(job) => write!(f, "BackupFailed(backup: {}, engine: {})", job.backup_id, job.engine),
             Job::BackupCancelRequested(job) => write!(f, "BackupCancelRequested(backup: {})", job.backup_id),
+            Job::PruneMetrics => write!(f, "PruneMetrics"),
         }
     }
 }

@@ -94,6 +94,27 @@ mod m20260515_000003_add_backup_schedules_max_runtime;
 mod m20260516_000001_create_schedule_runs;
 mod m20260517_000001_add_health_metadata_to_external_services;
 mod m20260517_000002_drop_backup_jobs;
+mod m20260518_000001_drop_backups_last_heartbeat_at;
+mod m20260519_000001_create_backup_schedule_services;
+mod m20260519_000002_add_target_all_services;
+mod m20260519_000003_add_include_control_plane;
+mod m20260522_000001_oidc_sso;
+mod m20260522_000002_oidc_role_mappings;
+mod m20260526_000001_add_preview_envs_on_demand;
+mod m20260526_000002_add_trust_idp_email_to_oidc_providers;
+mod m20260528_000001_add_proxy_logs_listing_indexes;
+mod m20260529_000001_add_proxy_logs_filter_indexes;
+mod m20260601_000001_create_service_metrics;
+mod m20260601_000002_add_monitoring_settings;
+mod m20260601_000003_add_monitoring_alert_rules;
+mod m20260601_000004_add_monitoring_alert_rules_unique_idx;
+mod m20260601_000005_add_service_id_to_api_keys;
+mod m20260601_000006_update_metrics_retention_30d;
+mod m20260601_000007_create_service_metrics_status;
+mod m20260601_000008_alarms_nullable_env_deployment;
+mod m20260601_000009_metrics_caggs_keep_labels;
+mod m20260601_000010_add_service_id_to_alarms;
+mod m20260603_000001_create_otel_trace_summaries;
 
 pub struct Migrator;
 
@@ -191,6 +212,27 @@ impl MigratorTrait for Migrator {
             Box::new(m20260516_000001_create_schedule_runs::Migration),
             Box::new(m20260517_000001_add_health_metadata_to_external_services::Migration),
             Box::new(m20260517_000002_drop_backup_jobs::Migration),
+            Box::new(m20260518_000001_drop_backups_last_heartbeat_at::Migration),
+            Box::new(m20260519_000001_create_backup_schedule_services::Migration),
+            Box::new(m20260519_000002_add_target_all_services::Migration),
+            Box::new(m20260519_000003_add_include_control_plane::Migration),
+            Box::new(m20260522_000001_oidc_sso::Migration),
+            Box::new(m20260522_000002_oidc_role_mappings::Migration),
+            Box::new(m20260526_000001_add_preview_envs_on_demand::Migration),
+            Box::new(m20260526_000002_add_trust_idp_email_to_oidc_providers::Migration),
+            Box::new(m20260528_000001_add_proxy_logs_listing_indexes::Migration),
+            Box::new(m20260529_000001_add_proxy_logs_filter_indexes::Migration),
+            Box::new(m20260601_000001_create_service_metrics::Migration),
+            Box::new(m20260601_000002_add_monitoring_settings::Migration),
+            Box::new(m20260601_000003_add_monitoring_alert_rules::Migration),
+            Box::new(m20260601_000004_add_monitoring_alert_rules_unique_idx::Migration),
+            Box::new(m20260601_000005_add_service_id_to_api_keys::Migration),
+            Box::new(m20260601_000006_update_metrics_retention_30d::Migration),
+            Box::new(m20260601_000007_create_service_metrics_status::Migration),
+            Box::new(m20260601_000008_alarms_nullable_env_deployment::Migration),
+            Box::new(m20260601_000009_metrics_caggs_keep_labels::Migration),
+            Box::new(m20260601_000010_add_service_id_to_alarms::Migration),
+            Box::new(m20260603_000001_create_otel_trace_summaries::Migration),
         ]
     }
 }

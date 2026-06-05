@@ -39,6 +39,12 @@ pub struct Model {
     /// `postgres_wal`). Populated by the background health monitor.
     /// NULL means no probe has populated any signal yet.
     pub health_metadata: Option<Json>,
+    /// Whether the MetricsScraper should collect DB-level metrics for this
+    /// service (pg_stat_*, Redis INFO, etc.).  Defaults to false — operators
+    /// opt in explicitly.  Added by migration
+    /// `m20260601_000002_add_monitoring_settings`.
+    #[sea_orm(default_value = false)]
+    pub metrics_enabled: bool,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -49,6 +55,8 @@ pub enum Relation {
     ProjectServices,
     #[sea_orm(has_many = "super::service_members::Entity")]
     Members,
+    #[sea_orm(has_many = "super::backup_schedule_services::Entity")]
+    BackupScheduleServices,
     #[sea_orm(
         belongs_to = "super::nodes::Entity",
         from = "Column::NodeId",
@@ -72,6 +80,12 @@ impl Related<super::project_services::Entity> for Entity {
 impl Related<super::service_members::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Members.def()
+    }
+}
+
+impl Related<super::backup_schedule_services::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::BackupScheduleServices.def()
     }
 }
 

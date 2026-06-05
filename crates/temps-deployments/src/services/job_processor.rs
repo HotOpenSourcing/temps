@@ -440,12 +440,30 @@ async fn create_preview_environment(
     slugified_branch: &str,
 ) -> Result<temps_entities::environments::Model, String> {
     use chrono::Utc;
-    use temps_entities::{environments, upstream_config::UpstreamList};
+    use temps_entities::{
+        deployment_config::DeploymentConfig, environments, upstream_config::UpstreamList,
+    };
 
     info!(
         "Creating preview environment '{}' for branch '{}' in project {}",
         slugified_branch, branch_name, project.id
     );
+
+    // When the project opts in to on-demand previews, seed the environment's
+    // deployment_config with on_demand=true plus the project's idle/wake
+    // timeouts so the preview scales to zero instead of running 24/7.
+    // Other knobs (cpu, memory, replicas, security) stay None so the
+    // inheritance chain (env → project → global defaults) still applies.
+    let preview_deployment_config = if project.preview_envs_on_demand {
+        Some(DeploymentConfig {
+            on_demand: true,
+            idle_timeout_seconds: project.preview_envs_idle_timeout_seconds,
+            wake_timeout_seconds: project.preview_envs_wake_timeout_seconds,
+            ..DeploymentConfig::default()
+        })
+    } else {
+        None
+    };
 
     let preview_env = environments::ActiveModel {
         name: Set(slugified_branch.to_string()),
@@ -455,7 +473,7 @@ async fn create_preview_environment(
         branch: Set(Some(branch_name.to_string())), // Link to specific branch (used for both deployment and tracking)
         project_id: Set(project.id),
         upstreams: Set(UpstreamList::default()),
-        deployment_config: Set(None), // Inherits from project or template
+        deployment_config: Set(preview_deployment_config),
         current_deployment_id: Set(None),
         last_deployment: Set(None),
         is_preview: Set(true),
@@ -643,19 +661,25 @@ async fn process_git_push_event(
     // Respect the user's "deploy on push" setting before doing any work.
     // The effective value is computed by merging project + environment
     // deployment configs (env overrides project). When both sides have
-    // automatic_deploy=false, push events must NOT trigger a deployment —
-    // the user has explicitly opted out.
+    // automatic_deploy=false, webhook push events must NOT trigger a
+    // deployment — the user has explicitly opted out of auto-deploy.
     //
-    // Exception: the FIRST deployment for an environment always runs even
-    // when automatic_deploy=false. Without this, an opted-out project would
-    // never get a baseline deployment, and project creation would silently
-    // produce zero deployments.
+    // Manual triggers (the "Deploy" button, `trigger_pipeline` API,
+    // initial deployment on project creation) bypass this gate entirely:
+    // the user just clicked deploy, so they unambiguously want a deploy
+    // regardless of the auto-deploy setting. The flag exists for
+    // webhook-driven flows, not user-driven ones.
+    //
+    // Exception for the webhook path: the FIRST deployment for an
+    // environment always runs even when automatic_deploy=false. Without
+    // this, a freshly-created opt-out project would never get a baseline
+    // deployment from the first push.
     use sea_orm::{EntityTrait, PaginatorTrait, QueryOrder};
     let auto_deploy_enabled = is_automatic_deploy_enabled(
         project.deployment_config.as_ref(),
         environment.deployment_config.as_ref(),
     );
-    if !auto_deploy_enabled {
+    if !auto_deploy_enabled && !job.manual_trigger {
         let existing_count = match deployments::Entity::find()
             .filter(deployments::Column::EnvironmentId.eq(environment.id))
             .count(db.as_ref())
@@ -681,6 +705,11 @@ async fn process_git_push_event(
 
         info!(
             "Allowing initial deployment for project {} environment {} ({}) despite automatic_deploy=false (no prior deployments)",
+            project.id, environment.id, environment.name
+        );
+    } else if job.manual_trigger && !auto_deploy_enabled {
+        info!(
+            "Manual trigger for project {} environment {} ({}) — bypassing automatic_deploy=false",
             project.id, environment.id, environment.name
         );
     }
@@ -1219,6 +1248,7 @@ mod tests {
             tag: None,
             commit: "abc123".to_string(),
             project_id: 0,
+            manual_trigger: false,
         };
 
         // Try to find the project (should return None)

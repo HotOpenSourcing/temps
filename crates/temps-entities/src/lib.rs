@@ -19,6 +19,7 @@ pub mod autopilot_configs;
 pub mod autopilot_run_logs;
 pub mod autopilot_runs;
 pub mod backup_alerts;
+pub mod backup_schedule_services;
 pub mod backup_schedules;
 pub mod backups;
 pub mod challenge_sessions;
@@ -62,6 +63,9 @@ pub mod notification_preferences;
 pub mod notification_providers;
 pub mod notifications;
 pub mod oauth_states;
+pub mod oidc_login_states;
+pub mod oidc_providers;
+pub mod oidc_role_mappings;
 pub mod performance_metrics;
 pub mod postgres_major_upgrades;
 pub mod preset;
@@ -112,6 +116,9 @@ pub mod status_checks;
 pub mod status_incident_updates;
 pub mod status_incidents;
 pub mod status_monitors;
+
+// Metrics alert rules
+pub mod monitoring_alert_rules;
 
 // Webhook entities
 pub mod webhook_deliveries;

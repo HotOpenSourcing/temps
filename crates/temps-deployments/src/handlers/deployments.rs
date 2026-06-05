@@ -245,6 +245,11 @@ impl From<crate::services::services::DeploymentError> for Problem {
                     .with_title("Deployment Error")
                     .with_detail(msg)
             }
+            DeploymentError::InvalidBundlePath { path, reason } => {
+                problemdetails::new(StatusCode::BAD_REQUEST)
+                    .with_title("Invalid Bundle Path")
+                    .with_detail(format!("Bundle path '{path}' is invalid: {reason}"))
+            }
             DeploymentError::Other(msg) => problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
                 .with_title("Internal Server Error")
                 .with_detail(msg),
@@ -1749,6 +1754,7 @@ pub async fn get_container_metrics(
         container_id: stats.container_id,
         container_name: stats.container_name,
         cpu_percent: stats.cpu_percent,
+        cpu_limit_cores: stats.cpu_limit_cores,
         memory_bytes: stats.memory_bytes,
         memory_limit_bytes: stats.memory_limit_bytes,
         memory_percent: stats.memory_percent,
@@ -2206,6 +2212,8 @@ mod tests {
             mfa_secret: None,
             mfa_enabled: false,
             mfa_recovery_codes: None,
+            oidc_subject: None,
+            oidc_provider_id: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

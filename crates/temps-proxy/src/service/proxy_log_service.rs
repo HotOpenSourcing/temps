@@ -14,6 +14,13 @@ pub enum ProxyLogServiceError {
 
     #[error("Invalid filter parameters: {0}")]
     InvalidFilter(String),
+
+    /// A ClickHouse operation failed. `operation` names the storage method
+    /// (e.g. `list_with_filters`, `write_batch`) so logs/responses can identify
+    /// exactly which read/write path hit the backend error. Not a `#[from]` of
+    /// `clickhouse::error::Error` because we always want the operation context.
+    #[error("ClickHouse error during {operation}: {reason}")]
+    ClickHouse { operation: String, reason: String },
 }
 
 /// Response model for proxy logs
@@ -144,11 +151,43 @@ pub struct CreateProxyLogRequest {
 pub struct ProxyLogService {
     db: Arc<DatabaseConnection>,
     ip_service: Arc<temps_geo::IpAddressService>,
+    /// Optional alternative storage backend. When `Some`, every read method that
+    /// the HTTP handlers call dispatches to this trait object (the ClickHouse
+    /// backend) instead of running the inline TimescaleDB query. When `None`
+    /// (the default), the inline TimescaleDB logic runs unchanged —
+    /// byte-for-byte identical to the prior behaviour.
+    ///
+    /// IMPORTANT: this is ALWAYS `None` for the `ProxyLogService` that the
+    /// [`crate::storage::TimescaleDbProxyLogStore`] holds internally as its read
+    /// relay, so the TimescaleDB trait impl never recurses back into a dispatch.
+    storage: Option<Arc<dyn crate::storage::ProxyLogStorage>>,
 }
 
 impl ProxyLogService {
+    /// Construct a service that talks directly to TimescaleDB (the default).
     pub fn new(db: Arc<DatabaseConnection>, ip_service: Arc<temps_geo::IpAddressService>) -> Self {
-        Self { db, ip_service }
+        Self {
+            db,
+            ip_service,
+            storage: None,
+        }
+    }
+
+    /// Construct a service that dispatches every read through the supplied
+    /// storage backend (used to serve handlers from ClickHouse when
+    /// `TEMPS_CLICKHOUSE_*` is configured). The `db` / `ip_service` are still
+    /// held so any non-dispatched path (e.g. `create`) keeps working, but the
+    /// list / lookup / stats methods delegate to `storage`.
+    pub fn with_storage(
+        db: Arc<DatabaseConnection>,
+        ip_service: Arc<temps_geo::IpAddressService>,
+        storage: Arc<dyn crate::storage::ProxyLogStorage>,
+    ) -> Self {
+        Self {
+            db,
+            ip_service,
+            storage: Some(storage),
+        }
     }
 
     /// Create a new proxy log entry asynchronously
@@ -186,13 +225,22 @@ impl ProxyLogService {
             }
         }
 
-        // Detect bots/crawlers if not already detected
+        // Detect bots/crawlers if not already detected. AI-agent detection runs
+        // first so the canonical agent name (e.g. `GPTBot`, `ClaudeBot`) wins
+        // over the looser substring `CrawlerDetector` would otherwise return.
+        // That keeps `GROUP BY bot_name` aggregations stable on the analytics
+        // side and avoids a second `user_agent ILIKE` scan per request.
         if request.is_bot.is_none() {
             if let Some(ref ua_string) = request.user_agent {
-                let crawler_name =
-                    crate::crawler_detector::CrawlerDetector::get_crawler_name(Some(ua_string));
-                request.is_bot = Some(crawler_name.is_some());
-                request.bot_name = crawler_name;
+                if let Some(ai) = crate::ai_agent_detector::detect(Some(ua_string)) {
+                    request.is_bot = Some(true);
+                    request.bot_name = Some(ai.agent.to_string());
+                } else {
+                    let crawler_name =
+                        crate::crawler_detector::CrawlerDetector::get_crawler_name(Some(ua_string));
+                    request.is_bot = Some(crawler_name.is_some());
+                    request.bot_name = crawler_name;
+                }
             }
         }
 
@@ -250,7 +298,55 @@ impl ProxyLogService {
         page: u64,
         page_size: u64,
     ) -> Result<(Vec<proxy_logs::Model>, u64), ProxyLogServiceError> {
+        if let Some(storage) = &self.storage {
+            return storage
+                .list_with_filters(start_date, end_date, filters, page, page_size)
+                .await;
+        }
+
         let mut query = proxy_logs::Entity::find();
+
+        // Whether any narrowing predicate is set. When nothing is filtered,
+        // the pagination total is just the whole-table row count, which on
+        // this hypertable we can read from planner stats in microseconds via
+        // `approximate_row_count` instead of scanning every chunk with
+        // `COUNT(*)`. Sort/pagination fields do not narrow the result set, so
+        // they are excluded. Computed up front, before the blocks below
+        // consume the owned filter fields.
+        let has_filters = start_date.is_some()
+            || end_date.is_some()
+            || filters.project_id.is_some()
+            || filters.environment_id.is_some()
+            || filters.deployment_id.is_some()
+            || filters.session_id.is_some()
+            || filters.visitor_id.is_some()
+            || filters.method.is_some()
+            || filters.host.is_some()
+            || filters.path.is_some()
+            || filters.client_ip.is_some()
+            || filters.status_code.is_some()
+            || filters.response_time_min.is_some()
+            || filters.response_time_max.is_some()
+            || filters.routing_status.is_some()
+            || filters.request_source.is_some()
+            || filters.is_system_request.is_some()
+            || filters.user_agent.is_some()
+            || filters.browser.is_some()
+            || filters.operating_system.is_some()
+            || filters.device_type.is_some()
+            || filters.is_bot.is_some()
+            || filters.bot_name.is_some()
+            || filters.ai_provider.is_some()
+            || filters.ai_agent.is_some()
+            || filters.is_ai_agent.is_some()
+            || filters.request_size_min.is_some()
+            || filters.request_size_max.is_some()
+            || filters.response_size_min.is_some()
+            || filters.response_size_max.is_some()
+            || filters.cache_status.is_some()
+            || filters.container_id.is_some()
+            || filters.upstream_host.is_some()
+            || filters.has_error.is_some();
 
         // Project/Environment/Deployment filters
         if let Some(pid) = filters.project_id {
@@ -335,6 +431,45 @@ impl ProxyLogService {
             query = query.filter(proxy_logs::Column::BotName.contains(&bot_name));
         }
 
+        // AI agent filters use the canonical agent names persisted at ingest
+        // time. `bot_name` was set by `ai_agent_detector::detect`, so equality
+        // matches are sufficient — no SQL regex needed.
+        if let Some(agent) = filters.ai_agent {
+            query = query
+                .filter(proxy_logs::Column::IsBot.eq(true))
+                .filter(proxy_logs::Column::BotName.eq(agent));
+        }
+        if let Some(provider) = filters.ai_provider {
+            let agents_for_provider: Vec<String> = crate::ai_agent_detector::known_agents()
+                .iter()
+                .filter(|(_, m)| m.provider.eq_ignore_ascii_case(&provider))
+                .map(|(_, m)| m.agent.to_string())
+                .collect();
+            if agents_for_provider.is_empty() {
+                // Unknown provider — return no rows rather than the entire table.
+                query = query.filter(proxy_logs::Column::Id.eq(-1));
+            } else {
+                query = query
+                    .filter(proxy_logs::Column::IsBot.eq(true))
+                    .filter(proxy_logs::Column::BotName.is_in(agents_for_provider));
+            }
+        }
+        if let Some(true) = filters.is_ai_agent {
+            let known: Vec<String> = crate::ai_agent_detector::known_agents()
+                .iter()
+                .map(|(_, m)| m.agent.to_string())
+                .collect();
+            query = query
+                .filter(proxy_logs::Column::IsBot.eq(true))
+                .filter(proxy_logs::Column::BotName.is_in(known));
+        } else if let Some(false) = filters.is_ai_agent {
+            let known: Vec<String> = crate::ai_agent_detector::known_agents()
+                .iter()
+                .map(|(_, m)| m.agent.to_string())
+                .collect();
+            query = query.filter(proxy_logs::Column::BotName.is_not_in(known));
+        }
+
         // Size filters
         if let Some(min_req_size) = filters.request_size_min {
             query = query.filter(proxy_logs::Column::RequestSizeBytes.gte(min_req_size));
@@ -405,7 +540,13 @@ impl ProxyLogService {
         };
 
         let paginator = query.paginate(self.db.as_ref(), page_size);
-        let total = paginator.num_items().await?;
+        let (total, _) = temps_database::count_for_pagination(
+            self.db.as_ref(),
+            "proxy_logs",
+            has_filters,
+            || async { paginator.num_items().await },
+        )
+        .await?;
         let items = paginator.fetch_page(page - 1).await?;
 
         Ok((items, total))
@@ -447,6 +588,9 @@ impl ProxyLogService {
             device_type: None,
             is_bot: None,
             bot_name: None,
+            ai_provider: None,
+            ai_agent: None,
+            is_ai_agent: None,
             request_size_min: None,
             request_size_max: None,
             response_size_min: None,
@@ -476,6 +620,9 @@ impl ProxyLogService {
         &self,
         id: i32,
     ) -> Result<Option<proxy_logs::Model>, ProxyLogServiceError> {
+        if let Some(storage) = &self.storage {
+            return storage.get_by_id(id).await;
+        }
         let log = proxy_logs::Entity::find_by_id(id)
             .one(self.db.as_ref())
             .await?;
@@ -487,6 +634,9 @@ impl ProxyLogService {
         &self,
         request_id: &str,
     ) -> Result<Option<proxy_logs::Model>, ProxyLogServiceError> {
+        if let Some(storage) = &self.storage {
+            return storage.get_by_request_id(request_id).await;
+        }
         let log = proxy_logs::Entity::find()
             .filter(proxy_logs::Column::RequestId.eq(request_id))
             .one(self.db.as_ref())
@@ -499,6 +649,9 @@ impl ProxyLogService {
         &self,
         filters: Option<StatsFilters>,
     ) -> Result<i64, ProxyLogServiceError> {
+        if let Some(storage) = &self.storage {
+            return storage.get_today_count(filters).await;
+        }
         let today_start = Utc::now().date_naive().and_hms_opt(0, 0, 0).unwrap();
         let today_start = chrono::DateTime::<Utc>::from_naive_utc_and_offset(today_start, Utc);
 
@@ -522,6 +675,11 @@ impl ProxyLogService {
         bucket_interval: String, // e.g., "1 hour", "1 day", "5 minutes"
         filters: Option<StatsFilters>,
     ) -> Result<Vec<TimeBucketStats>, ProxyLogServiceError> {
+        if let Some(storage) = &self.storage {
+            return storage
+                .get_time_bucket_stats(start_time, end_time, bucket_interval, filters)
+                .await;
+        }
         // Validate bucket interval
         if !Self::is_valid_interval(&bucket_interval) {
             return Err(ProxyLogServiceError::InvalidFilter(format!(
@@ -626,6 +784,11 @@ impl ProxyLogService {
         end_time: UtcDateTime,
         is_bot: Option<bool>,
     ) -> Result<Vec<ProjectHealthSummary>, ProxyLogServiceError> {
+        if let Some(storage) = &self.storage {
+            return storage
+                .get_projects_health_summary(project_ids, start_time, end_time, is_bot)
+                .await;
+        }
         if project_ids.is_empty() {
             return Ok(vec![]);
         }
@@ -891,7 +1054,7 @@ impl ProxyLogService {
         }
     }
 
-    fn is_valid_interval(interval: &str) -> bool {
+    pub(crate) fn is_valid_interval(interval: &str) -> bool {
         // Valid PostgreSQL interval formats
         let valid_units = [
             "microseconds",
@@ -927,6 +1090,545 @@ impl ProxyLogService {
 
         // Verify second part is a valid unit
         valid_units.contains(&parts[1])
+    }
+
+    /// Aggregate AI-agent traffic for a project over a time window.
+    ///
+    /// `bot_name` is the canonical agent name written at ingest time by
+    /// [`crate::ai_agent_detector::detect`], so this is a cheap `GROUP BY`
+    /// scoped to rows the detector already classified. Each row is mapped back
+    /// to its provider in Rust so the response carries the logo-ready
+    /// `(provider, agent, count)` triple the UI needs.
+    pub async fn get_ai_agent_breakdown(
+        &self,
+        project_id: Option<i32>,
+        environment_id: Option<i32>,
+        path: Option<String>,
+        start_time: UtcDateTime,
+        end_time: UtcDateTime,
+        limit: u64,
+    ) -> Result<Vec<AiAgentBreakdownRow>, ProxyLogServiceError> {
+        if let Some(storage) = &self.storage {
+            return storage
+                .get_ai_agent_breakdown(
+                    project_id,
+                    environment_id,
+                    path,
+                    start_time,
+                    end_time,
+                    limit,
+                )
+                .await;
+        }
+        let known: Vec<&str> = crate::ai_agent_detector::known_agents()
+            .iter()
+            .map(|(_, m)| m.agent)
+            .collect();
+
+        if known.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Pre-filter with `is_bot = true AND bot_name IN (...)` so the planner
+        // can use the existing (timestamp DESC) index on the hypertable instead
+        // of scanning everything.
+        let mut where_clauses: Vec<String> = vec![
+            "timestamp >= $1".to_string(),
+            "timestamp < $2".to_string(),
+            "is_bot = true".to_string(),
+            "bot_name IS NOT NULL".to_string(),
+        ];
+        let mut values: Vec<sea_orm::Value> = vec![start_time.into(), end_time.into()];
+        let mut next_idx = 3i32;
+
+        if let Some(pid) = project_id {
+            where_clauses.push(format!("project_id = ${}", next_idx));
+            values.push(pid.into());
+            next_idx += 1;
+        }
+        if let Some(eid) = environment_id {
+            where_clauses.push(format!("environment_id = ${}", next_idx));
+            values.push(eid.into());
+            next_idx += 1;
+        }
+        // Exact-path filter so the UI can drill a single page row down into the
+        // per-agent counts that crawled THAT page.
+        if let Some(ref p) = path {
+            where_clauses.push(format!("path = ${}", next_idx));
+            values.push(p.clone().into());
+            next_idx += 1;
+        }
+
+        // Bind known agent names as an `ANY($N::text[])` so the SQL is stable
+        // even as we grow the taxonomy. The list comes from
+        // `ai_agent_detector::known_agents`, so it cannot contain anything
+        // user-supplied.
+        where_clauses.push(format!("bot_name = ANY(${}::text[])", next_idx));
+        let agents_owned: Vec<String> = known.iter().map(|s| (*s).to_owned()).collect();
+        values.push(agents_owned.into());
+
+        let sql = format!(
+            r#"
+            SELECT bot_name,
+                   COUNT(*)::bigint AS request_count,
+                   COUNT(DISTINCT client_ip)::bigint AS unique_ips,
+                   MAX(timestamp)::timestamptz AS last_seen
+            FROM proxy_logs
+            WHERE {where}
+            GROUP BY bot_name
+            ORDER BY request_count DESC
+            LIMIT {limit}
+            "#,
+            where = where_clauses.join(" AND "),
+            limit = std::cmp::min(limit, 100),
+        );
+
+        let stmt = sea_orm::Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Postgres,
+            &sql,
+            values,
+        );
+        let results = self.db.query_all(stmt).await?;
+
+        // Map agent name -> (provider, purpose) once so we don't walk the
+        // taxonomy for every row.
+        let agent_index: std::collections::HashMap<
+            &'static str,
+            &'static crate::ai_agent_detector::AiAgentMatch,
+        > = crate::ai_agent_detector::known_agents()
+            .iter()
+            .map(|(_, m)| (m.agent, m))
+            .collect();
+
+        let rows = results
+            .into_iter()
+            .filter_map(|row| {
+                let agent: String = row.try_get("", "bot_name").ok()?;
+                let meta = agent_index.get(agent.as_str())?;
+                Some(AiAgentBreakdownRow {
+                    provider: meta.provider.to_string(),
+                    agent: meta.agent.to_string(),
+                    purpose: meta.purpose.as_str().to_string(),
+                    request_count: row.try_get("", "request_count").unwrap_or(0),
+                    unique_ips: row.try_get("", "unique_ips").unwrap_or(0),
+                    last_seen: row
+                        .try_get::<chrono::DateTime<Utc>>("", "last_seen")
+                        .ok()
+                        .map(|d| d.to_rfc3339()),
+                })
+            })
+            .collect();
+
+        Ok(rows)
+    }
+
+    /// Aggregate which pages AI agents crawled most over a time window.
+    ///
+    /// Same pre-filter as [`Self::get_ai_agent_breakdown`] (`is_bot = true AND
+    /// bot_name IN (known)`), but grouped by `path`. Each row carries the total
+    /// request count, the number of *distinct* AI agents that hit the page, and
+    /// the last time any agent touched it — so the UI can answer "what content
+    /// are the bots most interested in, and how broadly?".
+    pub async fn get_ai_page_breakdown(
+        &self,
+        project_id: Option<i32>,
+        environment_id: Option<i32>,
+        path: Option<String>,
+        start_time: UtcDateTime,
+        end_time: UtcDateTime,
+        limit: u64,
+    ) -> Result<Vec<AiPageBreakdownRow>, ProxyLogServiceError> {
+        if let Some(storage) = &self.storage {
+            return storage
+                .get_ai_page_breakdown(
+                    project_id,
+                    environment_id,
+                    path,
+                    start_time,
+                    end_time,
+                    limit,
+                )
+                .await;
+        }
+        let known: Vec<&str> = crate::ai_agent_detector::known_agents()
+            .iter()
+            .map(|(_, m)| m.agent)
+            .collect();
+
+        if known.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let mut where_clauses: Vec<String> = vec![
+            "timestamp >= $1".to_string(),
+            "timestamp < $2".to_string(),
+            "is_bot = true".to_string(),
+            "bot_name IS NOT NULL".to_string(),
+        ];
+        let mut values: Vec<sea_orm::Value> = vec![start_time.into(), end_time.into()];
+        let mut next_idx = 3i32;
+
+        if let Some(pid) = project_id {
+            where_clauses.push(format!("project_id = ${}", next_idx));
+            values.push(pid.into());
+            next_idx += 1;
+        }
+        if let Some(eid) = environment_id {
+            where_clauses.push(format!("environment_id = ${}", next_idx));
+            values.push(eid.into());
+            next_idx += 1;
+        }
+        // Exact-path filter so callers can ask "how many AI agents hit THIS
+        // page?" and get a single precise row regardless of `limit`.
+        if let Some(ref p) = path {
+            where_clauses.push(format!("path = ${}", next_idx));
+            values.push(p.clone().into());
+            next_idx += 1;
+        }
+
+        where_clauses.push(format!("bot_name = ANY(${}::text[])", next_idx));
+        let agents_owned: Vec<String> = known.iter().map(|s| (*s).to_owned()).collect();
+        values.push(agents_owned.into());
+
+        let sql = format!(
+            r#"
+            SELECT path,
+                   COUNT(*)::bigint AS request_count,
+                   COUNT(DISTINCT bot_name)::bigint AS agent_count,
+                   MAX(timestamp)::timestamptz AS last_seen
+            FROM proxy_logs
+            WHERE {where}
+            GROUP BY path
+            ORDER BY request_count DESC
+            LIMIT {limit}
+            "#,
+            where = where_clauses.join(" AND "),
+            limit = std::cmp::min(limit, 100),
+        );
+
+        let stmt = sea_orm::Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Postgres,
+            &sql,
+            values,
+        );
+        let results = self.db.query_all(stmt).await?;
+
+        let rows = results
+            .into_iter()
+            .map(|row| AiPageBreakdownRow {
+                path: row.try_get("", "path").unwrap_or_default(),
+                request_count: row.try_get("", "request_count").unwrap_or(0),
+                agent_count: row.try_get("", "agent_count").unwrap_or(0),
+                last_seen: row
+                    .try_get::<chrono::DateTime<Utc>>("", "last_seen")
+                    .ok()
+                    .map(|d| d.to_rfc3339()),
+            })
+            .collect();
+
+        Ok(rows)
+    }
+
+    /// Time-bucketed AI-agent request counts, split by provider or by agent.
+    ///
+    /// Same pre-filter as [`Self::get_ai_agent_breakdown`] (`is_bot = true AND
+    /// bot_name IN (known)`) so the planner uses the `(timestamp DESC)` index,
+    /// but the result is grouped by `time_bucket(interval, timestamp)` and the
+    /// raw `bot_name`. The caller passes the bucket interval (validated against
+    /// the same allowlist as [`Self::get_time_bucket_stats`]) and chooses the
+    /// grouping dimension via `group_by` (`"provider"` or `"agent"`); provider
+    /// roll-up is done in Rust off the agent taxonomy so the SQL stays a single
+    /// stable shape. Each row is `(bucket, key, count)` — the UI pivots these
+    /// into one stacked series per key, mirroring the traffic time-series chart.
+    pub async fn get_ai_agent_timeline(
+        &self,
+        project_id: Option<i32>,
+        environment_id: Option<i32>,
+        start_time: UtcDateTime,
+        end_time: UtcDateTime,
+        bucket_interval: String,
+        group_by: AiTimelineGroupBy,
+    ) -> Result<Vec<AiAgentTimelineRow>, ProxyLogServiceError> {
+        if let Some(storage) = &self.storage {
+            return storage
+                .get_ai_agent_timeline(
+                    project_id,
+                    environment_id,
+                    start_time,
+                    end_time,
+                    bucket_interval,
+                    group_by,
+                )
+                .await;
+        }
+        if !Self::is_valid_interval(&bucket_interval) {
+            return Err(ProxyLogServiceError::InvalidFilter(format!(
+                "Invalid bucket interval: {}",
+                bucket_interval
+            )));
+        }
+
+        let known: Vec<&str> = crate::ai_agent_detector::known_agents()
+            .iter()
+            .map(|(_, m)| m.agent)
+            .collect();
+
+        if known.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let mut where_clauses: Vec<String> = vec![
+            "timestamp >= $1".to_string(),
+            "timestamp < $2".to_string(),
+            "is_bot = true".to_string(),
+            "bot_name IS NOT NULL".to_string(),
+        ];
+        let mut values: Vec<sea_orm::Value> = vec![start_time.into(), end_time.into()];
+        let mut next_idx = 3i32;
+
+        if let Some(pid) = project_id {
+            where_clauses.push(format!("project_id = ${}", next_idx));
+            values.push(pid.into());
+            next_idx += 1;
+        }
+        if let Some(eid) = environment_id {
+            where_clauses.push(format!("environment_id = ${}", next_idx));
+            values.push(eid.into());
+            next_idx += 1;
+        }
+
+        let agents_param_idx = next_idx;
+        where_clauses.push(format!("bot_name = ANY(${}::text[])", agents_param_idx));
+        let agents_owned: Vec<String> = known.iter().map(|s| (*s).to_owned()).collect();
+        values.push(agents_owned.into());
+        next_idx += 1;
+
+        // The bucket interval is bound next, then the window bounds.
+        // We build the full bucket spine with `generate_series` and LEFT JOIN
+        // the real per-agent counts onto it (the same approach the analytics
+        // hourly-visits query uses). We deliberately do NOT use
+        // `time_bucket_gapfill` here: it fails to fill gaps when the data spans
+        // only a single bucket, which is exactly the edge case we hit. The
+        // `generate_series` spine guarantees EVERY bucket in the window is
+        // present regardless. The spine yields one row per
+        // (bucket, agent-with-data); empty buckets appear once with a NULL agent
+        // and zero count, which the frontend uses purely to keep the x-axis
+        // continuous. Payload stays lean: it's (buckets-with-data × agents) +
+        // (empty buckets × 1), not buckets × all known agents.
+        let bucket_param_idx = next_idx;
+        values.push(bucket_interval.into());
+        next_idx += 1;
+        let gap_start_idx = next_idx;
+        values.push(start_time.into());
+        next_idx += 1;
+        let gap_end_idx = next_idx;
+        values.push(end_time.into());
+
+        let sql = format!(
+            r#"
+            WITH spine AS (
+                SELECT generate_series(
+                    time_bucket(${bucket}::interval, ${gstart}::timestamptz),
+                    time_bucket(${bucket}::interval, ${gend}::timestamptz),
+                    ${bucket}::interval
+                ) AS bucket
+            ),
+            data AS (
+                SELECT
+                    time_bucket(${bucket}::interval, timestamp) AS bucket,
+                    bot_name AS agent,
+                    COUNT(*)::bigint AS request_count
+                FROM proxy_logs
+                WHERE {where}
+                GROUP BY bucket, bot_name
+            )
+            SELECT
+                s.bucket AS bucket,
+                d.agent AS agent,
+                COALESCE(d.request_count, 0)::bigint AS request_count
+            FROM spine s
+            LEFT JOIN data d ON d.bucket = s.bucket
+            ORDER BY s.bucket ASC
+            "#,
+            bucket = bucket_param_idx,
+            gstart = gap_start_idx,
+            gend = gap_end_idx,
+            where = where_clauses.join(" AND "),
+        );
+
+        let stmt = sea_orm::Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Postgres,
+            &sql,
+            values,
+        );
+        let results = self.db.query_all(stmt).await?;
+
+        // Map agent -> provider once so provider roll-up doesn't re-walk the
+        // taxonomy per row.
+        let agent_index: std::collections::HashMap<
+            &'static str,
+            &'static crate::ai_agent_detector::AiAgentMatch,
+        > = crate::ai_agent_detector::known_agents()
+            .iter()
+            .map(|(_, m)| (m.agent, m))
+            .collect();
+
+        // Aggregate into (bucket, key) buckets. When grouping by provider we sum
+        // every agent that maps to the same provider within a bucket. We also
+        // record every spine bucket — including the LEFT-JOIN empty ones whose
+        // agent is NULL — so the result carries the full x-axis and the chart
+        // doesn't collapse gaps.
+        let mut acc: std::collections::HashMap<(String, String), i64> =
+            std::collections::HashMap::new();
+        let mut all_buckets: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for row in results {
+            let bucket: chrono::DateTime<Utc> = match row.try_get("", "bucket") {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let bucket_iso = bucket.to_rfc3339();
+            all_buckets.insert(bucket_iso.clone());
+
+            // Empty spine buckets have a NULL agent — they contribute to the
+            // x-axis but carry no series count.
+            let agent: String = match row.try_get::<Option<String>>("", "agent") {
+                Ok(Some(a)) => a,
+                _ => continue,
+            };
+            let count: i64 = row.try_get("", "request_count").unwrap_or(0);
+
+            let key = match group_by {
+                AiTimelineGroupBy::Agent => agent.clone(),
+                AiTimelineGroupBy::Provider => agent_index
+                    .get(agent.as_str())
+                    .map(|m| m.provider.to_string())
+                    .unwrap_or_else(|| agent.clone()),
+            };
+
+            *acc.entry((bucket_iso, key)).or_insert(0) += count;
+        }
+
+        let mut rows: Vec<AiAgentTimelineRow> = acc
+            .into_iter()
+            .map(|((bucket, key), count)| AiAgentTimelineRow {
+                bucket,
+                key,
+                request_count: count,
+            })
+            .collect();
+
+        // Emit a zero-count marker for every bucket that had no AI traffic so the
+        // frontend sees the complete time axis. `key` is empty for these; the UI
+        // treats an empty key purely as an x-axis placeholder.
+        let buckets_with_data: std::collections::HashSet<&str> =
+            rows.iter().map(|r| r.bucket.as_str()).collect();
+        let empty_markers: Vec<AiAgentTimelineRow> = all_buckets
+            .iter()
+            .filter(|b| !buckets_with_data.contains(b.as_str()))
+            .map(|b| AiAgentTimelineRow {
+                bucket: b.clone(),
+                key: String::new(),
+                request_count: 0,
+            })
+            .collect();
+        rows.extend(empty_markers);
+
+        // Stable ordering: bucket ASC, then key, so the frontend pivot is
+        // deterministic and series colours stay put across refreshes.
+        rows.sort_by(|a, b| a.bucket.cmp(&b.bucket).then_with(|| a.key.cmp(&b.key)));
+
+        Ok(rows)
+    }
+
+    /// HTTP status-class breakdown for AI-agent traffic.
+    ///
+    /// Same pre-filter as the AI agent breakdown (`is_bot = true AND bot_name IN
+    /// (known)`), grouped by status class (`2xx`, `3xx`, `4xx`, `5xx`, `other`).
+    /// Surfaces whether crawlers are getting served (`2xx`) or hitting broken /
+    /// blocked pages (`4xx`/`5xx`) — a content-health signal the request tables
+    /// don't make obvious.
+    pub async fn get_ai_status_breakdown(
+        &self,
+        project_id: Option<i32>,
+        environment_id: Option<i32>,
+        start_time: UtcDateTime,
+        end_time: UtcDateTime,
+    ) -> Result<Vec<AiStatusBreakdownRow>, ProxyLogServiceError> {
+        if let Some(storage) = &self.storage {
+            return storage
+                .get_ai_status_breakdown(project_id, environment_id, start_time, end_time)
+                .await;
+        }
+        let known: Vec<&str> = crate::ai_agent_detector::known_agents()
+            .iter()
+            .map(|(_, m)| m.agent)
+            .collect();
+
+        if known.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let mut where_clauses: Vec<String> = vec![
+            "timestamp >= $1".to_string(),
+            "timestamp < $2".to_string(),
+            "is_bot = true".to_string(),
+            "bot_name IS NOT NULL".to_string(),
+        ];
+        let mut values: Vec<sea_orm::Value> = vec![start_time.into(), end_time.into()];
+        let mut next_idx = 3i32;
+
+        if let Some(pid) = project_id {
+            where_clauses.push(format!("project_id = ${}", next_idx));
+            values.push(pid.into());
+            next_idx += 1;
+        }
+        if let Some(eid) = environment_id {
+            where_clauses.push(format!("environment_id = ${}", next_idx));
+            values.push(eid.into());
+            next_idx += 1;
+        }
+
+        where_clauses.push(format!("bot_name = ANY(${}::text[])", next_idx));
+        let agents_owned: Vec<String> = known.iter().map(|s| (*s).to_owned()).collect();
+        values.push(agents_owned.into());
+
+        // Bucket the raw status into a class label in SQL so the result is a
+        // small fixed set of rows regardless of how many distinct codes appear.
+        let sql = format!(
+            r#"
+            SELECT
+                CASE
+                    WHEN status_code >= 200 AND status_code < 300 THEN '2xx'
+                    WHEN status_code >= 300 AND status_code < 400 THEN '3xx'
+                    WHEN status_code >= 400 AND status_code < 500 THEN '4xx'
+                    WHEN status_code >= 500 AND status_code < 600 THEN '5xx'
+                    ELSE 'other'
+                END AS status_class,
+                COUNT(*)::bigint AS request_count
+            FROM proxy_logs
+            WHERE {where}
+            GROUP BY status_class
+            ORDER BY request_count DESC
+            "#,
+            where = where_clauses.join(" AND "),
+        );
+
+        let stmt = sea_orm::Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Postgres,
+            &sql,
+            values,
+        );
+        let results = self.db.query_all(stmt).await?;
+
+        let rows = results
+            .into_iter()
+            .map(|row| AiStatusBreakdownRow {
+                status_class: row.try_get("", "status_class").unwrap_or_default(),
+                request_count: row.try_get("", "request_count").unwrap_or(0),
+            })
+            .collect();
+
+        Ok(rows)
     }
 
     /// Convert a status code class like "2xx", "3xx", "4xx", "5xx" to a (min, max) range.
@@ -990,6 +1692,69 @@ pub struct TodayStatsResponse {
     /// Date for which stats are returned
     #[schema(example = "2025-10-23")]
     pub date: String,
+}
+
+/// One row in the AI-agent analytics breakdown. `agent` is the canonical
+/// crawler name (e.g. `GPTBot`, `Claude-User`), `provider` is the vendor used
+/// for grouping + logos. The UI mirrors the browsers card and ranks by
+/// `request_count`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AiAgentBreakdownRow {
+    pub provider: String,
+    pub agent: String,
+    pub purpose: String,
+    pub request_count: i64,
+    pub unique_ips: i64,
+    /// Last-seen timestamp in RFC3339 format, or `None` if no rows matched.
+    #[schema(example = "2026-05-29T12:00:00Z")]
+    pub last_seen: Option<String>,
+}
+
+/// One row in the AI-crawled-pages breakdown. `agent_count` is the number of
+/// *distinct* AI agents that hit this path, so the UI can show both how heavily
+/// and how broadly a page is being crawled.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AiPageBreakdownRow {
+    pub path: String,
+    pub request_count: i64,
+    pub agent_count: i64,
+    /// Last-seen timestamp in RFC3339 format, or `None` if no rows matched.
+    #[schema(example = "2026-05-29T12:00:00Z")]
+    pub last_seen: Option<String>,
+}
+
+/// Dimension to split the AI-agent timeline by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AiTimelineGroupBy {
+    /// One series per vendor (OpenAI, Anthropic, Perplexity, …).
+    Provider,
+    /// One series per canonical agent (GPTBot, ClaudeBot, …).
+    Agent,
+}
+
+/// One point in the AI-agent timeline: the request count for a single
+/// (`bucket`, `key`) pair, where `key` is a provider or agent name depending on
+/// the requested grouping. The UI pivots these into one stacked series per
+/// `key` across the shared bucket x-axis.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AiAgentTimelineRow {
+    /// Bucket start in RFC3339 format.
+    #[schema(example = "2026-05-29T12:00:00Z")]
+    pub bucket: String,
+    /// Provider or agent name this count belongs to.
+    #[schema(example = "OpenAI")]
+    pub key: String,
+    pub request_count: i64,
+}
+
+/// One row in the AI-agent HTTP status breakdown: the request count for a
+/// status class (`2xx`/`3xx`/`4xx`/`5xx`/`other`) across crawler traffic.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AiStatusBreakdownRow {
+    /// Status class label.
+    #[schema(example = "2xx")]
+    pub status_class: String,
+    pub request_count: i64,
 }
 
 /// Health summary for a single project (last 1 hour)
