@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+-
+
+### Changed
+-
+
+### Fixed
+-
+
+
+## [0.1.0-beta.27] - 2026-06-05
+
+### Added
 - `temps migrate --dry-run` flag: previews pending migrations read-only without applying them
 - `temps migrate --yes`/`-y` flag: skips interactive confirmation gate (auto-skipped in non-TTY environments)
 - Live per-migration progress streaming: prints `→ [N/total] name` / `✓ [N/total] name (timing)` as each migration applies
@@ -28,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Runtime History log viewer now defaults to a 24h time range (was 1h).
 - Date-range picker preserves the user's time-of-day inputs across calendar clicks (react-day-picker normalizes selected days to local midnight, which previously wiped the time).
 - `DeploymentActivityGraph` day labels flex to the responsive square heights so they stay aligned at any width.
+- **Private registry credentials not forwarded on image pull**: `PullExternalImageJob` always passed `None` for auth to the Docker daemon's `create_image` call, so deployments of images from private registries failed with a 401 even when credentials were correctly configured in Settings → Docker Registry. Credentials are now fetched from `DockerRegistrySettings` at job construction time and forwarded via the `X-Registry-Auth` header when `docker_registry.enabled` is true.
 
 
 ## [0.1.0-beta.26] - 2026-06-03
