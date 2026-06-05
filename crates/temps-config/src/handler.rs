@@ -115,12 +115,59 @@ pub struct AppSettingsResponse {
     // Multi-node cluster settings (join_token_hash elided)
     pub multi_node: MultiNodeSettingsMasked,
 
+    // Metrics monitoring settings (clickhouse_url masked)
+    pub monitoring: MonitoringSettingsMasked,
+
+    /// The storage backend the runtime is **actually** using for metrics,
+    /// after reconciling the `monitoring.store` toggle with the server's
+    /// `TEMPS_CLICKHOUSE_*` configuration. When `monitoring.store` is
+    /// `click_house` but those env vars are not fully set, the runtime falls
+    /// back to TimescaleDB — in that case this reports `timescale_db` even
+    /// though `monitoring.store` says `click_house`. The UI shows this as the
+    /// effective backend and warns when it diverges from the configured store.
+    pub effective_metrics_store: MetricsStoreKind,
+
     // Outbound TLS verification toggle
     pub insecure_tls: bool,
 
     /// Whether `temps setup` has been run at least once. The web onboarding
     /// wizard checks this field on load and skips itself when true.
     pub setup_complete: bool,
+}
+
+/// Monitoring settings with the ClickHouse DSN masked.
+///
+/// `clickhouse_url` can embed credentials (`http://user:pass@host`), so it is
+/// reported only as a boolean (`clickhouse_url_set`) rather than echoed back —
+/// consistent with how the DNS API key and Docker registry password are masked.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct MonitoringSettingsMasked {
+    pub enabled: bool,
+    pub store: MetricsStoreKind,
+    pub scrape_interval_secs: u64,
+    pub retention_raw_days: u32,
+    pub retention_hourly_days: u32,
+    pub retention_daily_years: u32,
+    /// True when a ClickHouse DSN is configured. The DSN itself is never
+    /// returned over HTTP because it may contain credentials.
+    pub clickhouse_url_set: bool,
+}
+
+impl From<temps_core::MonitoringSettings> for MonitoringSettingsMasked {
+    fn from(m: temps_core::MonitoringSettings) -> Self {
+        Self {
+            enabled: m.enabled,
+            store: m.store,
+            scrape_interval_secs: m.scrape_interval_secs,
+            retention_raw_days: m.retention_raw_days,
+            retention_hourly_days: m.retention_hourly_days,
+            retention_daily_years: m.retention_daily_years,
+            clickhouse_url_set: m
+                .clickhouse_url
+                .as_ref()
+                .is_some_and(|u| !u.trim().is_empty()),
+        }
+    }
 }
 
 /// Agent sandbox settings with masked per-provider credentials.
@@ -256,9 +303,32 @@ impl From<AppSettings> for AppSettingsResponse {
                 has_join_token: settings.multi_node.join_token_hash.is_some(),
                 private_address: settings.multi_node.private_address,
             },
+            // `effective_metrics_store` defaults to the configured store here;
+            // the handler overrides it with the runtime-reconciled value once
+            // the ClickHouse env-var state is known (via `with_effective_store`).
+            effective_metrics_store: settings.monitoring.store.clone(),
+            monitoring: MonitoringSettingsMasked::from(settings.monitoring),
             insecure_tls: settings.insecure_tls,
             setup_complete: settings.setup_complete,
         }
+    }
+}
+
+impl AppSettingsResponse {
+    /// Reconcile `effective_metrics_store` with the server's ClickHouse
+    /// configuration. The runtime only uses ClickHouse when both the
+    /// `monitoring.store` toggle is `click_house` AND all `TEMPS_CLICKHOUSE_*`
+    /// env vars are set (`clickhouse_enabled`); otherwise it falls back to
+    /// TimescaleDB. This mirrors `build_ch_metrics_store` in the serve path so
+    /// the UI reports the backend metrics actually land in.
+    fn with_effective_store(mut self, clickhouse_enabled: bool) -> Self {
+        self.effective_metrics_store =
+            if self.monitoring.store == MetricsStoreKind::ClickHouse && clickhouse_enabled {
+                MetricsStoreKind::ClickHouse
+            } else {
+                MetricsStoreKind::TimescaleDb
+            };
+        self
     }
 }
 
@@ -286,6 +356,8 @@ impl From<AppSettings> for AppSettingsResponse {
         ProviderConfigMasked,
         PreviewGatewaySettingsMasked,
         MultiNodeSettingsMasked,
+        MonitoringSettingsMasked,
+        MetricsStoreKind,
         SettingsUpdateResponse,
         GenerateJoinTokenResponse,
         JoinTokenStatusResponse,
@@ -333,8 +405,12 @@ async fn get_settings(
 
     match app_state.config_service.get_settings().await {
         Ok(settings) => {
-            // Convert to response type that masks sensitive fields
-            let response = AppSettingsResponse::from(settings);
+            // Convert to response type that masks sensitive fields, then
+            // reconcile the effective metrics store with the server's
+            // ClickHouse env-var configuration so the UI shows the backend the
+            // runtime actually uses (not just the DB toggle).
+            let response = AppSettingsResponse::from(settings)
+                .with_effective_store(app_state.config_service.is_clickhouse_enabled());
             Ok(Json(response))
         }
         Err(e) => {
@@ -497,6 +573,20 @@ async fn update_settings(
             // Multi-node join token hash (never comes back from the mask response)
             if settings.multi_node.join_token_hash.is_none() {
                 settings.multi_node.join_token_hash = current_settings.multi_node.join_token_hash;
+            }
+            // ClickHouse DSN: the GET response masks it to `clickhouse_url_set`
+            // (it can embed credentials), so a client round-trip that doesn't
+            // re-supply it would otherwise wipe the stored DSN — and then trip
+            // the "clickhouse_url required when store is ClickHouse" validation
+            // below on an unrelated save. Restore from the DB when absent.
+            if settings
+                .monitoring
+                .clickhouse_url
+                .as_deref()
+                .map(|s| s.trim().is_empty())
+                .unwrap_or(true)
+            {
+                settings.monitoring.clickhouse_url = current_settings.monitoring.clickhouse_url;
             }
         }
         Err(e) => {
@@ -969,5 +1059,63 @@ mod tests {
         assert!(json.contains("\"credential_saved\":true"));
         assert!(json.contains("\"shared_secret_set\":true"));
         assert!(json.contains("\"has_join_token\":true"));
+    }
+
+    // Regression: the GET /api/settings response must surface `monitoring` so
+    // the Metrics Monitoring page reflects persisted settings instead of
+    // silently falling back to client-side defaults. The ClickHouse DSN must
+    // be masked (it can embed credentials).
+    #[test]
+    fn response_surfaces_monitoring_with_masked_dsn() {
+        let mut settings = AppSettings::default();
+        settings.monitoring.enabled = true;
+        settings.monitoring.store = MetricsStoreKind::ClickHouse;
+        settings.monitoring.scrape_interval_secs = 60;
+        settings.monitoring.retention_raw_days = 14;
+        settings.monitoring.clickhouse_url = Some("http://ch-user:ch-pass@clickhouse:8123".into());
+
+        let response = AppSettingsResponse::from(settings);
+
+        assert!(response.monitoring.enabled);
+        assert_eq!(response.monitoring.store, MetricsStoreKind::ClickHouse);
+        assert_eq!(response.monitoring.scrape_interval_secs, 60);
+        assert_eq!(response.monitoring.retention_raw_days, 14);
+        assert!(response.monitoring.clickhouse_url_set);
+
+        // The DSN (and its embedded credentials) must never serialize.
+        let json = serde_json::to_string(&response).expect("serialize response");
+        assert!(!json.contains("ch-pass"));
+        assert!(!json.contains("clickhouse:8123"));
+        assert!(json.contains("\"clickhouse_url_set\":true"));
+    }
+
+    // The effective metrics store reconciles the `store` toggle with the
+    // server's ClickHouse env-var state, mirroring `build_ch_metrics_store`.
+    #[test]
+    fn effective_store_reflects_runtime_clickhouse_availability() {
+        // store=click_house but env vars NOT configured → runtime uses Timescale.
+        let mut settings = AppSettings::default();
+        settings.monitoring.store = MetricsStoreKind::ClickHouse;
+        let response = AppSettingsResponse::from(settings.clone()).with_effective_store(false);
+        assert_eq!(response.monitoring.store, MetricsStoreKind::ClickHouse);
+        assert_eq!(
+            response.effective_metrics_store,
+            MetricsStoreKind::TimescaleDb,
+            "ClickHouse selected but env vars unset must fall back to TimescaleDB"
+        );
+
+        // store=click_house AND env vars configured → runtime uses ClickHouse.
+        let response = AppSettingsResponse::from(settings).with_effective_store(true);
+        assert_eq!(
+            response.effective_metrics_store,
+            MetricsStoreKind::ClickHouse
+        );
+
+        // store=timescale_db → always TimescaleDB, regardless of env vars.
+        let response = AppSettingsResponse::from(AppSettings::default()).with_effective_store(true);
+        assert_eq!(
+            response.effective_metrics_store,
+            MetricsStoreKind::TimescaleDb
+        );
     }
 }

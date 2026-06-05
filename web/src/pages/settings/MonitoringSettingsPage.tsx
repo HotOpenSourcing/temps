@@ -81,6 +81,12 @@ export function MonitoringSettingsPage() {
 
   const monitoring = useWatch({ control, name: 'monitoring' })
   const storeKind: MetricsStoreKind = watch('monitoring.store')
+  // The backend the runtime actually writes to, reconciled server-side with
+  // the TEMPS_CLICKHOUSE_* env vars. Falls back to the configured store if the
+  // server didn't report it (older binaries).
+  const effectiveStore: MetricsStoreKind =
+    settings?.effective_metrics_store ?? storeKind
+  const storeMismatch = storeKind === 'click_house' && effectiveStore !== 'click_house'
 
   useEffect(() => {
     setBreadcrumbs([
@@ -147,22 +153,41 @@ export function MonitoringSettingsPage() {
             sampled and retained.
           </CardDescription>
         </CardHeader>
-        <CardContent>
+        <CardContent className="space-y-3">
           <div className="flex items-center justify-between rounded-lg border border-border bg-muted/30 px-4 py-3">
             <div className="flex items-center gap-2">
               <Database className="h-4 w-4 text-muted-foreground" />
               <div>
                 <p className="text-sm font-medium">Storage backend</p>
                 <p className="text-xs text-muted-foreground">
-                  Follows the server configuration — set via{' '}
-                  <code className="font-mono">TEMPS_CLICKHOUSE_*</code> env vars.
+                  Follows the server configuration — ClickHouse activates only
+                  when the <code className="font-mono">TEMPS_CLICKHOUSE_*</code>{' '}
+                  env vars are set, otherwise metrics use TimescaleDB.
                 </p>
               </div>
             </div>
             <span className="rounded-md bg-background px-2.5 py-1 text-xs font-medium text-foreground ring-1 ring-inset ring-border">
-              {storeKind === 'click_house' ? 'ClickHouse' : 'TimescaleDB'}
+              {effectiveStore === 'click_house' ? 'ClickHouse' : 'TimescaleDB'}
             </span>
           </div>
+
+          {/* The DB toggle says ClickHouse but the runtime fell back to
+              TimescaleDB because the env vars aren't fully configured. Surface
+              the divergence so the badge above isn't silently misleading. */}
+          {storeMismatch && (
+            <Alert variant="destructive">
+              <AlertCircle className="h-4 w-4" />
+              <AlertTitle>Configured backend is not active</AlertTitle>
+              <AlertDescription>
+                The metrics store is set to <strong>ClickHouse</strong>, but the
+                server's <code className="font-mono">TEMPS_CLICKHOUSE_*</code>{' '}
+                environment variables are not fully configured, so metrics are
+                being written to <strong>TimescaleDB</strong>. Set the
+                ClickHouse env vars on the control plane and restart, or switch
+                the store back to TimescaleDB to clear this warning.
+              </AlertDescription>
+            </Alert>
+          )}
         </CardContent>
       </Card>
 

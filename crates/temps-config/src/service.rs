@@ -336,6 +336,16 @@ impl ConfigService {
         PathBuf::from(self.config.get_data_dir())
     }
 
+    /// Whether the ClickHouse backend is usable at runtime — i.e. all four
+    /// `TEMPS_CLICKHOUSE_*` env vars are populated (see
+    /// [`ServerConfig::is_clickhouse_enabled`]). The metrics/analytics/OTel
+    /// stores fall back to TimescaleDB when this is `false`, regardless of the
+    /// `monitoring.store` DB toggle. Callers use this to report the *effective*
+    /// storage backend rather than the configured-but-maybe-inactive one.
+    pub fn is_clickhouse_enabled(&self) -> bool {
+        self.config.is_clickhouse_enabled()
+    }
+
     /// Parse the port from the main proxy listener address (`host:port`).
     ///
     /// Internal container traffic (OTLP metrics, agent callbacks) goes through

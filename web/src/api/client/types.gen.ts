@@ -570,6 +570,35 @@ export type AiAgentDescriptor = {
 };
 
 /**
+ * One row in the pages-by-agent breakdown. Returned by
+ * [`ProxyLogService::get_ai_agent_pages`] for a single named agent.
+ * `unique_ips` counts distinct client IPs that hit this path via that agent
+ * (same definition as the per-agent unique-IPs in [`AiAgentBreakdownRow`]).
+ */
+export type AiAgentPageRow = {
+    /**
+     * Last-seen timestamp in RFC3339 format, or `None` if no rows matched.
+     */
+    last_seen?: string | null;
+    path: string;
+    request_count: number;
+    unique_ips: number;
+};
+
+/**
+ * Response wrapping the per-agent pages breakdown rows.
+ */
+export type AiAgentPagesResponse = {
+    /**
+     * The agent name this breakdown is scoped to.
+     */
+    agent: string;
+    end_time: string;
+    items: Array<AiAgentPageRow>;
+    start_time: string;
+};
+
+/**
  * Response wrapping the AI agent timeline rows.
  */
 export type AiAgentTimelineResponse = {
@@ -777,7 +806,12 @@ export type AppSettings = {
     rate_limiting?: RateLimitSettings;
     screenshots?: ScreenshotSettings;
     security_headers?: SecurityHeadersSettings;
-    /** Set to true by `temps setup` once initial configuration has been applied. */
+    /**
+     * Set to `true` by `temps setup` (all modes) once initial configuration
+     * has been applied. The web onboarding wizard reads this from the server
+     * and skips itself when true, preventing the "Configure Base Domain" wall
+     * from appearing on installs that were already configured via the CLI.
+     */
     setup_complete?: boolean;
 };
 
@@ -791,18 +825,31 @@ export type AppSettingsResponse = {
     disk_space_alert: DiskSpaceAlertSettings;
     dns_provider: DnsProviderSettingsMasked;
     docker_registry: DockerRegistrySettingsMasked;
+    /**
+     * The storage backend the runtime is **actually** using for metrics,
+     * after reconciling the `monitoring.store` toggle with the server's
+     * `TEMPS_CLICKHOUSE_*` configuration. When `monitoring.store` is
+     * `click_house` but those env vars are not fully set, the runtime falls
+     * back to TimescaleDB — in that case this reports `timescale_db` even
+     * though `monitoring.store` says `click_house`. The UI shows this as the
+     * effective backend and warns when it diverges from the configured store.
+     */
+    effective_metrics_store: MetricsStoreKind;
     external_url?: string | null;
     insecure_tls: boolean;
     internal_url?: string | null;
     letsencrypt: LetsEncryptSettings;
+    monitoring: MonitoringSettingsMasked;
     multi_node: MultiNodeSettingsMasked;
     preview_domain: string;
     preview_gateway: PreviewGatewaySettingsMasked;
     rate_limiting: RateLimitSettings;
     screenshots: ScreenshotSettings;
     security_headers: SecurityHeadersSettings;
-    /** Set to true by `temps setup` once initial configuration has been applied.
-     * The web onboarding wizard checks this and skips itself when true. */
+    /**
+     * Whether `temps setup` has been run at least once. The web onboarding
+     * wizard checks this field on load and skips itself when true.
+     */
     setup_complete: boolean;
 };
 
@@ -8050,6 +8097,27 @@ export type MonitoringSettings = {
      * Storage backend for metric data.
      */
     store?: MetricsStoreKind;
+};
+
+/**
+ * Monitoring settings with the ClickHouse DSN masked.
+ *
+ * `clickhouse_url` can embed credentials (`http://user:pass@host`), so it is
+ * reported only as a boolean (`clickhouse_url_set`) rather than echoed back —
+ * consistent with how the DNS API key and Docker registry password are masked.
+ */
+export type MonitoringSettingsMasked = {
+    /**
+     * True when a ClickHouse DSN is configured. The DSN itself is never
+     * returned over HTTP because it may contain credentials.
+     */
+    clickhouse_url_set: boolean;
+    enabled: boolean;
+    retention_daily_years: number;
+    retention_hourly_days: number;
+    retention_raw_days: number;
+    scrape_interval_secs: number;
+    store: MetricsStoreKind;
 };
 
 export type MrrBucketResponse = {
@@ -37467,6 +37535,59 @@ export type GetProxyLogByRequestIdResponses = {
 };
 
 export type GetProxyLogByRequestIdResponse = GetProxyLogByRequestIdResponses[keyof GetProxyLogByRequestIdResponses];
+
+export type GetAiAgentPagesData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Canonical agent name to filter by (e.g. `ChatGPT-User`, `ClaudeBot`).
+         * Must be a name returned by `GET /proxy-logs/ai-agents/known`.
+         */
+        agent: string;
+        /**
+         * Filter by project ID.
+         */
+        project_id?: number | null;
+        /**
+         * Filter by environment ID.
+         */
+        environment_id?: number | null;
+        /**
+         * Start time (ISO 8601). Defaults to `end_time - 7d`.
+         */
+        start_time?: string | null;
+        /**
+         * End time (ISO 8601). Defaults to now.
+         */
+        end_time?: string | null;
+        /**
+         * Maximum rows to return. Capped at 100 server-side.
+         */
+        limit?: number | null;
+    };
+    url: '/proxy-logs/stats/ai-agent-pages';
+};
+
+export type GetAiAgentPagesErrors = {
+    /**
+     * Invalid parameters
+     */
+    400: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GetAiAgentPagesResponses = {
+    /**
+     * Pages breakdown for the requested agent
+     */
+    200: AiAgentPagesResponse;
+};
+
+export type GetAiAgentPagesResponse = GetAiAgentPagesResponses[keyof GetAiAgentPagesResponses];
 
 export type GetAiAgentBreakdownData = {
     body?: never;
