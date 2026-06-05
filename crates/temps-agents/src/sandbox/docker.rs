@@ -742,6 +742,11 @@ impl DockerSandboxProvider {
     /// Build the sandbox image if it doesn't exist.
     /// For preset runtimes, generates a Dockerfile dynamically.
     /// For custom images, assumes the image is already available (pull or pre-built).
+    ///
+    /// This is only ever called on demand — the first time a sandbox is
+    /// created (see `create()`). It is intentionally NOT invoked at startup:
+    /// pulling/building the image at boot would block or bog down the host
+    /// before anyone has actually requested an agent run.
     pub async fn ensure_image(&self) -> Result<(), AgentError> {
         self.ensure_image_for_runtime(&self.config.runtime).await
     }

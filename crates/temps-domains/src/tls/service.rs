@@ -27,6 +27,12 @@ pub struct TlsService {
     notification_service: Option<Arc<dyn NotificationService>>,
     config_service: Option<Arc<temps_config::ConfigService>>,
     db: Option<Arc<temps_database::DbConnection>>,
+    /// Domain service used to drive the order-based ACME flow during background
+    /// renewals. When present, HTTP-01 auto-renewals persist an `acme_orders` row
+    /// (and set the domain to `challenge_requested`) so a renewal that fails to
+    /// validate immediately is recoverable from the certificate management UI via
+    /// the "Verify & finalize" action, instead of silently expiring.
+    domain_service: Option<Arc<crate::DomainService>>,
 }
 
 impl TlsService {
@@ -60,6 +66,7 @@ impl TlsService {
             notification_service: None,
             config_service: None,
             db: None,
+            domain_service: None,
         }
     }
 
@@ -78,6 +85,11 @@ impl TlsService {
 
     pub fn with_db(mut self, db: Arc<temps_database::DbConnection>) -> Self {
         self.db = Some(db);
+        self
+    }
+
+    pub fn with_domain_service(mut self, domain_service: Arc<crate::DomainService>) -> Self {
+        self.domain_service = Some(domain_service);
         self
     }
 
@@ -419,6 +431,16 @@ impl TlsService {
 
         let email = self.get_acme_email().await;
 
+        // Prefer the order-based flow so a renewal that doesn't validate immediately
+        // leaves a recoverable ACME order in the UI (see `domain_service` field docs).
+        // Fall back to the legacy http_challenges path only when no DomainService is
+        // wired in (e.g. unit tests that construct TlsService directly).
+        if let Some(domain_service) = self.domain_service.clone() {
+            self.handle_http01_renewal_order_based(cert, &email, &domain_service, report)
+                .await;
+            return;
+        }
+
         // Step 1: Initiate the ACME order and HTTP-01 challenge
         // provision_certificate returns ManualActionRequired error when challenge is initiated,
         // which is expected behavior for the provisioning step
@@ -466,6 +488,71 @@ impl TlsService {
             }
             Err(e) => {
                 error!("❌ Failed to complete renewal for {}: {}", cert.domain, e);
+                report.renewal_failed.push(RenewalFailure {
+                    domain: cert.domain.clone(),
+                    error: e.to_string(),
+                    verification_method: cert.verification_method.clone(),
+                });
+                self.send_renewal_failure_notification(&cert.domain, &e.to_string())
+                    .await;
+            }
+        }
+    }
+
+    /// Order-based HTTP-01 auto-renewal. Mirrors the manual `renew_domain` handler:
+    /// `request_challenge` creates and persists a fresh ACME order (so the UI can act on
+    /// it), then `complete_challenge` accepts the challenge and finalizes. The proxy
+    /// already serves the HTTP-01 token, so no user action is required for the happy path.
+    /// On failure the order is left in place for a later manual "Verify & finalize" retry.
+    async fn handle_http01_renewal_order_based(
+        &self,
+        cert: &Certificate,
+        email: &str,
+        domain_service: &Arc<crate::DomainService>,
+        report: &mut RenewalReport,
+    ) {
+        // Step 1: Create + persist a new ACME order (sets domain to `challenge_requested`).
+        let challenge = match domain_service.request_challenge(&cert.domain, email).await {
+            Ok(challenge) => challenge,
+            Err(e) => {
+                error!("❌ Failed to initiate renewal for {}: {}", cert.domain, e);
+                report.renewal_failed.push(RenewalFailure {
+                    domain: cert.domain.clone(),
+                    error: e.to_string(),
+                    verification_method: cert.verification_method.clone(),
+                });
+                self.send_renewal_failure_notification(&cert.domain, &e.to_string())
+                    .await;
+                return;
+            }
+        };
+
+        // A cached/valid authorization can yield a certificate immediately.
+        if challenge.status == "completed" {
+            info!("✅ Successfully renewed certificate for {}", cert.domain);
+            report.auto_renewed.push(cert.domain.clone());
+            return;
+        }
+
+        // Step 2: Give Let's Encrypt a moment to validate the served HTTP-01 token.
+        info!(
+            "Waiting for Let's Encrypt to validate HTTP-01 challenge for {}...",
+            cert.domain
+        );
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+        // Step 3: Accept the challenge and finalize the persisted order.
+        match domain_service.complete_challenge(&cert.domain, email).await {
+            Ok(_renewed) => {
+                info!("✅ Successfully renewed certificate for {}", cert.domain);
+                report.auto_renewed.push(cert.domain.clone());
+            }
+            Err(e) => {
+                // The order remains persisted (pending) and recoverable from the UI.
+                error!(
+                    "❌ Failed to complete renewal for {} (order left pending for manual retry): {}",
+                    cert.domain, e
+                );
                 report.renewal_failed.push(RenewalFailure {
                     domain: cert.domain.clone(),
                     error: e.to_string(),

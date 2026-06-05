@@ -349,14 +349,15 @@ pub async fn deploy_from_image(
             .with_detail("Environment does not belong to this project"));
     }
 
-    // 3. Generate deployment slug using environment slug
+    // 3. Generate deployment slug using project slug (canonical hostname source —
+    //    must match the normal git-push path so URLs read `<project>-<n>`, not `<env>-<n>`)
     let deployment_number = deployments::Entity::find()
         .filter(deployments::Column::ProjectId.eq(project_id))
         .count(state.db.as_ref())
         .await
         .unwrap_or(0)
         + 1;
-    let deployment_slug = format!("{}-{}", environment.slug, deployment_number);
+    let deployment_slug = format!("{}-{}", project.slug, deployment_number);
 
     // 4. Create deployment metadata (track deployment source type for flexible projects)
     let deployment_metadata = DeploymentMetadata {
@@ -625,14 +626,15 @@ pub async fn deploy_from_static(
             .with_detail("Static bundle does not belong to this project"));
     }
 
-    // 4. Generate deployment slug using environment slug
+    // 4. Generate deployment slug using project slug (canonical hostname source —
+    //    must match the normal git-push path so URLs read `<project>-<n>`, not `<env>-<n>`)
     let deployment_number = deployments::Entity::find()
         .filter(deployments::Column::ProjectId.eq(project_id))
         .count(state.db.as_ref())
         .await
         .unwrap_or(0)
         + 1;
-    let deployment_slug = format!("{}-{}", environment.slug, deployment_number);
+    let deployment_slug = format!("{}-{}", project.slug, deployment_number);
 
     // 5. Create deployment metadata (track deployment source type for flexible projects)
     let deployment_metadata = DeploymentMetadata {
@@ -1004,7 +1006,8 @@ pub async fn deploy_from_image_upload(
 
     info!("Image platform validation passed for tag: {}", image_tag);
 
-    // 8. Generate deployment slug
+    // 8. Generate deployment slug using project slug (canonical hostname source —
+    //    must match the normal git-push path so URLs read `<project>-<n>`, not `<env>-<n>`)
     let deployment_number = deployments::Entity::find()
         .filter(deployments::Column::ProjectId.eq(project_id))
         .count(state.db.as_ref())
@@ -1012,7 +1015,7 @@ pub async fn deploy_from_image_upload(
         .unwrap_or(0)
         + 1;
 
-    let env_slug = format!("{}-{}", environment.slug, deployment_number);
+    let env_slug = format!("{}-{}", project.slug, deployment_number);
 
     // 9. Get deployment config from environment
     let deployment_config_snapshot = environment.deployment_config.as_ref().map(|config| {

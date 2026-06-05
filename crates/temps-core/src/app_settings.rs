@@ -69,6 +69,13 @@ pub struct AppSettings {
     /// Metrics observability settings. Controls the MetricsStore backend,
     /// scrape interval, and tiered retention windows.
     pub monitoring: MonitoringSettings,
+
+    /// Set to `true` by `temps setup` (all modes) once initial configuration
+    /// has been applied. The web onboarding wizard reads this from the server
+    /// and skips itself when true, preventing the "Configure Base Domain" wall
+    /// from appearing on installs that were already configured via the CLI.
+    #[serde(default)]
+    pub setup_complete: bool,
 }
 
 /// Control-plane build resource limits.
@@ -407,7 +414,7 @@ pub struct MultiNodeSettings {
 pub struct PreviewGatewaySettings {
     /// Docker image reference for the gateway. Pinned per Temps release.
     /// Operators can override this to test a custom build.
-    #[schema(example = "kfsoftware/temps-preview-gateway:dev")]
+    #[schema(example = "ghcr.io/gotempsh/temps-preview-gateway:latest")]
     pub image: String,
     /// Host port to publish the gateway on (always bound to 127.0.0.1).
     /// Pingora forwards `ws-*` traffic to this port after authenticating.
@@ -433,7 +440,7 @@ pub struct PreviewGatewaySettings {
 impl Default for PreviewGatewaySettings {
     fn default() -> Self {
         Self {
-            image: "kfsoftware/temps-preview-gateway:dev".to_string(),
+            image: "ghcr.io/gotempsh/temps-preview-gateway:latest".to_string(),
             host_port: 8090,
             auto_upgrade: true,
             shared_secret: String::new(),
@@ -529,6 +536,7 @@ impl Default for AppSettings {
             insecure_tls: false,
             build_limits: BuildLimitsSettings::default(),
             monitoring: MonitoringSettings::default(),
+            setup_complete: false,
         }
     }
 }

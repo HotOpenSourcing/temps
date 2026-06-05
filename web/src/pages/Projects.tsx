@@ -3,8 +3,10 @@ import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { useDashboardAnalytics } from '@/hooks/useDashboardAnalytics'
 import { useDashboardHealth } from '@/hooks/useDashboardHealth'
 import { usePageTitle } from '@/hooks/usePageTitle'
+import { useSettings } from '@/hooks/useSettings'
 import { ExternalConnectivityAlert } from '@/components/alerts/ExternalConnectivityAlert'
 import { DiskSpaceAlert } from '@/components/alerts/DiskSpaceAlert'
+import { GettingStartedCard } from '@/components/dashboard/GettingStartedCard'
 import { MetricCard } from '@/components/dashboard/MetricCard'
 import { ProjectCard } from '@/components/dashboard/ProjectCard'
 import { ImprovedOnboardingDashboard } from '@/components/onboarding/ImprovedOnboardingDashboard'
@@ -102,6 +104,11 @@ export function Projects() {
   const { setBreadcrumbs } = useBreadcrumbs()
   const navigate = useNavigate()
   const [page, setPage] = useState(1)
+
+  // Server-side setup completion flag — set by `temps setup` (all modes).
+  // Takes precedence over localStorage so installs configured via CLI never
+  // hit the "Configure Base Domain" wizard wall.
+  const { data: settings, isLoading: settingsLoading } = useSettings()
 
   const { data: projectsData, isLoading } = useQuery({
     ...getProjectsOptions({
@@ -238,12 +245,19 @@ export function Projects() {
         })
 
   // Show the onboarding flow only when the user hasn't finished it AND
-  // there are no projects. Once onboarding is marked `complete` (stored
-  // in localStorage by ImprovedOnboardingDashboard), fall through to
-  // the regular Projects page — which has its own empty state with
-  // "Create new project" / "Import project" CTAs. That keeps the
-  // 100%-progress screen from being a dead end.
-  if (!isLoading && !hasProjects && !isOnboardingComplete()) {
+  // there are no projects. Two completion signals are checked:
+  //   1. settings.setup_complete — server-side, set by `temps setup` (all
+  //      modes). Installs configured via CLI bypass the wizard entirely so
+  //      the "Configure Base Domain" wall never appears.
+  //   2. localStorage temps_onboarding_state.currentStep === 'complete' —
+  //      set by ImprovedOnboardingDashboard when the user clicks through.
+  // Either signal is sufficient to skip the wizard.
+  const setupComplete = settings?.setup_complete === true
+  const wizardDone = setupComplete || isOnboardingComplete()
+
+  // Wait for settings to load before deciding — avoids a flash of the wizard
+  // on installs where setup_complete is true but the fetch hasn't resolved yet.
+  if (!isLoading && !settingsLoading && !hasProjects && !wizardDone) {
     return (
       <div className="sm:p-8">
         <ImprovedOnboardingDashboard />
@@ -255,6 +269,7 @@ export function Projects() {
     <div className="p-4 sm:p-8 space-y-6">
       <ExternalConnectivityAlert showInDashboard dismissible />
       <DiskSpaceAlert dismissible />
+      <GettingStartedCard />
 
       {/* Metric cards (merged from former Dashboard page). */}
       <div className="grid gap-3 grid-cols-2 sm:gap-4 md:grid-cols-4 md:gap-6">
@@ -356,33 +371,18 @@ export function Projects() {
           </>
         ) : projectsData?.projects.length === 0 ? (
           !gitProviders || gitProviders.length === 0 ? (
+            // No git + no projects: let the Getting Started card above drive
+            // the user. Just show a minimal prompt so the grid isn't bare.
             <div className="col-span-full flex flex-col items-center justify-center rounded-lg border border-dashed p-8 text-center animate-in fade-in-50">
               <div className="flex h-20 w-20 items-center justify-center rounded-full bg-muted">
                 <GitBranch className="h-10 w-10 text-muted-foreground" />
               </div>
               <h2 className="mt-6 text-xl font-semibold">
-                No Git providers configured
+                Start by connecting a Git provider
               </h2>
               <p className="mt-2 text-center text-sm text-muted-foreground max-w-md">
-                Before creating projects, you need to set up a Git provider like
-                GitHub or GitLab to connect your repositories.
+                Link GitHub, GitLab, or Bitbucket above to deploy your first project.
               </p>
-              <div className="flex gap-3 mt-6">
-                <Button asChild>
-                  <Link
-                    to="/git-providers/add"
-                    className="flex items-center gap-2"
-                  >
-                    <GitBranch className="h-4 w-4" />
-                    Add Git Provider
-                  </Link>
-                </Button>
-                <Button asChild variant="outline">
-                  <Link to="/git-providers" className="flex items-center gap-2">
-                    View Providers
-                  </Link>
-                </Button>
-              </div>
             </div>
           ) : (
             <div className="col-span-full flex flex-col items-center justify-center rounded-lg border border-dashed p-8 text-center animate-in fade-in-50">
@@ -390,10 +390,10 @@ export function Projects() {
                 <FolderPlus className="h-10 w-10 text-muted-foreground" />
               </div>
               <h2 className="mt-6 text-xl font-semibold">
-                No projects created
+                Deploy your first project
               </h2>
               <p className="mt-2 text-center text-sm text-muted-foreground">
-                Get started by creating or importing your first project
+                Create a project from a Git repo or a Docker image.
               </p>
               <div className="flex gap-3 mt-6">
                 <CreateActionButton to="/projects/new" label="New Project" />
