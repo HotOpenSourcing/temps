@@ -458,11 +458,12 @@ impl TempsPlugin for AgentsPlugin {
 
             // Set up sandbox provider: try Docker first, fall back to local.
             //
-            // Image pre-build is intentionally deferred to a background task
-            // so the console API doesn't block on a Docker Hub pull (which
-            // can take minutes on first boot or slow networks). The provider
-            // is fully usable without a pre-built image — it will be built
-            // lazily on the first agent run if the warm-up hasn't finished.
+            // The sandbox image is NOT pulled or built at startup. Doing so —
+            // even in a background task — kicks off a GHCR pull and, if the
+            // tagged image isn't published yet, a multi-minute local Docker
+            // build on every boot. That work is deferred entirely to the
+            // first agent run: `create()` pulls/builds the image lazily the
+            // first time a sandbox is actually needed.
             let sandbox_provider: Arc<dyn SandboxProvider> =
                 match bollard::Docker::connect_with_local_defaults() {
                     Ok(docker) => {
@@ -477,20 +478,8 @@ impl TempsPlugin for AgentsPlugin {
                                     network_mode: global_sandbox.network_mode.clone(),
                                 };
                                 let provider = Arc::new(DockerSandboxProvider::new(docker, config));
-                                let warmup = provider.clone();
-                                tokio::spawn(async move {
-                                    if let Err(e) = warmup.ensure_image().await {
-                                        tracing::warn!(
-                                            "Background sandbox image warm-up failed: {} — \
-                                             image will be built on first agent run",
-                                            e
-                                        );
-                                    } else {
-                                        tracing::debug!("Sandbox image warm-up complete");
-                                    }
-                                });
                                 tracing::info!(
-                                    "Docker sandbox provider initialized (image warm-up running in background)"
+                                    "Docker sandbox provider initialized (image built on demand at first agent run)"
                                 );
                                 provider as Arc<dyn SandboxProvider>
                             }
