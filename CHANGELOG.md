@@ -8,10 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **`headerActions` console extension slot**: `ConsoleExtensions` now accepts a `headerActions?: ConsoleHeaderAction[]` array rendered top-right in the dashboard `Header` (via `@temps-sdk/console-kit`). Additive and backward-compatible — consoles that register no header actions are unchanged. This is the OSS-side hook the EE AI SRE Copilot header button plugs into.
+-
 
 ### Changed
 -
+
+### Fixed
+-
+
+
+## [0.1.0-beta.28] - 2026-06-08
+
+### Added
+- **`headerActions` console extension slot**: `ConsoleExtensions` now accepts a `headerActions?: ConsoleHeaderAction[]` array rendered top-right in the dashboard `Header` (via `@temps-sdk/console-kit`). Additive and backward-compatible — consoles that register no header actions are unchanged. This is the OSS-side hook the EE AI SRE Copilot header button plugs into.
 
 ### Fixed
 - **Duplicate backup runs eliminated**: `start_console_api` spawned its own backup scheduler loop in addition to the one `BackupPlugin` already starts during plugin initialization. With both loops running, each independently found every due `backup_schedules` row and enqueued a `Job::BackupRequested`, producing two completed backup runs per service at the same timestamp. The console-side scheduler is removed; the plugin is now the single owner.
