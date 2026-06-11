@@ -1059,13 +1059,13 @@ impl LoadBalancer {
     }
 
     fn is_https_request(&self, session: &PingoraSession) -> bool {
-        session
-            .req_header()
-            .headers
-            .get("x-forwarded-proto")
-            .and_then(|v| v.to_str().ok())
-            .map(|proto| proto == "https")
-            .unwrap_or_else(|| session.req_header().uri.scheme_str() == Some("https"))
+        // SECURITY (SEC-12): do NOT trust a client-supplied `X-Forwarded-Proto`.
+        // Pingora is the edge TLS terminator, so the only authoritative signal
+        // is whether this downstream connection actually has a TLS digest.
+        // Trusting the header let a client on the plain-HTTP listener spoof
+        // `https`, influencing Secure-cookie attributes and the proto we forward
+        // upstream.
+        self.is_tls_connection(session)
     }
 
     /// Check if the connection is a TLS connection by checking for SSL digest
@@ -1871,6 +1871,44 @@ impl LoadBalancer {
     }
 }
 
+/// Returns true when `host` (or its wildcard parent) has an active TLS
+/// certificate stored in the database. Used to make the HTTP→HTTPS redirect
+/// per-domain rather than a global toggle: redirect only when a cert exists,
+/// serve plain HTTP otherwise. Mirrors the wildcard lookup in `tls_cert_loader`.
+async fn host_has_active_cert(db: &DbConnection, host: &str) -> bool {
+    // Exact match
+    let exact = domains::Entity::find()
+        .filter(domains::Column::Domain.eq(host))
+        .filter(domains::Column::Status.eq("active"))
+        .filter(domains::Column::Certificate.is_not_null())
+        .one(db)
+        .await
+        .ok()
+        .flatten();
+    if exact.is_some() {
+        return true;
+    }
+
+    // Wildcard match: api.example.com → *.example.com
+    let parts: Vec<&str> = host.split('.').collect();
+    if parts.len() >= 2 {
+        let wildcard = format!("*.{}", parts[1..].join("."));
+        let wc = domains::Entity::find()
+            .filter(domains::Column::Domain.eq(&wildcard))
+            .filter(domains::Column::Status.eq("active"))
+            .filter(domains::Column::Certificate.is_not_null())
+            .one(db)
+            .await
+            .ok()
+            .flatten();
+        if wc.is_some() {
+            return true;
+        }
+    }
+
+    false
+}
+
 #[async_trait]
 impl ProxyHttp for LoadBalancer {
     type CTX = ProxyContext;
@@ -2506,6 +2544,38 @@ impl ProxyHttp for LoadBalancer {
                 let env_id = sleeping_info.environment_id;
                 let wake_timeout = sleeping_info.wake_timeout_seconds;
 
+                // Reserve a wake slot before parking this request. The wake path
+                // can hold the request for several seconds; cap how many requests
+                // may be parked here at once so an unauthenticated client that
+                // knows a sleeping hostname can't pin proxy worker tasks. Held for
+                // the duration of the wake + re-resolve via this guard.
+                let _wake_slot = match on_demand.try_acquire_wake_slot() {
+                    Some(permit) => permit,
+                    None => {
+                        warn!(
+                            environment_id = env_id,
+                            host = %ctx.host,
+                            "Wake path at capacity; returning retryable 503 without parking"
+                        );
+                        let mut response =
+                            ResponseHeader::build(StatusCode::SERVICE_UNAVAILABLE, None)?;
+                        response.insert_header("Retry-After", "2")?;
+                        response.insert_header("Cache-Control", "no-store")?;
+                        response.insert_header("X-Request-ID", &ctx.request_id)?;
+                        response.insert_header("Content-Type", "application/json")?;
+                        let body_bytes = Bytes::from(format!(
+                            r#"{{"status":"wake_pending","environment_id":{},"message":"Environment is starting, please retry"}}"#,
+                            env_id
+                        ));
+                        session
+                            .write_response_header(Box::new(response), false)
+                            .await?;
+                        session.write_response_body(Some(body_bytes), true).await?;
+                        ctx.routing_status = "wake_throttled".to_string();
+                        return Ok(true);
+                    }
+                };
+
                 // Block until the environment is fully awake (containers healthy)
                 match on_demand.wake_environment(env_id, wake_timeout).await {
                     Ok(()) => {
@@ -2514,11 +2584,84 @@ impl ProxyHttp for LoadBalancer {
                             "Environment woke up, waiting for route reload"
                         );
 
-                        // Wait for the route table to reload so resolve_context works
+                        // The woken environment was excluded from the route table
+                        // while sleeping, so we must wait for the in-process
+                        // reload (driven by Job::ForceRouteReload in do_wake)
+                        // before the request can resolve. wait_for_route_reload
+                        // is lost-wakeup-safe, but we still re-resolve in a
+                        // bounded loop afterwards so a route that lands a few
+                        // milliseconds late (or a missed signal) still serves THIS
+                        // first request instead of falling back to the console.
                         let reload_timeout = std::time::Duration::from_secs(10);
-                        let _ = on_demand.wait_for_route_reload(reload_timeout).await;
+                        let reloaded = on_demand.wait_for_route_reload(reload_timeout).await;
+                        if !reloaded {
+                            warn!(
+                                environment_id = env_id,
+                                "Route reload not observed within timeout after wake; \
+                                 re-resolving route directly"
+                            );
+                        }
 
-                        // Fall through to normal request handling — don't return Ok(true)
+                        // Bounded re-resolve loop: poll resolve_context until the
+                        // just-woken host is routable, or we exhaust the budget.
+                        // We only need to CONFIRM the route is live here — the
+                        // canonical resolve below does the actual context setup,
+                        // attack-mode checks, and activity recording.
+                        let resolve_deadline =
+                            std::time::Instant::now() + std::time::Duration::from_secs(5);
+                        let mut routable = self
+                            .project_context_resolver
+                            .resolve_context(&ctx.host)
+                            .await
+                            .is_some();
+                        while !routable && std::time::Instant::now() < resolve_deadline {
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            routable = self
+                                .project_context_resolver
+                                .resolve_context(&ctx.host)
+                                .await
+                                .is_some();
+                        }
+
+                        if routable {
+                            info!(
+                                environment_id = env_id,
+                                "Route resolved after wake, serving first request"
+                            );
+                            // Fall through to normal request handling (the
+                            // canonical resolve below now succeeds).
+                        } else {
+                            // Containers are awake but the route still isn't
+                            // resolvable. Do NOT fall through — that would route
+                            // the app's own domain to the console and serve a
+                            // confusing error. Return an explicit, retryable 503
+                            // so the client retries instead.
+                            error!(
+                                environment_id = env_id,
+                                host = %ctx.host,
+                                "Environment woke but route did not become resolvable; \
+                                 returning retryable wake_pending"
+                            );
+                            let mut response =
+                                ResponseHeader::build(StatusCode::SERVICE_UNAVAILABLE, None)?;
+                            response.insert_header("Retry-After", "2")?;
+                            response.insert_header("Cache-Control", "no-store")?;
+                            response.insert_header("X-Request-ID", &ctx.request_id)?;
+                            response.insert_header("Content-Type", "application/json")?;
+
+                            let body_bytes = Bytes::from(format!(
+                                r#"{{"status":"wake_pending","environment_id":{},"message":"Environment is starting, please retry"}}"#,
+                                env_id
+                            ));
+
+                            session
+                                .write_response_header(Box::new(response), false)
+                                .await?;
+                            session.write_response_body(Some(body_bytes), true).await?;
+
+                            ctx.routing_status = "wake_pending".to_string();
+                            return Ok(true);
+                        }
                     }
                     Err(e) => {
                         error!(
@@ -2870,10 +3013,21 @@ impl ProxyHttp for LoadBalancer {
             return Ok(true);
         }
 
-        // HTTP to HTTPS redirect for non-TLS connections
-        // This MUST come after ACME challenge handling to allow Let's Encrypt HTTP-01 validation
-        // Skip redirect when disable_https_redirect is set (e.g., local development)
-        if !self.disable_https_redirect && !self.is_tls_connection(session) {
+        // HTTP to HTTPS redirect for non-TLS connections.
+        // This MUST come after ACME challenge handling to allow Let's Encrypt HTTP-01 validation.
+        //
+        // Redirect is per-domain: we only redirect when the requesting host
+        // actually has an active TLS certificate in the database (exact match or
+        // wildcard parent). This means HTTP-only installs (sslip.io quick/local
+        // modes, no cert provisioned) never get redirected, while hosts that
+        // have gone through SSL provisioning get automatic HTTPS enforcement.
+        //
+        // `disable_https_redirect` is a global escape hatch (set by the service
+        // unit in local/testing mode) that bypasses the check entirely.
+        let needs_redirect = !self.disable_https_redirect
+            && !self.is_tls_connection(session)
+            && host_has_active_cert(self.db.as_ref(), &ctx.host).await;
+        if needs_redirect {
             // Build the HTTPS redirect URL preserving path and query string
             let redirect_url = if let Some(query) = &ctx.query_string {
                 format!(

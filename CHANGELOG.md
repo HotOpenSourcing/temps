@@ -8,17 +8,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- `temps migrate --dry-run` flag: previews pending migrations read-only without applying them
-- `temps migrate --yes`/`-y` flag: skips interactive confirmation gate (auto-skipped in non-TTY environments)
-- Live per-migration progress streaming: prints `→ [N/total] name` / `✓ [N/total] name (timing)` as each migration applies
-- `run_migrations_streaming` in `temps-database`: fires `Started`/`Finished` events per migration for caller progress callbacks
-- `get_pending_migration_names` helper in `temps-database`: read-only query of unapplied migration names
+-
 
 ### Changed
 -
 
 ### Fixed
+- **On-demand wake now waits for the app to actually accept connections, not just for Docker to report `Running`**: `ContainerLifecycleAdapter::is_container_healthy` (the readiness gate `do_wake` polls before completing a scale-to-zero wake) checked only `ContainerStatus::Running`, so a wake could finish before the application inside had bound its port — the first request would then be proxied to a not-yet-listening upstream and get a spurious 503. It now TCP-probes the container's lowest published host port on loopback after confirming `Running` (short timeout, treated as not-ready-yet on failure); the lowest port is chosen deterministically (Docker reports ports unordered), and containers with no published port fall back to the `Running` check. Scoped to local single-node containers (remote-node wake is tracked separately). Closes the last independent first-request 503 path on local on-demand environments (follow-up to the routing fix in v0.1.0-beta.30).
+
+
+## [0.1.0-beta.30] - 2026-06-10
+
+### Fixed
+- **On-demand (scale-to-zero) environments no longer 503 on the first request**: a sleeping environment is excluded from the proxy route table, so the first request must wake it and reload routes before it can be served. The wake path was the one caller still relying on fire-and-forget PostgreSQL `NOTIFY route_table_changes` (instead of the deterministic in-process `Job::ForceRouteReload` the deploy pipeline uses), did a single `resolve_context` with no retry, and treated a reload-wait timeout as success — so when the route hadn't reloaded yet the request fell back to the console upstream and the client saw a 503/404 for its own domain. `do_wake` now publishes `Job::ForceRouteReload` (in addition to the PG NOTIFY, kept for remote nodes — including on the no-containers path), `wait_for_route_reload` is lost-wakeup-safe and returns a real timeout signal, and the proxy re-resolves the route in a bounded loop after waking (returning an explicit retryable `503 wake_pending` rather than the console fallback). Concurrent requests parked in the wake path are capped with a semaphore to bound request-hold amplification in the proxy hot path.
+
+
+## [0.1.0-beta.29] - 2026-06-09
+
+### Added
+- **Historical deployment container logs**: runtime container logs used to vanish the moment a deployment was superseded and its containers were torn down — making it impossible to debug "what did the container that ran a few days ago actually print?". Now, just before a previous deployment's containers are stopped and removed (`MarkDeploymentCompleteJob::cancel_previous_deployments`), each container's logs are captured to a plain-text file under the data dir (via `LogService`) and recorded in a new `deployment_container_logs` table. New read endpoints `GET /api/projects/{project_id}/deployments/{deployment_id}/container-logs` (list) and `.../container-logs/{log_id}` (content), and a "Captured container logs" section on the deployment detail page, let you read the logs of a container that no longer exists (e.g. `web-2`). Capture is best-effort and tail-capped at 8 MiB — it never blocks or fails a deployment.
+- **`project_scope_guard!` and `deny_deployment_token!` auth macros** (`temps-auth`) plus `AuthContext::is_scoped_to_project`: the missing tenant-boundary primitive that confines a project-bound deployment token to its own project. `permission_guard!` proves a caller holds a permission; these prove the resource is theirs.
+
+### Changed
+-
+
+### Fixed
+- **Domain detail no longer renders a blank page for unclassifiable ACME challenges**: a domain whose `verification_method` was a value the UI had no branch for (legacy `acme`, `tls-alpn-01`, or null) showed an empty card while stuck in `challenge_requested`. The page now derives the effective method from the ACME order's `challenge_type` when the domain field is unrecognised, and falls back to a "Certificate challenge required" card (with create/verify/cancel actions and any pending challenge records) so the user is never stranded.
+- **SECURITY (CRITICAL): error-tracking admin API was completely unauthenticated**. Every handler in `temps-error-tracking` (`handler.rs`, `alert_rules_handler.rs`) took only `State`/`Path`/`Query` — no `RequireAuth`, no `permission_guard!`. An unauthenticated attacker could enumerate sequential project ids and read/modify every tenant's error groups, events, stack traces, and raw Sentry payloads (PII). All 14 handlers now require authentication (`ErrorTrackingRead`/`Write`/`Create`), are tenant-scoped, and authorize the path `project_id` against the caller. The DSN-authenticated Sentry ingest path was already correctly self-authenticating and is unchanged.
+- **SECURITY (HIGH): cross-project IDOR via `FullAccess` deployment tokens**. A deployment token is auto-injected into every deployed container, bound to one project, and typically carries `FullAccess` — which satisfies `permission_guard!` for *any* permission. Handlers across `temps-environments`, `temps-providers`, `temps-projects`, and `temps-analytics` trusted a `project_id`/service id from the request without checking it against the token's bound project, letting a compromised app read another tenant's secrets/env-var plaintext, DB connection strings, projects, and visitor PII — and modify/destroy them. All such handlers now call `project_scope_guard!` (or verify `project_services` linkage for shared external services, or deny deployment tokens on fleet-wide/by-id endpoints).
+- **SECURITY (HIGH): SSRF via self-hosted Git provider URL**. `GitProvidersCreate` (granted to ordinary users) synchronously probed `{base_url}/api/v4/user` on create, so a malicious `base_url`/`api_url` (e.g. `http://169.254.169.254`, `http://127.0.0.1`) was a live SSRF oracle into internal infrastructure. URLs are now validated with `temps_core::url_validation::validate_external_url` before use, and the GitHub/GitLab HTTP clients disable redirect following (closing the public-host→metadata 302 bypass).
+- **SECURITY (HIGH): unmasked DB credentials over the external-services API**. `get_service_environment_variables` returned plaintext `POSTGRES_URL`/`POSTGRES_PASSWORD` (`mask_sensitive: false`) to any owner; now only an admin receives unmasked values.
+- **SECURITY (MEDIUM): OTLP ingest logged the full bearer token** at `debug` level, writing live, mostly non-expiring credentials to logs whenever debug logging was enabled. It now logs only the auth scheme and length.
+- **SECURITY (LOW): proxy trusted a client-supplied `X-Forwarded-Proto`**. `is_https_request` now derives the scheme from the actual downstream TLS digest (`is_tls_connection`) instead of the spoofable header, so the `Secure` cookie attribute and the `X-Forwarded-Proto` forwarded upstream can't be influenced by the client.
+
+
+## [0.1.0-beta.28] - 2026-06-08
+
+### Added
+- **`headerActions` console extension slot**: `ConsoleExtensions` now accepts a `headerActions?: ConsoleHeaderAction[]` array rendered top-right in the dashboard `Header` (via `@temps-sdk/console-kit`). Additive and backward-compatible — consoles that register no header actions are unchanged. This is the OSS-side hook the EE AI SRE Copilot header button plugs into.
+
+### Fixed
+- **Duplicate backup runs eliminated**: `start_console_api` spawned its own backup scheduler loop in addition to the one `BackupPlugin` already starts during plugin initialization. With both loops running, each independently found every due `backup_schedules` row and enqueued a `Job::BackupRequested`, producing two completed backup runs per service at the same timestamp. The console-side scheduler is removed; the plugin is now the single owner.
+- **Null-SHA push events no longer create failed `0000000` deployments**: branch/tag deletions send the all-zeros Git null SHA (`0000…000`) in the push webhook's `after` field, which previously flowed through into a deployment whose `download_repo` job failed with `Failed to checkout ref 0000000…`. `handle_push_event` now short-circuits empty/all-zeros commits before any DB query or job enqueue (covers both GitHub and GitLab), and `checkout_ref` defensively rejects the null SHA with an actionable error.
+
+
+## [0.1.0-beta.27] - 2026-06-05
+
+### Added
+- `temps migrate --dry-run` flag: previews pending migrations read-only without applying them
+- `temps migrate --yes`/`-y` flag: skips interactive confirmation gate (auto-skipped in non-TTY environments)
+- Live per-migration progress streaming: prints `→ [N/total] name` / `✓ [N/total] name (timing)` as each migration applies
+- `run_migrations_streaming` in `temps-database`: fires `Started`/`Finished` events per migration for caller progress callbacks
+- `get_pending_migration_names` helper in `temps-database`: read-only query of unapplied migration names
+- **Effective metrics storage backend on the settings page**: `GET /api/settings` now returns the `monitoring` block (with the ClickHouse DSN masked to a `clickhouse_url_set` boolean) plus an `effective_metrics_store` field. The latter reconciles the `monitoring.store` toggle with the server's `TEMPS_CLICKHOUSE_*` configuration — so the Metrics Monitoring page shows the backend the runtime is *actually* using, and warns when ClickHouse is selected but its env vars aren't configured (the runtime silently falls back to TimescaleDB in that case). Previously the page rendered client-side defaults because the response omitted `monitoring` entirely.
+- **AI-agent pages endpoint** on proxy logs (`get_ai_agent_pages`): lists the pages a given AI crawler/agent visited, with input validation (empty agent rejected, unknown agent returns empty).
+- Command palette entries for Sandboxes, Build Limits, and Metrics Monitoring.
+
+### Changed
+- Sandbox image is now built **on demand only** (first agent run), never at startup. The agents plugin previously warmed up the image at boot and, when the prebuilt GHCR image wasn't published yet, fell through to a multi-minute local Docker build on every startup — bogging down the host before any agent run was requested.
+
+### Fixed
 - Chart tooltips stopped working after a `forwardRef` wrapper changed `ChartTooltip`'s component type identity; recharts matches tooltip children by type so the wrapped component was silently never registered. Reverted `ChartTooltip` to the raw `RechartsPrimitive.Tooltip`.
+- **Metrics settings save no longer wipes the ClickHouse DSN**: the update path now preserves the stored `clickhouse_url` when the masked payload omits it, so saving unrelated monitoring settings doesn't clear the DSN and trip the "clickhouse_url required when store is ClickHouse" validation.
+- **HTTP-01 certificate renewal**: HTTP-01 domains now renew through the order-based ACME flow (`acme_orders`) instead of the direct `renew_certificate` path, so a renewal that needs validation stays visible and recoverable in the certificate-management UI rather than leaving the domain stuck.
+- **Remote deployment hostnames**: remote (non-git-push) deployments built their slug from the environment slug, producing URLs like `<env>-<n>` that diverged from the git-push path. They now use the project slug so all deployment hostnames read `<project>-<n>`.
+- Runtime History log viewer now defaults to a 24h time range (was 1h).
+- Date-range picker preserves the user's time-of-day inputs across calendar clicks (react-day-picker normalizes selected days to local midnight, which previously wiped the time).
+- `DeploymentActivityGraph` day labels flex to the responsive square heights so they stay aligned at any width.
+- **Private registry credentials not forwarded on image pull**: `PullExternalImageJob` always passed `None` for auth to the Docker daemon's `create_image` call, so deployments of images from private registries failed with a 401 even when credentials were correctly configured in Settings → Docker Registry. Credentials are now fetched from `DockerRegistrySettings` at job construction time and forwarded via the `X-Registry-Auth` header when `docker_registry.enabled` is true.
 
 
 ## [0.1.0-beta.26] - 2026-06-03

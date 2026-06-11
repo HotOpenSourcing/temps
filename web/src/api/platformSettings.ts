@@ -111,8 +111,17 @@ export interface MonitoringSettings {
   retention_hourly_days: number
   /** Years of daily-aggregate data to keep. */
   retention_daily_years: number
-  /** ClickHouse DSN — only required when store is 'click_house'. */
-  clickhouse_url: string | null
+  /**
+   * True when a ClickHouse DSN is stored. The GET response masks the DSN
+   * itself (it may embed credentials), so reads only expose this boolean.
+   */
+  clickhouse_url_set?: boolean
+  /**
+   * ClickHouse DSN — only sent on writes when configuring ClickHouse. Never
+   * returned by the GET response (see `clickhouse_url_set`). The server
+   * preserves the stored DSN when this is omitted on an update.
+   */
+  clickhouse_url?: string | null
 }
 
 // Re-export the types from the API for consistency
@@ -134,6 +143,17 @@ export interface PlatformSettings extends AppSettings {
   attack_mode?: boolean
   build_limits: BuildLimitsSettings
   monitoring: MonitoringSettings
+  /**
+   * The storage backend the runtime is actually using for metrics, after
+   * reconciling `monitoring.store` with the server's `TEMPS_CLICKHOUSE_*`
+   * configuration. Differs from `monitoring.store` when ClickHouse is selected
+   * but its env vars aren't fully set (the runtime then falls back to
+   * TimescaleDB). Read-only — computed server-side.
+   */
+  effective_metrics_store?: MetricsStoreKind
+  /** Set to true by `temps setup` once initial configuration has been applied.
+   * The web onboarding wizard checks this and skips itself when true. */
+  setup_complete: boolean
 }
 
 /**
